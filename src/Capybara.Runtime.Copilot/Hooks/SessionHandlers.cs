@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Capybara.Contracts.Agents;
 using Capybara.Observability.Alerts;
 using Capybara.Policy.Gate;
 using Capybara.Policy.Provenance;
@@ -7,6 +8,7 @@ using Capybara.Runtime.Copilot.Configuration;
 using Capybara.Runtime.Copilot.Sessions;
 using GitHub.Copilot;
 using GitHub.Copilot.Rpc;
+using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 
 namespace Capybara.Runtime.Copilot.Hooks;
@@ -47,21 +49,32 @@ public sealed partial class SessionHandlers(
 
     /// <summary>
     /// <c>OnPreToolUse</c>: a call carrying a secret is denied outright (it could only be exfiltration of a leaked value,
-    /// FR-SAF-08); every other call goes through the layered policy gate.
+    /// FR-SAF-08); the task protocol tools of a session's own task are host-authorized; every other call goes through
+    /// the layered policy gate. Every decision is recorded on the turn as evidence (FR-OBS-06).
     /// </summary>
     public async Task<PreToolUseHookOutput> OnPreToolUseAsync(CapybaraSession session, PreToolUseHookInput input)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(input);
+        var turn = session.Turn;
 
         // Checked before the gate so no approval request is ever raised with the secret in its arguments.
         if (ContainsSecret(input.ToolArgs))
         {
             LogSecretInArguments(logger, input.ToolName, session.SessionId);
+            turn.RecordAction($"{input.ToolName}: denied (secret in arguments)");
             return Deny("the arguments contain a secret or credential; secrets must never be passed to tools");
         }
 
-        var call = new ToolCallContext(session.Agent, session.SessionId, input.ToolName, input.ToolArgs, session.TurnOrigin, session.Envelope.TraceId);
+        if (IsProtocolTool(session, input.ToolName))
+        {
+            // These only move data inside the session's own task tree; the coordinator authorizes and audits them.
+            Allow(session, input.ToolName);
+            turn.RecordAction($"{input.ToolName}: allowed (task protocol)");
+            return new PreToolUseHookOutput { PermissionDecision = "allow", PermissionDecisionReason = "task protocol" };
+        }
+
+        var call = new ToolCallContext(session.Agent, session.SessionId, input.ToolName, input.ToolArgs, session.TurnOrigin, session.Envelope.TraceId, session.DryRun);
         GateVerdict verdict;
         try
         {
@@ -72,13 +85,15 @@ public sealed partial class SessionHandlers(
 #pragma warning restore CA1031
         {
             LogGateFailure(logger, ex, input.ToolName);
+            turn.RecordAction($"{input.ToolName}: denied (policy gate unavailable)");
             return Deny("policy gate unavailable");
         }
 
         switch (verdict.Outcome)
         {
             case GateOutcome.Allow:
-                allowances.Grant(session.SessionId);
+                Allow(session, input.ToolName);
+                turn.RecordAction($"{input.ToolName}: allowed ({verdict.Layer})");
 
                 // Taint before the call runs, so parallel calls in the same turn are already judged as tainted.
                 if (IsUntrustedSource(session, input.ToolName))
@@ -89,11 +104,47 @@ public sealed partial class SessionHandlers(
                 return new PreToolUseHookOutput { PermissionDecision = "allow", PermissionDecisionReason = verdict.Reason };
 
             case GateOutcome.PendingApproval:
+                turn.RecordAction($"{input.ToolName}: waiting for approval");
+                if (verdict.Approval is { } approval)
+                {
+                    turn.RecordPendingApproval(approval.Id);
+                }
+
                 return Deny($"waiting for user approval ({verdict.Approval?.Id}); do not retry until the user has decided");
 
             default:
+                if (verdict.Layer == PolicyGate.DryRunLayer)
+                {
+                    turn.RecordDeniedApproval(input.ToolName);
+                }
+
+                turn.RecordAction($"{input.ToolName}: denied ({verdict.Layer})");
                 return Deny(verdict.Reason);
         }
+    }
+
+    /// <summary>
+    /// Wraps a host-invoked function so it only runs after the gate allowed a call to it in <paramref name="session"/>
+    /// (see <see cref="GatedFunction"/>). Used for broker tools.
+    /// </summary>
+    internal AIFunction GateInvocation(CapybaraSession session, AIFunction function) =>
+        new GatedFunction(function, session.SessionId, allowances);
+
+    /// <summary>
+    /// <c>complete_task</c> and <c>request_input</c> in the session of the task they act on, and <c>answer_task</c>
+    /// wherever the host offered it. Never in consults, which cannot own or delegate work.
+    /// </summary>
+    private static bool IsProtocolTool(CapybaraSession session, string tool) => session.Kind switch
+    {
+        SessionKind.Consult => false,
+        SessionKind.Task when session.TaskId is not null && FleetTools.TaskProtocol.Contains(tool, StringComparer.Ordinal) => true,
+        _ => tool == FleetTools.AnswerTask && SessionConfigFactory.AvailableToolsFor(session).Contains(FleetTools.AnswerTask, StringComparer.Ordinal),
+    };
+
+    private void Allow(CapybaraSession session, string tool)
+    {
+        allowances.Grant(session.SessionId);
+        allowances.GrantInvocation(session.SessionId, tool);
     }
 
     /// <summary>
@@ -110,6 +161,7 @@ public sealed partial class SessionHandlers(
         if (IsUntrustedSource(session, input.ToolName))
         {
             taint.MarkTainted(session.SessionId);
+            session.Turn.RecordSource(input.ToolName);
         }
 
         try

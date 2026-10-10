@@ -10,6 +10,9 @@
     <ProjectReference Include="..\Capybara.Observability\Capybara.Observability.csproj" />
     <ProjectReference Include="..\Capybara.Memory\Capybara.Memory.csproj" />
     <ProjectReference Include="..\Capybara.Orchestration\Capybara.Orchestration.csproj" />
+    <ProjectReference Include="..\Capybara.Scheduling\Capybara.Scheduling.csproj" />
+    <ProjectReference Include="..\Capybara.Channels\Capybara.Channels.csproj" />
+    <ProjectReference Include="..\Capybara.Connections\Capybara.Connections.csproj" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="GitHub.Copilot.SDK" />

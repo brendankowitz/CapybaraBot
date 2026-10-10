@@ -97,6 +97,32 @@ public sealed class CopilotRuntimeOptions
     /// <summary>Upper bound for one main-session turn.</summary>
     public TimeSpan TurnTimeout { get; set; } = TimeSpan.FromMinutes(20);
 
+    /// <summary>
+    /// How long the post-start self-test waits for the runtime to report its tools (they are null until tools
+    /// initialize). Running out fails the self-test, which pauses the agent (fail closed, FR-AGT-09).
+    /// </summary>
+    public TimeSpan SelfTestToolsTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    public TimeSpan SelfTestPollInterval { get; set; } = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>The agent that receives conversational-channel DMs (FR-CLI-04): the default front door.</summary>
+    public string FrontDoorAgent { get; set; } = "ea";
+
+    /// <summary>How long a root agent's <c>ask_user</c> waits for the human on the phone channel (FR-A2A-07).</summary>
+    public TimeSpan UserEscalationTimeout { get; set; } = TimeSpan.FromMinutes(30);
+
+    /// <summary>Cheap model for the tool-less reviewer session (FR-SAF-05).</summary>
+    public string ReviewerModel { get; set; } = "gpt-5-mini";
+
+    /// <summary>Upper bound for one review; running out escalates the call to a human.</summary>
+    public TimeSpan ReviewerTimeout { get; set; } = TimeSpan.FromSeconds(45);
+
+    /// <summary>Credit cap for one reviewer session.</summary>
+    public decimal ReviewerMaxCredits { get; set; } = 0.5m;
+
+    /// <summary>The reviewer's own CLI state, outside every agent's directories.</summary>
+    public string ReviewerDirectory => Path.Combine(StateRoot, "reviewer");
+
     public string AgentBaseDirectory(string agentId) => Path.Combine(StateRoot, "agents", agentId, "copilot");
 
     public string AgentWorkingDirectory(string agentId) => Path.Combine(StateRoot, "agents", agentId, "workspace");
