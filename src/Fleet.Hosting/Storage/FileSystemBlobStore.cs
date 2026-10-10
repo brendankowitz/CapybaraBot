@@ -14,23 +14,25 @@ public sealed class FileSystemBlobStore : IBlobStore
         Directory.CreateDirectory(_root);
     }
 
-    public async ValueTask<Stream?> OpenReadAsync(string path, CancellationToken cancellationToken = default)
+    public ValueTask<Stream?> OpenReadAsync(string path, CancellationToken cancellationToken = default)
     {
         var fullPath = Resolve(path, mustExist: false);
         if (!File.Exists(fullPath))
         {
-            return null;
+            return ValueTask.FromResult<Stream?>(null);
         }
 
         RejectSymlink(fullPath);
-        var memory = new MemoryStream();
-        await using (var file = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.Asynchronous))
+        try
         {
-            await file.CopyToAsync(memory, cancellationToken);
+            // Streamed, not buffered: backup archives can be larger than memory. FileShare.Delete lets a concurrent
+            // atomic WriteAsync replace the blob while a reader keeps its handle on the old content.
+            return ValueTask.FromResult<Stream?>(new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 81920, FileOptions.Asynchronous | FileOptions.SequentialScan));
         }
-
-        memory.Position = 0;
-        return memory;
+        catch (FileNotFoundException)
+        {
+            return ValueTask.FromResult<Stream?>(null);
+        }
     }
 
     public async ValueTask WriteAsync(string path, Stream content, CancellationToken cancellationToken = default)

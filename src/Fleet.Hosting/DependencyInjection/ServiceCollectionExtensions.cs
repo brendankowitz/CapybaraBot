@@ -4,6 +4,7 @@ using Fleet.Contracts.Storage;
 using Fleet.Hosting.Agents;
 using Fleet.Hosting.Backup;
 using Fleet.Hosting.Storage;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Fleet.Hosting.DependencyInjection;
@@ -11,10 +12,15 @@ namespace Fleet.Hosting.DependencyInjection;
 /// <summary>Registers Fleet.Hosting abstractions, host registry, stores, and optional backup worker (FR-HST-01, FR-HST-05, FR-HST-06).</summary>
 public static class ServiceCollectionExtensions
 {
-    public static IServiceCollection AddFleetHosting(this IServiceCollection services, HostingOptions options)
+    /// <summary>
+    /// Registers hosting services. Backup settings come from <see cref="HostingOptions.Backup"/>/<see cref="HostingOptions.BackupSchedule"/>
+    /// when set, otherwise from the <c>Fleet:Backup</c> section of <paramref name="configuration"/> (see <see cref="BackupConfiguration"/>).
+    /// </summary>
+    public static IServiceCollection AddFleetHosting(this IServiceCollection services, HostingOptions options, IConfiguration? configuration = null)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(options);
+        var bound = configuration is null ? null : BackupConfiguration.Bind(configuration);
 
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton<ICommandRunner, ProcessCommandRunner>();
@@ -50,11 +56,13 @@ public static class ServiceCollectionExtensions
             options.AgentHosts,
             options.DefaultHost));
 
-        if (options.Backup is not null)
+        if (options.Backup is not null || bound is not null)
         {
-            services.AddSingleton(options.Backup);
+            // Explicit options win over configuration. The blob store holds the archives, so it must never be archived itself.
+            var backup = options.Backup ?? bound!.Value.Options;
+            services.AddSingleton(backup with { ExcludedDirectories = [.. backup.ExcludedDirectories ?? [], options.BlobRoot] });
             services.AddSingleton<BackupService>();
-            services.AddSingleton(new BackupScheduleOptions(TimeSpan.FromHours(2)));
+            services.AddSingleton(options.BackupSchedule ?? bound?.Schedule ?? BackupScheduleOptions.Default);
             services.AddHostedService<BackupHostedService>();
         }
 

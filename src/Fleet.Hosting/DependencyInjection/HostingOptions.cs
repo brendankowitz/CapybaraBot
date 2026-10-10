@@ -21,4 +21,7 @@ public sealed class HostingOptions
     public IReadOnlyDictionary<string, AgentHostKind> AgentHosts { get; init; } = new Dictionary<string, AgentHostKind>(StringComparer.Ordinal);
 
     public BackupOptions? Backup { get; init; }
+
+    /// <summary>Daily backup time; defaults to 02:00 UTC when <see cref="Backup"/> or the <c>Fleet:Backup</c> section enables backups.</summary>
+    public BackupScheduleOptions? BackupSchedule { get; init; }
 }
