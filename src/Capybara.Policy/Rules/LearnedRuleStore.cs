@@ -24,11 +24,30 @@ public sealed class LearnedRuleStore(string path)
         return JsonSerializer.Deserialize<List<PolicyRule>>(File.ReadAllText(path), Json) ?? [];
     }
 
+    /// <summary>
+    /// Builds the engine for startup: configured rules plus the learned rules persisted by earlier runs, with every
+    /// future "Always allow" saved back. Without this, learned rules are lost on restart.
+    /// </summary>
+    public RulesEngine CreateEngine(IEnumerable<PolicyRule> configured)
+    {
+        var engine = new RulesEngine(configured, Load());
+        Attach(engine);
+        return engine;
+    }
+
     /// <summary>Saves the learned rules and subscribes to future additions.</summary>
     public void Attach(RulesEngine engine)
     {
         ArgumentNullException.ThrowIfNull(engine);
-        engine.RuleLearned += (_, _) => Save(engine.LearnedRules);
+
+        // Snapshot under the store lock so concurrent additions cannot write an older list over a newer one.
+        engine.RuleLearned += (_, _) =>
+        {
+            lock (_gate)
+            {
+                Save(engine.LearnedRules);
+            }
+        };
     }
 
     public void Save(IReadOnlyList<PolicyRule> rules)

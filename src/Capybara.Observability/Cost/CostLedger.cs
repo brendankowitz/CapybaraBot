@@ -7,15 +7,39 @@ namespace Capybara.Observability.Cost;
 /// <summary>
 /// Cost ledger built from <c>assistant.usage</c>, attributed per agent, routine, task and model (FR-OBS-02).
 /// <c>SessionLimits.MaxAiCredits</c> is soft, so this ledger is the host-side hard stop. Alerts fire once per
-/// threshold (50%, 80%, 100%) per month.
+/// threshold (50%, 80%, 100%) per month. With an <see cref="ICostLedgerStore"/> the ledger replays its history at
+/// construction, so spend and the hard stop survive a restart; threshold alerts already crossed before the restart are
+/// not re-sent. If persisting a record fails, it still counts in memory (the hard stop must hold) and the failure
+/// propagates to the caller.
 /// </summary>
-public sealed class CostLedger(IAlertSink alerts, TimeProvider time)
+public sealed class CostLedger
 {
+    private const string FleetScope = "fleet";
     private static readonly decimal[] Thresholds = [0.5m, 0.8m, 1.0m];
 
     private readonly ConcurrentDictionary<string, AgentBudget> _budgets = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<UsageRecord> _records = new();
     private readonly ConcurrentDictionary<string, byte> _firedThresholds = new(StringComparer.Ordinal);
+    private readonly IAlertSink _alerts;
+    private readonly TimeProvider _time;
+    private readonly ICostLedgerStore? _store;
+    private int _needsPriming;
+
+    public CostLedger(IAlertSink alerts, TimeProvider time, ICostLedgerStore? store = null)
+    {
+        _alerts = alerts;
+        _time = time;
+        _store = store;
+        if (store is not null)
+        {
+            foreach (var record in store.Load())
+            {
+                _records.Enqueue(record);
+            }
+
+            _needsPriming = _records.IsEmpty ? 0 : 1;
+        }
+    }
 
     public decimal FleetMonthlyLimit { get; set; } = 7_000m;
 
@@ -26,19 +50,24 @@ public sealed class CostLedger(IAlertSink alerts, TimeProvider time)
     public async ValueTask RecordAsync(UsageRecord usage, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(usage);
+        PrimeFiredAlerts();
         _records.Enqueue(usage);
+        if (_store is not null)
+        {
+            await _store.AppendAsync(usage, cancellationToken);
+        }
 
         var status = GetStatus(usage.Agent);
         await RaiseThresholdAlertsAsync(usage.Agent.Value, status.MonthlyFraction, cancellationToken);
 
         var fleetFraction = FleetMonthlyLimit <= 0 ? 1 : SpentThisMonth(null) / FleetMonthlyLimit;
-        await RaiseThresholdAlertsAsync("fleet", fleetFraction, cancellationToken);
+        await RaiseThresholdAlertsAsync(FleetScope, fleetFraction, cancellationToken);
 
         if (status.SpentToday >= status.DailyLimit)
         {
             await PublishOnceAsync(
-                $"daily:{usage.Agent}:{Today:yyyyMMdd}",
-                new Alert("budget.daily", AlertSeverity.Critical, $"{usage.Agent} hit its daily budget; hard stop until tomorrow.", time.GetUtcNow(), usage.Agent),
+                DailyKey(usage.Agent.Value),
+                new Alert("budget.daily", AlertSeverity.Critical, $"{usage.Agent} hit its daily budget; hard stop until tomorrow.", _time.GetUtcNow(), usage.Agent),
                 cancellationToken);
         }
     }
@@ -64,7 +93,7 @@ public sealed class CostLedger(IAlertSink alerts, TimeProvider time)
             .GroupBy(r => r.RoutineId!, StringComparer.Ordinal)
             .ToDictionary(g => g.Key, g => g.Sum(r => r.Credits), StringComparer.Ordinal);
 
-    private DateOnly Today => DateOnly.FromDateTime(time.GetUtcNow().UtcDateTime);
+    private DateOnly Today => DateOnly.FromDateTime(_time.GetUtcNow().UtcDateTime);
 
     private decimal SpentToday(string agent) =>
         _records.Where(r => r.Agent.Value == agent && DateOnly.FromDateTime(r.At.UtcDateTime) == Today).Sum(r => r.Credits);
@@ -74,8 +103,44 @@ public sealed class CostLedger(IAlertSink alerts, TimeProvider time)
 
     private bool IsThisMonth(DateTimeOffset at)
     {
-        var now = time.GetUtcNow();
+        var now = _time.GetUtcNow();
         return at.UtcDateTime.Year == now.UtcDateTime.Year && at.UtcDateTime.Month == now.UtcDateTime.Month;
+    }
+
+    private string DailyKey(string agent) => $"daily:{agent}:{Today:yyyyMMdd}";
+
+    private string MonthlyKey(string scope, decimal threshold) => $"monthly:{scope}:{_time.GetUtcNow():yyyyMM}:{threshold}";
+
+    /// <summary>
+    /// After a restart, marks every alert the replayed history had already crossed as fired so it is not sent twice.
+    /// Runs once, lazily, so budgets configured after construction are honoured.
+    /// </summary>
+    private void PrimeFiredAlerts()
+    {
+        if (Interlocked.Exchange(ref _needsPriming, 0) == 0)
+        {
+            return;
+        }
+
+        foreach (var agent in _records.Where(r => IsThisMonth(r.At)).Select(r => r.Agent).Distinct())
+        {
+            var status = GetStatus(agent);
+            MarkCrossed(agent.Value, status.MonthlyFraction);
+            if (status.SpentToday >= status.DailyLimit)
+            {
+                _firedThresholds.TryAdd(DailyKey(agent.Value), 0);
+            }
+        }
+
+        MarkCrossed(FleetScope, FleetMonthlyLimit <= 0 ? 1 : SpentThisMonth(null) / FleetMonthlyLimit);
+    }
+
+    private void MarkCrossed(string scope, decimal fraction)
+    {
+        foreach (var threshold in Thresholds.Where(t => fraction >= t))
+        {
+            _firedThresholds.TryAdd(MonthlyKey(scope, threshold), 0);
+        }
     }
 
     private async ValueTask RaiseThresholdAlertsAsync(string scope, decimal fraction, CancellationToken cancellationToken)
@@ -84,8 +149,8 @@ public sealed class CostLedger(IAlertSink alerts, TimeProvider time)
         {
             var severity = threshold >= 1.0m ? AlertSeverity.Critical : AlertSeverity.Warning;
             await PublishOnceAsync(
-                $"monthly:{scope}:{time.GetUtcNow():yyyyMM}:{threshold}",
-                new Alert("budget.monthly", severity, $"{scope} reached {threshold:P0} of its monthly credit budget.", time.GetUtcNow(), scope == "fleet" ? null : scope),
+                MonthlyKey(scope, threshold),
+                new Alert("budget.monthly", severity, $"{scope} reached {threshold:P0} of its monthly credit budget.", _time.GetUtcNow(), scope == FleetScope ? null : scope),
                 cancellationToken);
         }
     }
@@ -94,7 +159,7 @@ public sealed class CostLedger(IAlertSink alerts, TimeProvider time)
     {
         if (_firedThresholds.TryAdd(key, 0))
         {
-            await alerts.PublishAsync(alert, cancellationToken);
+            await _alerts.PublishAsync(alert, cancellationToken);
         }
     }
 }
