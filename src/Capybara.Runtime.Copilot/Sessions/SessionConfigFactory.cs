@@ -92,6 +92,7 @@ public sealed partial class SessionConfigFactory(
     /// The reviewer's session (FR-SAF-05): no tools of any kind, no MCP servers, skills or memory, every permission and
     /// tool call refused, and nothing ever asked of a human. Its spend is charged to <paramref name="reviewed"/>.
     /// </summary>
+#pragma warning disable GHCP001 // GitHubTokenProvider, SessionLimits and PermissionDecision are evaluation-only; the reviewer needs all three.
     public SessionConfig CreateReviewerConfig(string sessionId, string model, AgentId reviewed)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
@@ -130,6 +131,7 @@ public sealed partial class SessionConfigFactory(
             SessionLimits = new SessionLimitsConfig { MaxAiCredits = (double)SdkSessionLimit(options.ReviewerMaxCredits) },
         };
     }
+#pragma warning restore GHCP001
 
     /// <summary>
     /// The tools the session may see, source-qualified as <c>AvailableTools</c> expects: agent-to-agent tools are removed
@@ -193,6 +195,7 @@ public sealed partial class SessionConfigFactory(
         return [.. hostTools, .. gated.Select(t => handlers.GateInvocation(session, t))];
     }
 
+#pragma warning disable GHCP001 // GitHubTokenProvider (FR-SAF-08) and SessionLimits (soft credit backstop) are evaluation-only.
     private T Apply<T>(T config, CapybaraSession session, SessionSecrets resolved, IReadOnlyList<AIFunction> brokerTools)
         where T : SessionConfigBase
     {
@@ -235,6 +238,7 @@ public sealed partial class SessionConfigFactory(
         ApplySkills(config, agent);
         return config;
     }
+#pragma warning restore GHCP001
 
     /// <summary>
     /// Tiered, pinned and scanned skills only (FR-SKL-01, FR-SKL-04); bodies load on demand (FR-SKL-02).
@@ -283,14 +287,17 @@ public sealed partial class SessionConfigFactory(
     /// inbox. Consult and task sessions are never exported. Always set explicitly, because the setting is not persisted
     /// across resume.
     /// </summary>
+#pragma warning disable GHCP001 // RemoteSessionMode is evaluation-only; it must be set explicitly on every build (FR-CLI-08).
     private static RemoteSessionMode RemoteSessionFor(CapybaraSession session) =>
         session.Kind == SessionKind.Main && session.Agent.EnableRemoteSessions ? RemoteSessionMode.Export : RemoteSessionMode.Off;
+#pragma warning restore GHCP001
 
     /// <summary>
     /// Supplies the GitHub token to the session over RPC, so it never sits in the CLI's environment where child
     /// processes inherit it (FR-SAF-08). The runtime asks again when the advertised lifetime runs out; the current
     /// option value is read each time, so a rotated token is picked up. The token is also registered with the redactor.
     /// </summary>
+#pragma warning disable GHCP001 // The session-scoped token provider is evaluation-only; it keeps the token out of child environments (FR-SAF-08).
     private Func<GitHubTokenProviderArgs, Task<GitHubTokenProviderResult>>? GitHubTokenProvider()
     {
         if (options.GitHubToken is not { Length: > 0 } token)
@@ -316,6 +323,7 @@ public sealed partial class SessionConfigFactory(
             return Task.FromResult(GitHubTokenProviderResult.FromToken(new GitHubToken { AccessToken = current, ExpiresIn = GitHubTokenLifetimeSeconds }));
         };
     }
+#pragma warning restore GHCP001
 
     /// <summary>FR-SAF-01 layer 1: the runtime enforces static deny/ask itself, as defense in depth.</summary>
     private ManagedSettings ManagedSettingsFor(AgentDefinition agent)

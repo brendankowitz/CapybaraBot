@@ -1,6 +1,7 @@
 using Capybara.Contracts.Agents;
 using Capybara.Contracts.Messaging;
 using Capybara.Contracts.Tasks;
+using Capybara.Orchestration.Coordination;
 using Capybara.Testing;
 
 namespace Capybara.Orchestration.Tests;
@@ -91,6 +92,44 @@ public sealed class A2ALimitsTests
 
         Assert.Equal(FleetTaskState.Failed, task!.State);
         Assert.Equal("its budget is exhausted", task.FailureReason);
+    }
+
+    [Fact]
+    public async Task Message_ping_pong_limits_under_a_main_session_root_survive_a_restart()
+    {
+        using var f = Fleet();
+        var root = f.Root("ea");
+        for (var i = 0; i < 2; i++)
+        {
+            Assert.True((await f.Coordinator.SendMessageAsync(Ea, SessionIds.Main(Ea), root, Research, $"ping {i}", Ct)).Success);
+        }
+
+        // The replies continue the same chain (root task) from research's side.
+        var reply = f.Root("research") with { RootTaskId = root.RootTaskId };
+        using var restarted = f.NewCoordinator();
+        for (var i = 0; i < 2; i++)
+        {
+            Assert.True((await restarted.SendMessageAsync(Research, SessionIds.Main(Research), reply, Ea, $"pong {i}", Ct)).Success);
+        }
+
+        var fifth = await restarted.SendMessageAsync(Ea, SessionIds.Main(Ea), root, Research, "ping again", Ct);
+
+        Assert.False(fifth.Success);
+        Assert.Contains("involve the user", fifth.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Exchange_counts_idle_past_the_retention_are_forgotten()
+    {
+        var time = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        var ledger = new ExchangeLedger(time, TimeSpan.FromHours(1));
+
+        Assert.Equal(1, ledger.Count("root:a|b"));
+        Assert.Equal(2, ledger.Count("root:a|b"));
+        time.Advance(TimeSpan.FromHours(2));
+
+        Assert.Equal(1, ledger.Count("root:a|b"));
+        Assert.Equal(6, ledger.Count("root:a|b", persisted: 5));
     }
 
     [Fact]

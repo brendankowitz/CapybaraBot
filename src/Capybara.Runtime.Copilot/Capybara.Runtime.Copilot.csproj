@@ -1,7 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <!-- GHCP001: PermissionDecision is marked evaluation-only, but it is the only fail-closed permission API. -->
-    <NoWarn>$(NoWarn);GHCP001</NoWarn>
     <Description>Per-agent GitHub Copilot SDK runtime: Empty mode, isolated BaseDirectory, re-registration on resume, supervision.</Description>
   </PropertyGroup>
   <ItemGroup>

@@ -270,6 +270,7 @@ public sealed partial class SessionHandlers(
     /// Explicit, fail-closed permission handler. Never <c>ApproveAll</c>: a request is approved once only if the gate
     /// just allowed the corresponding tool call.
     /// </summary>
+#pragma warning disable GHCP001 // PermissionDecision is evaluation-only, but it is the SDK's only fail-closed permission API.
     public Task<PermissionDecision> OnPermissionRequestAsync(CapybaraSession session, PermissionRequest request)
     {
         ArgumentNullException.ThrowIfNull(session);
@@ -277,6 +278,7 @@ public sealed partial class SessionHandlers(
             ? PermissionDecision.ApproveOnce()
             : PermissionDecision.Reject("not authorized by fleet policy"));
     }
+#pragma warning restore GHCP001
 
     /// <summary><c>ask_user</c> goes to the escalation path instead of a terminal prompt.</summary>
     public async Task<UserInputResponse> OnUserInputRequestAsync(CapybaraSession session, UserInputRequest request)
@@ -294,6 +296,7 @@ public sealed partial class SessionHandlers(
     /// the user as if it came from the fleet). URL elicitations are always declined: no server may steer the user to a
     /// link (OAuth consent goes through the broker instead).
     /// </summary>
+#pragma warning disable GHCP001 // UIElicitationResponseAction is evaluation-only; it is the only way to answer an elicitation.
     public async Task<ElicitationResult> OnElicitationRequestAsync(CapybaraSession session, ElicitationContext context)
     {
         ArgumentNullException.ThrowIfNull(session);
@@ -339,6 +342,7 @@ public sealed partial class SessionHandlers(
             Content = new Dictionary<string, object> { [field] = answer },
         };
     }
+#pragma warning restore GHCP001
 
     /// <summary>Tools configured as untrusted, and every tool of an MCP server marked untrusted.</summary>
     private bool IsUntrustedSource(CapybaraSession session, string tool) =>

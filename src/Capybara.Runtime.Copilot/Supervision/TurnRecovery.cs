@@ -32,6 +32,7 @@ public sealed record TurnRecovery(TurnRecoveryState State, string? InteractionId
     /// <summary>The user must check something: the turn was cut off, or tool calls never reported completion.</summary>
     public bool NeedsAttention => State == TurnRecoveryState.Interrupted || UnfinishedTools.Count > 0;
 
+#pragma warning disable GHCP001 // ParentToolCallId is deprecated but is the only way to tell sub-agent events from the root run in 1.0.19.
     public static TurnRecovery Analyze(IReadOnlyList<SessionEvent> events)
     {
         ArgumentNullException.ThrowIfNull(events);
@@ -101,4 +102,5 @@ public sealed record TurnRecovery(TurnRecoveryState State, string? InteractionId
             ? new TurnRecovery(TurnRecoveryState.Completed, interaction, [])
             : new TurnRecovery(TurnRecoveryState.Interrupted, interaction, [.. openTools.Values.Order(StringComparer.Ordinal)]);
     }
+#pragma warning restore GHCP001
 }

@@ -15,8 +15,8 @@ public sealed class A2AOptions
     public Contracts.Messaging.Budget DefaultConsultBudget { get; set; } = new(2m, 20, TimeSpan.FromSeconds(90));
 
     /// <summary>
-    /// How long an idle per-pair exchange count is remembered in memory. Counts for delegated tasks are also kept in the
-    /// task record, so they survive restarts and pruning.
+    /// How long an idle per-pair exchange count is remembered (<see cref="ExchangeLedger"/>). Counts for delegated tasks
+    /// are also kept in the task record.
     /// </summary>
     public TimeSpan ExchangeRetention { get; set; } = TimeSpan.FromHours(24);
 }

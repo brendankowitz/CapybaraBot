@@ -445,7 +445,9 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
             return;
         }
 
+#pragma warning disable GHCP001 // SetToolsAsync is evaluation-only; it is the only way to change a live session's custom tools (verified live).
         await session.SetToolsAsync([.. await _configs.BuildToolsAsync(context, cancellationToken)], cancellationToken);
+#pragma warning restore GHCP001
         _mainToolsAtMaxDepth = atMax;
     }
 

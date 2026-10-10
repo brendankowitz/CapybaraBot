@@ -15,6 +15,9 @@ namespace Capybara.Runtime.Copilot.Usage;
 /// hard stop sees spend during a run. The routine executor reports the same credits back with
 /// <c>CreditsLedgered</c> set, and the dispatcher keeps them for history without recording them again. The turn record
 /// also enforces the turn's own credit limit (a routine's per-run budget), which lets the runtime abort an overspending run.
+/// <para>Known gap: if a run cannot be stopped and its session is discarded, usage events that arrive after the session
+/// object is disposed are no longer delivered, so that tail of spend is not recorded. The ledger's daily and monthly stop
+/// still sees everything recorded before, and the abort timeout bounds the window.</para>
 /// </remarks>
 public sealed partial class UsageCapture(CostLedger ledger, TimeProvider time, ILogger<UsageCapture> logger)
 {
@@ -24,6 +27,7 @@ public sealed partial class UsageCapture(CostLedger ledger, TimeProvider time, I
     /// </summary>
     public const decimal NanoAiuPerCredit = 1_000_000_000m;
 
+#pragma warning disable GHCP001 // AssistantUsageData.Cost is evaluation-only; it is the fallback when nano-AIU is absent.
     public static decimal CreditsFrom(AssistantUsageData data)
     {
         ArgumentNullException.ThrowIfNull(data);
@@ -34,6 +38,7 @@ public sealed partial class UsageCapture(CostLedger ledger, TimeProvider time, I
 
         return data.Cost is { } cost and > 0 ? (decimal)cost : 0m;
     }
+#pragma warning restore GHCP001
 
     public UsageRecord? ToRecord(CapybaraSession session, SessionEvent sessionEvent)
     {

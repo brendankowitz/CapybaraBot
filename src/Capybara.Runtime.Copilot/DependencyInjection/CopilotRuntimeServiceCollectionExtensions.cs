@@ -59,6 +59,12 @@ public static class CopilotRuntimeServiceCollectionExtensions
         // FR-A2A-11: one fleet-wide slot pool, shared with the coordinator (which takes it as an optional dependency).
         services.TryAddSingleton(sp => new SessionLimiter(sp.GetRequiredService<A2AOptions>()));
 
+        // FR-A2A-11: per-pair exchange counts survive restarts; the coordinator takes the ledger as an optional dependency.
+        services.TryAddSingleton(sp => new ExchangeLedger(
+            sp.GetRequiredService<TimeProvider>(),
+            sp.GetRequiredService<A2AOptions>().ExchangeRetention,
+            Path.Combine(runtimeOptions.StateRoot, "a2a", "exchanges.json")));
+
         // Memory goes through IMemoryStore (FR-MEM-12); composed over the wiki unless the host registered its own.
         services.TryAddSingleton(sp => new CompositeMemoryStore(
             sp.GetRequiredService<WikiStore>(),

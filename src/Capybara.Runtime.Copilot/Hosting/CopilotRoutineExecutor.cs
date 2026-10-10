@@ -22,7 +22,9 @@ namespace Capybara.Runtime.Copilot.Hosting;
 /// The run's usage is written to the cost ledger live by <see cref="Usage.UsageCapture"/> (so the hard stop sees it);
 /// the result reports the same credits with <c>CreditsLedgered</c> set, so the dispatcher does not record them again.
 /// The routine's per-run budget is the turn's credit limit: a run that passes it is aborted and reported as
-/// <see cref="RoutineExecutionStatus.OverBudget"/>.
+/// <see cref="RoutineExecutionStatus.OverBudget"/>. When a user DM joins a heartbeat (FR-AGT-05), the CLI processes both
+/// in one run whose usage cannot be split, so all of it is attributed to the routine; only the DM's own reply turn is
+/// attributed to the user.
 /// </remarks>
 public sealed partial class CopilotRoutineExecutor(AgentRuntimePool runtimes, CopilotRuntimeOptions options, ILogger<CopilotRoutineExecutor> logger) : IRoutineExecutor
 {

@@ -33,7 +33,9 @@ internal sealed class CoordinatorFixture : IDisposable
     public SessionLimiter Sessions => _sessions ??= new SessionLimiter(Options);
 
     /// <summary>A coordinator over the same stores, as after a restart.</summary>
-    public A2ACoordinator NewCoordinator() => new(Registry, Envelopes, Inbox, Tasks, Thread, Taint, KillSwitch, Audit, Executor, Options, Time, Sessions);
+    public A2ACoordinator NewCoordinator() => new(Registry, Envelopes, Inbox, Tasks, Thread, Taint, KillSwitch, Audit, Executor, Options, Time, Sessions, new ExchangeLedger(Time, Options.ExchangeRetention, ExchangesPath));
+
+    public string ExchangesPath => Path.Combine(_dir.Path, "a2a", "exchanges.json");
 
     public FakeTimeProvider Time { get; } = new(new DateTimeOffset(2026, 10, 10, 12, 0, 0, TimeSpan.Zero));
 

@@ -35,8 +35,7 @@ public sealed class A2ACoordinator : IDisposable
     private readonly SessionLimiter _sessions;
     private readonly bool _ownsSessions;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _consultsPerAgent = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, Exchange> _exchanges = new(StringComparer.Ordinal);
-    private long _lastPrune;
+    private readonly ExchangeLedger _exchanges;
 
     public A2ACoordinator(
         AgentRegistry registry,
@@ -50,7 +49,8 @@ public sealed class A2ACoordinator : IDisposable
         IAgentTurnExecutor executor,
         A2AOptions options,
         TimeProvider time,
-        SessionLimiter? sessions = null)
+        SessionLimiter? sessions = null,
+        ExchangeLedger? exchanges = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(registry);
@@ -67,6 +67,7 @@ public sealed class A2ACoordinator : IDisposable
         _time = time;
         _ownsSessions = sessions is null;
         _sessions = sessions ?? new SessionLimiter(options);
+        _exchanges = exchanges ?? new ExchangeLedger(time, options.ExchangeRetention);
         registry.Changed += OnRegistryChanged;
     }
 
@@ -565,35 +566,12 @@ public sealed class A2ACoordinator : IDisposable
 
     /// <summary>
     /// Counts one more exchange between two agents under a root task and returns the new count (FR-A2A-11).
-    /// <paramref name="persisted"/> is the count kept in a task record, so a restart cannot reset the limit.
+    /// <paramref name="persisted"/> is the count kept in a task record; the ledger itself also persists across restarts.
     /// </summary>
     private int CountExchange(string rootTaskId, AgentId a, AgentId b, int persisted = 0)
     {
         var (first, second) = string.CompareOrdinal(a.Value, b.Value) < 0 ? (a, b) : (b, a);
-        var now = _time.GetUtcNow();
-        PruneExchanges(now);
-        return _exchanges.AddOrUpdate(
-            $"{rootTaskId}:{first}|{second}",
-            _ => new Exchange(persisted + 1, now),
-            (_, current) => new Exchange(Math.Max(current.Count, persisted) + 1, now)).Count;
-    }
-
-    /// <summary>At most once a minute, forgets pair counts idle for longer than the retention.</summary>
-    private void PruneExchanges(DateTimeOffset now)
-    {
-        var last = Interlocked.Read(ref _lastPrune);
-        if (now.UtcTicks - last < TimeSpan.TicksPerMinute || Interlocked.CompareExchange(ref _lastPrune, now.UtcTicks, last) != last)
-        {
-            return;
-        }
-
-        foreach (var (key, exchange) in _exchanges)
-        {
-            if (now - exchange.Touched > _options.ExchangeRetention)
-            {
-                _exchanges.TryRemove(KeyValuePair.Create(key, exchange));
-            }
-        }
+        return _exchanges.Count($"{rootTaskId}:{first}|{second}", persisted);
     }
 
     /// <summary>Consult slots of removed agents are dropped (not disposed: a consult that already passed may still hold one).</summary>
@@ -645,8 +623,6 @@ public sealed class A2ACoordinator : IDisposable
         await _audit.AppendAsync(new AuditRecord("a2a.task", "failed", task.Owner, SessionIds.Task(task.Owner, task.Id), Detail: $"task {task.Id}: {reason}", TraceId: task.Envelope.TraceId), CancellationToken.None);
         return failed;
     }
-
-    private sealed record Exchange(int Count, DateTimeOffset Touched);
 
     /// <summary>Model-supplied ids that are not task ids address nothing.</summary>
     private async ValueTask<FleetTask?> LoadTaskAsync(string taskId, CancellationToken cancellationToken) =>
