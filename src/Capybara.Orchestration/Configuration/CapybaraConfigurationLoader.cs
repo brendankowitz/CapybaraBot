@@ -390,18 +390,27 @@ public static class CapybaraConfigurationLoader
     internal static bool TryParseDuration(string value, out TimeSpan duration)
     {
         duration = default;
-        if (value.Length < 2 || !double.TryParse(value[..^1], NumberStyles.Float, CultureInfo.InvariantCulture, out var amount) || amount <= 0)
+        if (value.Length < 2 || !double.TryParse(value[..^1], NumberStyles.Float, CultureInfo.InvariantCulture, out var amount)
+            || !double.IsFinite(amount) || amount <= 0)
         {
             return false;
         }
 
-        TimeSpan? parsed = value[^1] switch
+        TimeSpan? parsed;
+        try
         {
-            'm' => TimeSpan.FromMinutes(amount),
-            'h' => TimeSpan.FromHours(amount),
-            'd' => TimeSpan.FromDays(amount),
-            _ => null,
-        };
+            parsed = value[^1] switch
+            {
+                'm' => TimeSpan.FromMinutes(amount),
+                'h' => TimeSpan.FromHours(amount),
+                'd' => TimeSpan.FromDays(amount),
+                _ => null,
+            };
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
 
         duration = parsed ?? default;
         return parsed is not null;

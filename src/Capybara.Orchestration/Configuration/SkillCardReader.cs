@@ -12,6 +12,7 @@ internal static class SkillCardReader
 {
     private static readonly IDeserializer Yaml = new DeserializerBuilder()
         .WithNamingConvention(CamelCaseNamingConvention.Instance)
+        .WithDuplicateKeyChecking()
         .IgnoreUnmatchedProperties()
         .Build();
 

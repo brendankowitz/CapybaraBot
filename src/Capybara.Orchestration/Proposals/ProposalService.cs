@@ -49,6 +49,9 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
     /// <summary>Longest agent-supplied value copied into an audit line.</summary>
     private const int MaxAuditValue = 64;
 
+    /// <summary>Longest parser message (which can quote agent input) echoed in a rejection.</summary>
+    private const int MaxEchoedError = 256;
+
     private readonly SemaphoreSlim _lock = new(1, 1);
 
     /// <summary>Raised after a proposal is recorded, so it can be pushed to the approval inbox.</summary>
@@ -85,12 +88,21 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
             {
                 proposal = await CreateAsync(agent, kind, name, content, rationale, cancellationToken);
             }
-            catch (ProposalRejectedException ex)
+            catch (Exception ex) when (ex is ProposalRejectedException or YamlException or FormatException or OverflowException)
             {
+                // Backstop for the contract above: a parser or converter that fails on agent input without a specific
+                // check is still a rejection, audited like any other, never an unaudited exception.
+                var rejection = ex as ProposalRejectedException
+                    ?? new ProposalRejectedException($"The proposal could not be parsed: {Clip(ex.Message, MaxEchoedError)}", ex);
                 await audit.AppendAsync(
-                    new AuditRecord(AuditKind, "proposal_rejected", agent.Value, Detail: $"{kind} {Clip(name)}: {Clip(ex.Message, 512)}"),
+                    new AuditRecord(AuditKind, "proposal_rejected", agent.Value, Detail: $"{kind} {Clip(name)}: {Clip(rejection.Message, 512)}"),
                     cancellationToken);
-                throw;
+                if (rejection == ex)
+                {
+                    throw;
+                }
+
+                throw rejection;
             }
 
             if (kind == ProposalKind.Skill)
@@ -445,6 +457,17 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
 
         var routine = ParsePlainMapping(content, "routine");
         CheckScalars(routine, "routine");
+
+        // Unlike the other kinds, a routine is re-serialized from its decoded values, and a folded ('>') scalar's
+        // lines are joined by then. Say so here rather than reject the resulting file's line.
+        foreach (var scalar in routine.AllNodes.OfType<YamlScalarNode>())
+        {
+            if (scalar.Value?.Split('\n').Any(line => line.Length > MaxLineLength) == true)
+            {
+                throw new ProposalRejectedException(
+                    $"A value in the proposed routine has a line longer than {MaxLineLength} characters once folded; routine text that long must be split across lines in a literal '|' block scalar.");
+            }
+        }
         if (YamlEditor.GetScalar(routine, "id") != name)
         {
             throw new ProposalRejectedException($"The routine's id must be '{name}'.");
@@ -465,15 +488,18 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
             throw new ProposalRejectedException("A skill proposal needs a name of lower-case letters, digits and dashes.");
         }
 
-        if (!SkillCardReader.TryReadFrontmatter(content, out var front) || front.Name != name)
+        var nameMismatch = $"The skill's frontmatter name must be '{name}', matching its folder.";
+        if (SkillCardReader.FrontmatterText(content) is not { } frontmatter)
         {
-            throw new ProposalRejectedException($"The skill's frontmatter name must be '{name}', matching its folder.");
+            throw new ProposalRejectedException(nameMismatch);
         }
 
-        // The frontmatter feeds the agent card other agents read, so its decoded values get the same checks.
-        if (SkillCardReader.FrontmatterText(content) is { } frontmatter && YamlEditor.Parse(frontmatter) is { } node)
+        // The frontmatter feeds the agent card other agents read: the same plain-YAML rules as agent.yaml, so the card
+        // reader and the reviewer see one structure, and the same checks on its decoded values.
+        CheckScalars(ParsePlainMapping(frontmatter, "skill frontmatter"), "skill frontmatter");
+        if (!SkillCardReader.TryReadFrontmatter(content, out var front) || front.Name != name)
         {
-            CheckScalars(node, "skill frontmatter");
+            throw new ProposalRejectedException(nameMismatch);
         }
 
         var findings = SkillScanner.ScanSkill(content);
@@ -596,7 +622,7 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
         }
         catch (YamlException ex)
         {
-            throw new ProposalRejectedException($"The proposed {what} is not a valid YAML mapping: {ex.Message}", ex);
+            throw new ProposalRejectedException($"The proposed {what} is not a valid YAML mapping: {Clip(ex.Message, MaxEchoedError)}", ex);
         }
     }
 

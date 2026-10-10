@@ -25,6 +25,23 @@ public sealed class CapybaraConfigurationLoaderTests
         Assert.False(research.ReadsUserMemory);
     }
 
+    [Theory]
+    [InlineData("1e300m")]
+    [InlineData("NaNm")]
+    [InlineData("Infinityd")]
+    [InlineData("-Infinityh")]
+    public void Out_of_range_intervals_fail_closed(string every)
+    {
+        using var dir = new TempDirectory();
+        var agentDir = Directory.CreateDirectory(Path.Combine(dir.Path, "agents", "ea")).FullName;
+        File.WriteAllText(Path.Combine(agentDir, "agent.yaml"), "id: ea\nname: EA\njob: assistant\n");
+        File.WriteAllText(Path.Combine(dir.Path, "routines.yaml"), $"- id: r\n  owner: ea\n  kind: heartbeat\n  every: {every}\n  prompt: hi\n");
+
+        var ex = Assert.Throws<CapybaraConfigurationException>(() => CapybaraConfigurationLoader.Load(dir.Path));
+
+        Assert.Contains(ex.Errors, e => e.Contains("cannot parse interval", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void Invalid_config_fails_closed_with_every_error()
     {

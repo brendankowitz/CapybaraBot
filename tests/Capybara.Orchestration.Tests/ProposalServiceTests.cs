@@ -720,6 +720,81 @@ public sealed class ProposalServiceTests : IDisposable
         await Assert.ThrowsAsync<ProposalRejectedException>(() => _service.ProposeAsync(Alpha, ProposalKind.Skill, "triage", skill, "x", Ct).AsTask());
     }
 
+    // ---- Round 4: every malformed agent input is an audited rejection; musical blank; folded prompts ----
+
+    [Theory]
+    [InlineData(ProposalKind.Skill, "triage", "---\nname: triage\ndescription: Triage the inbox.\ndescription: Something else.\n---\n# Steps\nRead.\n")]
+    [InlineData(ProposalKind.Skill, "triage", "---\nname: !!str triage\ndescription: Triage the inbox.\n---\n# Steps\nRead.\n")]
+    [InlineData(ProposalKind.Skill, "triage", "---\nname: &n triage\ndescription: *n\n---\n# Steps\nRead.\n")]
+    [InlineData(ProposalKind.Skill, "triage", "---\nname: triage\n\"description\": Triage the inbox.\n---\n# Steps\nRead.\n")]
+    [InlineData(ProposalKind.Routine, "alpha-evening", "id: alpha-evening\nowner: alpha\nkind: heartbeat\nevery: 2h\nprompt: A.\nprompt: B.\n")]
+    [InlineData(ProposalKind.AgentConfig, null, "id: alpha\nname: Alpha\njob: Reads mail.\njob: Sends mail.\n")]
+    public async Task Malformed_yaml_is_an_audited_rejection(ProposalKind kind, string? name, string content)
+    {
+        var ex = await Assert.ThrowsAsync<ProposalRejectedException>(() => _service.ProposeAsync(Alpha, kind, name, content, "x", Ct).AsTask());
+
+        Assert.DoesNotContain("could not be parsed", ex.Message, StringComparison.Ordinal);
+        Assert.Single(_fixture.Audit.Entries, e => e.Decision == "proposal_rejected");
+        Assert.Empty(await _service.ListAsync(cancellationToken: Ct));
+        Assert.False(Directory.Exists(_fixture.PathOf("agents/alpha/skills/pending")));
+    }
+
+    [Theory]
+    [InlineData("every: 1e300m")]
+    [InlineData("every: NaNm")]
+    [InlineData("every: Infinityd")]
+    [InlineData("every: 2h\nbudgetCredits: 1e300")]
+    public async Task Out_of_range_routine_values_are_an_audited_rejection(string field)
+    {
+        var routine = "id: alpha-evening\nowner: alpha\nkind: heartbeat\n" + field + "\nprompt: Evening sweep.\n";
+
+        await Assert.ThrowsAsync<ProposalRejectedException>(() => _service.ProposeAsync(Alpha, ProposalKind.Routine, "alpha-evening", routine, "x", Ct).AsTask());
+
+        Assert.Single(_fixture.Audit.Entries, e => e.Decision == "proposal_rejected");
+    }
+
+    [Fact]
+    public async Task Out_of_range_agent_values_are_an_audited_rejection()
+    {
+        var content = ConfigFixture.Alpha.Replace("job: Reads mail.", "job: Reads mail.\nbudget:\n  dailyCredits: 1e400", StringComparison.Ordinal);
+
+        await Assert.ThrowsAsync<ProposalRejectedException>(() => _service.ProposeAsync(Alpha, ProposalKind.AgentConfig, null, content, "x", Ct).AsTask());
+
+        Assert.Single(_fixture.Audit.Entries, e => e.Decision == "proposal_rejected");
+    }
+
+    [Fact]
+    public async Task Musical_blank_is_rejected()
+    {
+        var ex = await Assert.ThrowsAsync<ProposalRejectedException>(() => _service.ProposeAsync(Alpha, ProposalKind.Soul, null, "Calm.\U0001D159\n", "x", Ct).AsTask());
+
+        Assert.Contains("<U+1D159>", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("+Calm.<U+1D159>", LineDiff.Unified(null, "Calm.\U0001D159\n", "x"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Folded_routine_text_that_joins_past_the_line_limit_is_rejected_with_accurate_advice()
+    {
+        var routine = "id: alpha-evening\nowner: alpha\nkind: heartbeat\nevery: 2h\nprompt: >\n  "
+            + new string('a', 300) + "\n  " + new string('b', 300) + "\n";
+
+        var ex = await Assert.ThrowsAsync<ProposalRejectedException>(() => _service.ProposeAsync(Alpha, ProposalKind.Routine, "alpha-evening", routine, "x", Ct).AsTask());
+
+        Assert.Contains("literal '|' block scalar", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("resulting file", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Folded_routine_text_within_the_line_limit_round_trips()
+    {
+        const string routine = "id: alpha-evening\nowner: alpha\nkind: heartbeat\nevery: 2h\nprompt: >\n  Sweep the inbox\n  and summarize.\n";
+
+        var proposal = await _service.ProposeAsync(Alpha, ProposalKind.Routine, "alpha-evening", routine, "x", Ct);
+        await _service.DecideAsync(proposal.Id, approve: true, User, Ct);
+
+        Assert.Equal("Sweep the inbox and summarize.\n", Assert.Single(_fixture.Host.Current.Routines, r => r.Id == "alpha-evening").Prompt);
+    }
+
     private const int ReviewableTextLimit = 8;
 
     private ProposalService NewService() =>

@@ -13,7 +13,7 @@ namespace Capybara.Orchestration.Configuration;
 /// U+E0100–E01EF always; U+FE0E/FE0F unless directly after a symbol such as an emoji, or in a 0–9/#/* keycap before
 /// U+20E3),
 /// combining grapheme joiner, Hangul and Mongolian fillers and selectors, U+FFF0–FFF8 and the whole U+E0000–E0FFF block;</item>
-/// <item>the braille blank U+2800, unassigned code points, and more than <see cref="MaxCombiningMarks"/> combining marks in a row.</item>
+/// <item>the braille blank U+2800, the musical blank U+1D159, unassigned code points, and more than <see cref="MaxCombiningMarks"/> combining marks in a row.</item>
 /// </list>
 /// Tab, LF and CRLF are allowed.
 /// </summary>
@@ -124,10 +124,10 @@ internal static class ReviewableText
             or UnicodeCategory.OtherNotAssigned);
     }
 
-    /// <summary>Default-ignorable (DerivedCoreProperties) code points that are not format characters, plus the braille blank.</summary>
+    /// <summary>Default-ignorable (DerivedCoreProperties) code points that are not format characters, plus blanks that render as nothing (braille U+2800, musical U+1D159).</summary>
     private static bool IsInvisible(int value) => value is 0x034F
         or 0x115F or 0x1160 or 0x17B4 or 0x17B5 or (>= 0x180B and <= 0x180F) or 0x2065 or 0x2800 or 0x3164 or 0xFFA0
-        or (>= 0xFFF0 and <= 0xFFF8) or (>= 0xE0000 and <= 0xE0FFF);
+        or (>= 0xFFF0 and <= 0xFFF8) or 0x1D159 or (>= 0xE0000 and <= 0xE0FFF);
 
     private static string Describe(int value) => string.Create(CultureInfo.InvariantCulture, $"<U+{value:X4}>");
 }
