@@ -1,2 +1,21 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Capybara</title><base href="/"><link rel="manifest" href="manifest.webmanifest"><link rel="icon" href="favicon.svg"><link rel="stylesheet" href="css/app.css"></head><body><div id="app">Loading Capybara…</div><script src="js/capybara.js"></script><script src="_framework/blazor.webassembly.js"></script><script>navigator.serviceWorker?.register('service-worker.js');</script></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Agent output is untrusted: nothing may load from or leak to another origin (FR-SAF-07). The gateway should send the same
+       policy as response headers (README-contract.md). style-src needs 'unsafe-inline' for Blazor's inline style attributes. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <title>Capybara</title>
+  <base href="/">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="favicon.svg">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div id="app">Loading Capybara…</div>
+  <script src="js/capybara.js"></script>
+  <script src="_framework/blazor.webassembly.js"></script>
+</body>
+</html>

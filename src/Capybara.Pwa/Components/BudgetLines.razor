@@ -1,0 +1,22 @@
+@if (Lines.Count == 0)
+{
+    <p class="muted">No spend recorded.</p>
+}
+else
+{
+    <table class="budget">
+        <thead><tr><th>@Heading</th><th>Credits</th></tr></thead>
+        <tbody>
+        @foreach (var line in Lines)
+        {
+            <tr><th scope="row">@line.Key</th><td>@line.Credits.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)</td></tr>
+        }
+        </tbody>
+    </table>
+}
+
+@code {
+    [Parameter, EditorRequired] public string Heading { get; set; } = string.Empty;
+
+    [Parameter, EditorRequired] public IReadOnlyList<BudgetLineDto> Lines { get; set; } = [];
+}

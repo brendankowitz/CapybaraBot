@@ -1,5 +1,63 @@
 @page "/approvals"
-@inject CapybaraApiClient Api
+@inherits CapybaraPage
+@inject CapybaraRealtimeService Realtime
+@implements IDisposable
+
 <h1>Approvals</h1>
-@if (_approvals is null) { <p>Loading…</p> } else { @foreach (var a in _approvals) { <article class="card"><h2>@a.Agent · @a.Tool</h2><p>Risk: @a.Risk</p><pre>@a.Preview</pre><button @onclick="() => Decide(a, "allowOnce")">Allow once</button>@if (a.OffersAlwaysAllow) { <button @onclick="() => Decide(a, "always")">Always</button> }<button @onclick="() => Decide(a, "deny")">Deny</button></article> } }
-@code { private IReadOnlyList<ApprovalDto>? _approvals; protected override async Task OnInitializedAsync() => _approvals = await Api.GetApprovalsAsync(); private async Task Decide(ApprovalDto a, string decision) { await Api.DecideApprovalAsync(a.Id, a.Nonce, decision); _approvals = await Api.GetApprovalsAsync(); } }
+<ErrorBanner Message="@Error" />
+@if (_approvals is null)
+{
+    <p>Loading…</p>
+}
+else if (_approvals.Count == 0)
+{
+    <p>Nothing is waiting for approval.</p>
+}
+else
+{
+    @foreach (var approval in _approvals)
+    {
+        <ApprovalCard @key="approval.Id" Approval="approval" OnDecide="decision => DecideAsync(approval, decision)" />
+    }
+}
+
+@code {
+    private IReadOnlyList<ApprovalDto>? _approvals;
+
+    protected override async Task OnInitializedAsync()
+    {
+        Realtime.ApprovalRequested += OnApprovalChanged;
+        Realtime.ApprovalResolved += OnApprovalResolved;
+        await LoadAsync();
+        await Realtime.TryStartAsync();
+    }
+
+    private async Task LoadAsync() => _approvals = await TryAsync(() => Api.GetApprovalsAsync()) ?? _approvals;
+
+    private async Task DecideAsync(ApprovalDto approval, string decision)
+    {
+        ClearError();
+        await TryAsync(() => Api.DecideApprovalAsync(approval.Id, approval.Nonce, decision));
+
+        // Reload either way: a 404/409 means it was settled or expired elsewhere, and the error stays visible.
+        await LoadAsync();
+    }
+
+    private void OnApprovalChanged(ApprovalDto approval) => _ = InvokeAsync(async () =>
+    {
+        await LoadAsync();
+        StateHasChanged();
+    });
+
+    private void OnApprovalResolved(string id) => _ = InvokeAsync(async () =>
+    {
+        await LoadAsync();
+        StateHasChanged();
+    });
+
+    public void Dispose()
+    {
+        Realtime.ApprovalRequested -= OnApprovalChanged;
+        Realtime.ApprovalResolved -= OnApprovalResolved;
+    }
+}

@@ -1,25 +1,157 @@
 @page "/agents/{Id}"
-@inject CapybaraApiClient Api
+@inherits CapybaraPage
+@inject CapybaraRealtimeService Realtime
+@implements IDisposable
 
 <h1>Chat: @Id</h1>
-<div class="chat">
-@foreach (var line in _lines) { <pre>@line</pre> }
+<ErrorBanner Message="@Error" />
+<div class="chat" aria-live="polite">
+@foreach (var line in _lines)
+{
+    <div class="chat-line @line.Kind">
+        <span class="muted">@line.At.ToLocalTime().ToString("g")</span>
+        <pre>@line.Text</pre>
+    </div>
+}
 </div>
+@if (_busy) { <p class="muted">Working…</p> }
 <textarea @bind="_prompt" rows="5" placeholder="Message"></textarea>
-<button @onclick="SendAsync">Send</button>
+<label><input type="checkbox" checked="@_incognito" @onchange="OnIncognitoChanged" /> Incognito (reads and writes no memory)</label>
+<button type="button" disabled="@_busy" @onclick="SendAsync">Send</button>
+
+<section>
+    <h2>Model</h2>
+    <input @bind="_model" placeholder="model id, e.g. auto" />
+    <button type="button" disabled="@string.IsNullOrWhiteSpace(_model)" @onclick="SetModelAsync">Change model</button>
+</section>
 
 @code {
-    [Parameter] public string Id { get; set; } = string.Empty;
+    private sealed record ChatLine(DateTimeOffset At, string Kind, string Text);
+
+    private readonly List<ChatLine> _lines = [];
+    private readonly CancellationTokenSource _disposed = new();
     private string _prompt = string.Empty;
-    private readonly List<string> _lines = [];
+    private string _model = string.Empty;
+    private bool _incognito;
+    private string? _conversationId;
+    private bool _busy;
+
+    [Parameter] public string Id { get; set; } = string.Empty;
+
+    /// <summary>How often the history is re-read while a queued (Accepted) turn has no reply yet.</summary>
+    [Parameter] public TimeSpan PollInterval { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>How many times to poll before telling the user the reply has not arrived.</summary>
+    [Parameter] public int MaxPolls { get; set; } = 90;
+
+    protected override async Task OnInitializedAsync()
+    {
+        Realtime.ThreadEntry += OnThreadEntry;
+        var history = await TryAsync(() => Api.GetChatHistoryAsync(Id));
+        foreach (var entry in history ?? [])
+        {
+            _lines.Add(new ChatLine(entry.At, entry.Role, entry.Content));
+        }
+
+        await TryAsync(() => Api.MarkAgentReadAsync(Id));
+        await Realtime.TryStartAsync();
+    }
+
+    private void OnIncognitoChanged(ChangeEventArgs args)
+    {
+        _incognito = args.Value is true;
+        _conversationId = _incognito ? Guid.NewGuid().ToString("N") : null;
+    }
 
     private async Task SendAsync()
     {
-        if (string.IsNullOrWhiteSpace(_prompt)) { return; }
+        if (string.IsNullOrWhiteSpace(_prompt))
+        {
+            return;
+        }
+
+        ClearError();
+
+        // The last history entry before sending: the fallback anchor if the server cannot give the turn a message id.
+        ChatEntryDto? before = null;
+        if (!_incognito)
+        {
+            var history = await TryAsync(() => Api.GetChatHistoryAsync(Id));
+            if (history is null)
+            {
+                return;
+            }
+
+            before = history.Count > 0 ? history[^1] : null;
+        }
+
         var prompt = _prompt;
         _prompt = string.Empty;
-        _lines.Add($"> {prompt}");
-        var result = await Api.SendTurnAsync(Id, prompt);
-        _lines.Add(result?.Content ?? "No response.");
+        _lines.Add(new ChatLine(DateTimeOffset.Now, "user", prompt));
+        _busy = true;
+        var result = await TryAsync(() => Api.SendTurnAsync(Id, new TurnRequestDto(prompt, _incognito, _conversationId)));
+        if (result is { IsAccepted: true })
+        {
+            await AwaitReplyAsync(result.MessageId, before);
+        }
+        else if (result is not null)
+        {
+            _lines.Add(Describe(result));
+        }
+
+        _busy = false;
+    }
+
+    // Every status is shown: a turn that did not run (paused, over budget, throttled) must not look like an empty reply.
+    private static ChatLine Describe(TurnResultDto result) => new(DateTimeOffset.Now, result.IsCompleted ? "assistant" : "status", result.Summary);
+
+    // The turn was queued through the inbox: its reply lands in the chat history, correlated by message id (never by prompt text).
+    private async Task AwaitReplyAsync(string? messageId, ChatEntryDto? before)
+    {
+        IReadOnlyList<ChatEntryDto>? replies = null;
+        try
+        {
+            replies = await TryAsync(() => Api.AwaitReplyAsync(Id, messageId, before, PollInterval, MaxPolls, _disposed.Token));
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        if (replies is null)
+        {
+            return;
+        }
+
+        _lines.AddRange(replies.Count > 0
+            ? replies.Select(r => new ChatLine(r.At, "assistant", r.Content))
+            : [new ChatLine(DateTimeOffset.Now, "status", "No reply yet. It will appear here when the agent finishes.")]);
+    }
+    private async Task SetModelAsync()
+    {
+        ClearError();
+        await TryAsync(() => Api.SetModelAsync(Id, _model));
+    }
+
+    // Live fleet-thread traffic involving this agent, alongside the conversation.
+    private void OnThreadEntry(ThreadEntryDto entry)
+    {
+        if (!string.Equals(entry.From, Id, StringComparison.OrdinalIgnoreCase) && !string.Equals(entry.To, Id, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        _ = InvokeAsync(() =>
+        {
+            _lines.Add(new ChatLine(entry.At, "thread", $"{entry.From} → {entry.To}: {entry.Summary}"));
+            StateHasChanged();
+        });
+    }
+
+    public void Dispose()
+    {
+        Realtime.ThreadEntry -= OnThreadEntry;
+        _disposed.Cancel();
+        _disposed.Dispose();
     }
 }

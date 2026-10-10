@@ -50,5 +50,7 @@
     <PackageVersion Include="xunit.v3" Version="4.0.2" />
     <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.12" />
     <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.10.0" />
+    <!-- WP12: bUnit renders the PWA's Razor pages in-process (Approvals preview, Routines cost acknowledgement). Pinned exact version. -->
+    <PackageVersion Include="bunit" Version="2.11.3" />
   </ItemGroup>
 </Project>

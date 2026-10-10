@@ -1,0 +1,80 @@
+@page "/questions/{Id}"
+@inherits CapybaraPage
+
+<h1>Question</h1>
+<ErrorBanner Message="@Error" />
+@if (_gone)
+{
+    <p>This question is no longer pending. It may have been answered or have expired.</p>
+}
+else if (_answered)
+{
+    <p>Answer sent.</p>
+}
+else if (_question is null)
+{
+    <p>Loading…</p>
+}
+else
+{
+    <article class="card">
+        <h2>@_question.Agent: @_question.Title</h2>
+        <pre>@_question.Body</pre>
+        @if (_question.Choices is { Count: > 0 } choices)
+        {
+            @foreach (var choice in choices)
+            {
+                <button type="button" @onclick="() => AnswerAsync(choice)">@choice</button>
+            }
+        }
+        else
+        {
+            <textarea @bind="_answer" rows="4" placeholder="Your answer"></textarea>
+            <button type="button" disabled="@string.IsNullOrWhiteSpace(_answer)" @onclick="() => AnswerAsync(_answer)">Send answer</button>
+        }
+    </article>
+}
+
+@code {
+    private QuestionDto? _question;
+    private bool _gone;
+    private bool _answered;
+    private string _answer = string.Empty;
+
+    [Parameter] public string Id { get; set; } = string.Empty;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _question = null;
+        _gone = false;
+        _answered = false;
+        await TryAsync(async () =>
+        {
+            try
+            {
+                _question = await Api.GetQuestionAsync(Id);
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                _gone = true;
+            }
+        });
+    }
+
+    private async Task AnswerAsync(string answer)
+    {
+        ClearError();
+        await TryAsync(async () =>
+        {
+            try
+            {
+                await Api.AnswerQuestionAsync(Id, answer);
+                _answered = true;
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                _gone = true;
+            }
+        });
+    }
+}
