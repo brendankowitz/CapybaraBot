@@ -16,6 +16,7 @@ namespace Capybara.Orchestration.Tests;
 internal sealed class CoordinatorFixture : IDisposable
 {
     private readonly TempDirectory _dir = new();
+    private SessionLimiter? _sessions;
 
     public CoordinatorFixture(params AgentDefinition[] agents)
     {
@@ -24,8 +25,15 @@ internal sealed class CoordinatorFixture : IDisposable
         Envelopes = new EnvelopeFactory(Time);
         Inbox = new FileInboxStore(Path.Combine(_dir.Path, "inbox"), Time);
         Tasks = new FileTaskStore(Path.Combine(_dir.Path, "tasks"));
-        Coordinator = new A2ACoordinator(Registry, Envelopes, Inbox, Tasks, Thread, Taint, KillSwitch, Audit, Executor, new A2AOptions(), Time);
+        Coordinator = NewCoordinator();
     }
+
+    public A2AOptions Options { get; } = new();
+
+    public SessionLimiter Sessions => _sessions ??= new SessionLimiter(Options);
+
+    /// <summary>A coordinator over the same stores, as after a restart.</summary>
+    public A2ACoordinator NewCoordinator() => new(Registry, Envelopes, Inbox, Tasks, Thread, Taint, KillSwitch, Audit, Executor, Options, Time, Sessions);
 
     public FakeTimeProvider Time { get; } = new(new DateTimeOffset(2026, 10, 10, 12, 0, 0, TimeSpan.Zero));
 
@@ -55,6 +63,7 @@ internal sealed class CoordinatorFixture : IDisposable
     public void Dispose()
     {
         Coordinator.Dispose();
+        _sessions?.Dispose();
         KillSwitch.Dispose();
         _dir.Dispose();
     }

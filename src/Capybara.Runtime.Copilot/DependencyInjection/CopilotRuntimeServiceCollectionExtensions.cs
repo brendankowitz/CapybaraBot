@@ -56,6 +56,9 @@ public static class CopilotRuntimeServiceCollectionExtensions
         services.AddSingleton(supervisorOptions ?? new SupervisorOptions());
         services.TryAddSingleton(new InboxPumpOptions());
 
+        // FR-A2A-11: one fleet-wide slot pool, shared with the coordinator (which takes it as an optional dependency).
+        services.TryAddSingleton(sp => new SessionLimiter(sp.GetRequiredService<A2AOptions>()));
+
         // Memory goes through IMemoryStore (FR-MEM-12); composed over the wiki unless the host registered its own.
         services.TryAddSingleton(sp => new CompositeMemoryStore(
             sp.GetRequiredService<WikiStore>(),
@@ -128,6 +131,7 @@ public static class CopilotRuntimeServiceCollectionExtensions
         sp.GetRequiredService<PermissionAllowances>(),
         sp.GetRequiredService<TurnMemory>(),
         sp.GetRequiredService<Capybara.Observability.Alerts.IAlertSink>(),
+        sp.GetRequiredService<SessionLimiter>(),
         sp.GetRequiredService<TimeProvider>(),
         sp.GetRequiredService<ILogger<AgentRuntime>>());
 }

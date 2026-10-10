@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using Capybara.Contracts.Agents;
 using Capybara.Contracts.Messaging;
 using Capybara.Observability.Alerts;
@@ -52,11 +51,12 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     private readonly PermissionAllowances _allowances;
     private readonly TurnMemory _memory;
     private readonly IAlertSink _alerts;
+    private readonly SessionLimiter _sessions;
     private readonly TimeProvider _time;
     private readonly ILogger<AgentRuntime> _logger;
     private readonly SemaphoreSlim _mainLock = new(1, 1);
     private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _sessionLocks = new(StringComparer.Ordinal);
+    private readonly KeyedLocks _sessionLocks = new();
 
     private readonly Lock _turnGate = new();
 
@@ -78,6 +78,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         PermissionAllowances allowances,
         TurnMemory memory,
         IAlertSink alerts,
+        SessionLimiter sessions,
         TimeProvider time,
         ILogger<AgentRuntime> logger)
     {
@@ -92,6 +93,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         _allowances = allowances;
         _memory = memory;
         _alerts = alerts;
+        _sessions = sessions;
         _time = time;
         _logger = logger;
         _model = agent.Model;
@@ -225,9 +227,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         }
 
         var sessionId = target.SessionIdFor(_agent.Id);
-        var gate = _sessionLocks.GetOrAdd(sessionId, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(cancellationToken);
-        try
+        using (await _sessionLocks.AcquireAsync(sessionId, cancellationToken))
         {
             if (_client is { } client)
             {
@@ -244,10 +244,6 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
 
             _taint.Forget(sessionId);
             _allowances.Clear(sessionId);
-        }
-        finally
-        {
-            gate.Release();
         }
     }
 
@@ -333,10 +329,6 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         await StopCoreAsync();
         _mainLock.Dispose();
         _lifecycleLock.Dispose();
-        foreach (var gate in _sessionLocks.Values)
-        {
-            gate.Dispose();
-        }
     }
 
     private async Task<TurnResult> RunMainTurnAsync(AgentTurnRequest request, CancellationToken cancellationToken)
@@ -476,9 +468,15 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     {
         var target = request.Target;
         var sessionId = target.SessionIdFor(_agent.Id);
-        var gate = _sessionLocks.GetOrAdd(sessionId, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(cancellationToken);
-        try
+
+        // FR-A2A-11: every running non-main session holds a fleet-wide slot.
+        using var slot = _sessions.TryAcquire();
+        if (slot is null)
+        {
+            return TurnResult.Throttled($"the fleet-wide limit of {_sessions.Capacity} concurrent non-main sessions is reached");
+        }
+
+        using (await _sessionLocks.AcquireAsync(sessionId, cancellationToken))
         {
             var (envelope, creditLimit) = target.Task is { } task ? (task.Envelope, task.Envelope.Budget.Credits) : TurnEnvelope(request);
             var context = new CapybaraSession(_agent, sessionId, target.Kind, envelope, target.Task?.Id)
@@ -510,10 +508,6 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
                 // Released, not deleted: the session resumes for its next turn until EndSessionAsync.
                 await session.DisposeAsync();
             }
-        }
-        finally
-        {
-            gate.Release();
         }
     }
 

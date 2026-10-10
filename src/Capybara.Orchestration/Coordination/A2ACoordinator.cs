@@ -32,9 +32,11 @@ public sealed class A2ACoordinator : IDisposable
     private readonly IAgentTurnExecutor _executor;
     private readonly A2AOptions _options;
     private readonly TimeProvider _time;
-    private readonly SemaphoreSlim _fleetSessions;
+    private readonly SessionLimiter _sessions;
+    private readonly bool _ownsSessions;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _consultsPerAgent = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, int> _exchanges = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Exchange> _exchanges = new(StringComparer.Ordinal);
+    private long _lastPrune;
 
     public A2ACoordinator(
         AgentRegistry registry,
@@ -47,9 +49,11 @@ public sealed class A2ACoordinator : IDisposable
         IAuditLog audit,
         IAgentTurnExecutor executor,
         A2AOptions options,
-        TimeProvider time)
+        TimeProvider time,
+        SessionLimiter? sessions = null)
     {
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(registry);
         _registry = registry;
         _envelopes = envelopes;
         _inbox = inbox;
@@ -61,7 +65,9 @@ public sealed class A2ACoordinator : IDisposable
         _executor = executor;
         _options = options;
         _time = time;
-        _fleetSessions = new SemaphoreSlim(options.MaxConcurrentNonMainSessions, options.MaxConcurrentNonMainSessions);
+        _ownsSessions = sessions is null;
+        _sessions = sessions ?? new SessionLimiter(options);
+        registry.Changed += OnRegistryChanged;
     }
 
     public IReadOnlyList<AgentCard> ListAgents(AgentId caller) => _registry.ListFor(caller);
@@ -91,49 +97,43 @@ public sealed class A2ACoordinator : IDisposable
 
         try
         {
-            if (!await _fleetSessions.WaitAsync(TimeSpan.Zero, cancellationToken))
+            using var slot = _sessions.TryAcquire();
+            if (slot is null)
             {
                 return await RejectAsync(caller, target, A2AOperation.Consult, parent, "fleet-wide session limit reached.");
             }
 
+            var sessionId = SessionIds.Consult(target, Guid.NewGuid());
+            _taint.Apply(sessionId, child.Taint);
+            Record(caller, target, A2AOperation.Consult, child, Truncate(question, 200));
+
+            // The child's budget is spent once the consult starts, whatever its outcome (FR-A2A-05).
+            var remainder = auth.ParentRemainder;
+            await PersistTaskEnvelopeAsync(caller, callerSessionId, remainder, cancellationToken);
+
+            ConsultReply reply;
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _killSwitch.FleetToken);
+            timeout.CancelAfter(child.Budget.Wallclock);
             try
             {
-                var sessionId = SessionIds.Consult(target, Guid.NewGuid());
-                _taint.Apply(sessionId, child.Taint);
-                Record(caller, target, A2AOperation.Consult, child, Truncate(question, 200));
-
-                // The child's budget is spent once the consult starts, whatever its outcome (FR-A2A-05).
-                var remainder = auth.ParentRemainder;
-                await PersistTaskEnvelopeAsync(caller, callerSessionId, remainder, cancellationToken);
-
-                ConsultReply reply;
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _killSwitch.FleetToken);
-                timeout.CancelAfter(child.Budget.Wallclock);
-                try
-                {
-                    reply = await _executor.ConsultAsync(targetAgent, sessionId, question, child, timeout.Token);
-                }
+                reply = await _executor.ConsultAsync(targetAgent, sessionId, question, child, timeout.Token);
+            }
 #pragma warning disable CA1031 // Any consult failure becomes a rejection; the budget it used stays spent.
-                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
 #pragma warning restore CA1031
-                {
-                    var reason = ex is OperationCanceledException ? "timed out or was stopped" : $"failed ({ex.GetType().Name})";
-                    await _audit.AppendAsync(new AuditRecord("a2a.consult", "failed", caller, callerSessionId, FleetTools.AskAgent, Detail: $"→ {target}: {reason}", TraceId: child.TraceId), CancellationToken.None);
-                    return new A2AResult(false, $"the consult {reason}.", ParentRemainder: remainder);
-                }
-
-                // The consult's taint flows back into the caller's session (FR-A2A-08).
-                _taint.Apply(sessionId, reply.Taint);
-                _taint.Propagate(sessionId, callerSessionId);
-
-                var answer = Truncate(reply.Answer, _options.MaxConsultAnswerChars);
-                await _audit.AppendAsync(new AuditRecord("a2a.consult", "completed", caller, callerSessionId, FleetTools.AskAgent, Detail: $"→ {target}", TraceId: child.TraceId), CancellationToken.None);
-                return new A2AResult(true, null, answer, _taint.Of(sessionId), sessionId, remainder);
-            }
-            finally
             {
-                _fleetSessions.Release();
+                var reason = ex is OperationCanceledException ? "timed out or was stopped" : $"failed ({ex.GetType().Name})";
+                await _audit.AppendAsync(new AuditRecord("a2a.consult", "failed", caller, callerSessionId, FleetTools.AskAgent, Detail: $"→ {target}: {reason}", TraceId: child.TraceId), CancellationToken.None);
+                return new A2AResult(false, $"the consult {reason}.", ParentRemainder: remainder);
             }
+
+            // The consult's taint flows back into the caller's session (FR-A2A-08).
+            _taint.Apply(sessionId, reply.Taint);
+            _taint.Propagate(sessionId, callerSessionId);
+
+            var answer = Truncate(reply.Answer, _options.MaxConsultAnswerChars);
+            await _audit.AppendAsync(new AuditRecord("a2a.consult", "completed", caller, callerSessionId, FleetTools.AskAgent, Detail: $"→ {target}", TraceId: child.TraceId), CancellationToken.None);
+            return new A2AResult(true, null, answer, _taint.Of(sessionId), sessionId, remainder);
         }
         finally
         {
@@ -207,6 +207,7 @@ public sealed class A2ACoordinator : IDisposable
             Owner = target,
             RequestedBy = caller,
             RequesterSessionId = ReplySession(caller, callerSessionId),
+            Exchanges = auth.Exchanges,
             Objective = objective,
             OutputSchema = outputSchema,
             Boundaries = boundaries,
@@ -241,6 +242,28 @@ public sealed class A2ACoordinator : IDisposable
     {
         var task = await LoadTaskAsync(taskId, cancellationToken);
         return task?.Owner == owner ? task : null;
+    }
+
+    /// <summary>
+    /// The owned task as it may now run: a task past its deadline or out of budget is failed first (and its requester
+    /// told), so callers see a terminal state. <see langword="null"/> when not owned.
+    /// </summary>
+    public async Task<FleetTask?> GetRunnableTaskAsync(AgentId owner, string taskId, CancellationToken cancellationToken = default) =>
+        await GetOwnedTaskAsync(owner, taskId, cancellationToken) is { } task ? await FailIfOverdueAsync(task, cancellationToken) : null;
+
+    /// <summary>
+    /// Debits what a turn of the task's own session spent from the task's budget (FR-A2A-05), so a task cannot outspend
+    /// the budget its requester carved for it.
+    /// </summary>
+    public async Task RecordTaskSpendAsync(AgentId owner, string taskId, decimal credits, CancellationToken cancellationToken = default)
+    {
+        if (credits <= 0 || await GetOwnedTaskAsync(owner, taskId, cancellationToken) is not { } task || task.State.IsTerminal())
+        {
+            return;
+        }
+
+        var budget = task.Envelope.Budget;
+        await _tasks.SaveAsync(task with { Envelope = task.Envelope with { Budget = budget with { Credits = budget.Credits - credits } }, UpdatedAt = _time.GetUtcNow() }, cancellationToken);
     }
 
     /// <summary>The owner has started work on a submitted task. Returns the current task, or null if not owned.</summary>
@@ -287,9 +310,20 @@ public sealed class A2ACoordinator : IDisposable
             return A2AResult.Rejected("agent is paused.");
         }
 
+        if (await FailIfOverdueAsync(task, cancellationToken) is { State: FleetTaskState.Failed } failed)
+        {
+            return A2AResult.Rejected($"the task was stopped because {failed.FailureReason}.");
+        }
+
+        var exchanges = CountExchange(task.Envelope.RootTaskId, owner, task.RequestedBy, task.Exchanges);
+        if (exchanges > _options.MaxExchangesPerPairPerTask)
+        {
+            return A2AResult.Rejected(ExchangeLimit(owner, task.RequestedBy));
+        }
+
         var now = _time.GetUtcNow();
         var taint = Combine(task.Envelope.Taint, _taint.Of(ownerSessionId));
-        await _tasks.SaveAsync(task with { State = FleetTaskState.InputRequired, PendingQuestion = question, UpdatedAt = now }, cancellationToken);
+        await _tasks.SaveAsync(task with { State = FleetTaskState.InputRequired, PendingQuestion = question, Exchanges = exchanges, UpdatedAt = now }, cancellationToken);
         await _inbox.EnqueueAsync(
             new FleetMessage
             {
@@ -332,9 +366,20 @@ public sealed class A2ACoordinator : IDisposable
             return A2AResult.Rejected("agent is paused.");
         }
 
+        if (await FailIfOverdueAsync(task, cancellationToken) is { State: FleetTaskState.Failed } failed)
+        {
+            return A2AResult.Rejected($"the task was stopped because {failed.FailureReason}.");
+        }
+
+        var exchanges = CountExchange(task.Envelope.RootTaskId, requester, task.Owner, task.Exchanges);
+        if (exchanges > _options.MaxExchangesPerPairPerTask)
+        {
+            return A2AResult.Rejected(ExchangeLimit(requester, task.Owner));
+        }
+
         var now = _time.GetUtcNow();
         var taint = Combine(task.Envelope.Taint, _taint.Of(requesterSessionId));
-        await _tasks.SaveAsync(task with { State = FleetTaskState.Working, PendingQuestion = null, UpdatedAt = now }, cancellationToken);
+        await _tasks.SaveAsync(task with { State = FleetTaskState.Working, PendingQuestion = null, Exchanges = exchanges, UpdatedAt = now }, cancellationToken);
         await _inbox.EnqueueAsync(
             new FleetMessage
             {
@@ -428,7 +473,12 @@ public sealed class A2ACoordinator : IDisposable
 
     public void Dispose()
     {
-        _fleetSessions.Dispose();
+        _registry.Changed -= OnRegistryChanged;
+        if (_ownsSessions)
+        {
+            _sessions.Dispose();
+        }
+
         foreach (var semaphore in _consultsPerAgent.Values)
         {
             semaphore.Dispose();
@@ -473,15 +523,14 @@ public sealed class A2ACoordinator : IDisposable
             return Authorization.Reject($"{target} does not accept {operation.ToString().ToLowerInvariant()}s.");
         }
 
-        var (first, second) = string.CompareOrdinal(caller.Value, target.Value) < 0 ? (caller, target) : (target, caller);
-        var pair = $"{parent.RootTaskId}:{first}|{second}";
-        if (_exchanges.AddOrUpdate(pair, 1, (_, n) => n + 1) > _options.MaxExchangesPerPairPerTask)
+        var exchanges = CountExchange(parent.RootTaskId, caller, target);
+        if (exchanges > _options.MaxExchangesPerPairPerTask)
         {
-            return Authorization.Reject($"exchange limit between {caller} and {target} reached for this task; involve the user.");
+            return Authorization.Reject(ExchangeLimit(caller, target));
         }
 
         var result = _envelopes.CreateChild(parent, target, requested, _taint.Of(callerSessionId), OwnTaskId(caller, callerSessionId));
-        return result.IsSuccess ? new Authorization(targetAgent, result.Child, result.ParentRemainder, null) : Authorization.Reject(result.Error!);
+        return result.IsSuccess ? new Authorization(targetAgent, result.Child, result.ParentRemainder, null, exchanges) : Authorization.Reject(result.Error!);
     }
 
     /// <summary>The delegated task <paramref name="sessionId"/> works on, when it is one of <paramref name="agent"/>'s task sessions.</summary>
@@ -511,6 +560,94 @@ public sealed class A2ACoordinator : IDisposable
         await _tasks.SaveAsync(task with { Envelope = task.Envelope with { Budget = remainder.Budget }, UpdatedAt = _time.GetUtcNow() }, cancellationToken);
     }
 
+    private static string ExchangeLimit(AgentId a, AgentId b) =>
+        $"exchange limit between {a} and {b} reached for this task; involve the user.";
+
+    /// <summary>
+    /// Counts one more exchange between two agents under a root task and returns the new count (FR-A2A-11).
+    /// <paramref name="persisted"/> is the count kept in a task record, so a restart cannot reset the limit.
+    /// </summary>
+    private int CountExchange(string rootTaskId, AgentId a, AgentId b, int persisted = 0)
+    {
+        var (first, second) = string.CompareOrdinal(a.Value, b.Value) < 0 ? (a, b) : (b, a);
+        var now = _time.GetUtcNow();
+        PruneExchanges(now);
+        return _exchanges.AddOrUpdate(
+            $"{rootTaskId}:{first}|{second}",
+            _ => new Exchange(persisted + 1, now),
+            (_, current) => new Exchange(Math.Max(current.Count, persisted) + 1, now)).Count;
+    }
+
+    /// <summary>At most once a minute, forgets pair counts idle for longer than the retention.</summary>
+    private void PruneExchanges(DateTimeOffset now)
+    {
+        var last = Interlocked.Read(ref _lastPrune);
+        if (now.UtcTicks - last < TimeSpan.TicksPerMinute || Interlocked.CompareExchange(ref _lastPrune, now.UtcTicks, last) != last)
+        {
+            return;
+        }
+
+        foreach (var (key, exchange) in _exchanges)
+        {
+            if (now - exchange.Touched > _options.ExchangeRetention)
+            {
+                _exchanges.TryRemove(KeyValuePair.Create(key, exchange));
+            }
+        }
+    }
+
+    /// <summary>Consult slots of removed agents are dropped (not disposed: a consult that already passed may still hold one).</summary>
+    private void OnRegistryChanged(object? sender, AgentRegistryChangedEventArgs e)
+    {
+        foreach (var removed in e.Removed)
+        {
+            _consultsPerAgent.TryRemove(removed.Value, out _);
+        }
+    }
+
+    /// <summary>
+    /// A task past its deadline or out of budget cannot continue (FR-A2A-05): it is failed and its requester told.
+    /// Returns the task as it now is.
+    /// </summary>
+    private async Task<FleetTask> FailIfOverdueAsync(FleetTask task, CancellationToken cancellationToken)
+    {
+        if (task.State.IsTerminal())
+        {
+            return task;
+        }
+
+        var reason = _time.GetUtcNow() >= task.Envelope.Deadline
+            ? "its deadline passed"
+            : task.Envelope.Budget.IsExhausted ? "its budget is exhausted" : null;
+        return reason is null ? task : await FailAsync(task, reason, cancellationToken);
+    }
+
+    private async Task<FleetTask> FailAsync(FleetTask task, string reason, CancellationToken cancellationToken)
+    {
+        var now = _time.GetUtcNow();
+        var failed = task with { State = FleetTaskState.Failed, FailureReason = reason, PendingQuestion = null, UpdatedAt = now };
+        await _tasks.SaveAsync(failed, cancellationToken);
+        await _inbox.EnqueueAsync(
+            new FleetMessage
+            {
+                To = task.RequestedBy,
+                From = task.Owner,
+                Origin = MessageOrigin.System,
+                Body = $"[task {task.Id} failed] The task was stopped because {reason}.",
+                Envelope = task.Envelope,
+                Taint = task.Envelope.Taint,
+                CreatedAt = now,
+                TaskId = task.Id,
+                SessionId = task.RequesterSessionId,
+            },
+            cancellationToken);
+        _thread.Append(new FleetThreadEntry(now, task.Owner, task.RequestedBy, A2AOperation.Task, $"failed: {reason}", task.Envelope.TraceId, task.Envelope.Depth, task.Envelope.Taint));
+        await _audit.AppendAsync(new AuditRecord("a2a.task", "failed", task.Owner, SessionIds.Task(task.Owner, task.Id), Detail: $"task {task.Id}: {reason}", TraceId: task.Envelope.TraceId), CancellationToken.None);
+        return failed;
+    }
+
+    private sealed record Exchange(int Count, DateTimeOffset Touched);
+
     /// <summary>Model-supplied ids that are not task ids address nothing.</summary>
     private async ValueTask<FleetTask?> LoadTaskAsync(string taskId, CancellationToken cancellationToken) =>
         FileTaskStore.IsTaskId(taskId) ? await _tasks.GetAsync(taskId, cancellationToken) : null;
@@ -529,7 +666,7 @@ public sealed class A2ACoordinator : IDisposable
 
     private static string Truncate(string value, int max) => value.Length <= max ? value : string.Concat(value.AsSpan(0, max), "…");
 
-    private sealed record Authorization(AgentDefinition? Target, Envelope? Child, Envelope? ParentRemainder, string? Error)
+    private sealed record Authorization(AgentDefinition? Target, Envelope? Child, Envelope? ParentRemainder, string? Error, int Exchanges = 0)
     {
         [MemberNotNullWhen(true, nameof(Error))]
         [MemberNotNullWhen(false, nameof(Target), nameof(Child), nameof(ParentRemainder))]

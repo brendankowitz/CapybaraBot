@@ -231,7 +231,7 @@ public sealed partial class InboxPump
                 // An isolated routine run, resumed for its approval outcome.
                 target = TurnTarget.Isolated(key);
             }
-            else if (await _coordinator.GetOwnedTaskAsync(Agent, key, cancellationToken) is { } task)
+            else if (await _coordinator.GetRunnableTaskAsync(Agent, key, cancellationToken) is { } task)
             {
                 if (task.State.IsTerminal())
                 {
@@ -279,12 +279,14 @@ public sealed partial class InboxPump
         {
             if (target.Task is { } task)
             {
+                // The task's own spend comes out of its carved budget (FR-A2A-05).
+                await _coordinator.RecordTaskSpendAsync(Agent, task.Id, result.Evidence.Credits, CancellationToken.None);
                 if (plan.Assignment)
                 {
                     await _coordinator.MarkWorkingAsync(Agent, task.Id, CancellationToken.None);
                 }
 
-                if (await _coordinator.GetOwnedTaskAsync(Agent, task.Id, CancellationToken.None) is not { } current || current.State.IsTerminal())
+                if (await _coordinator.GetRunnableTaskAsync(Agent, task.Id, CancellationToken.None) is not { } current || current.State.IsTerminal())
                 {
                     await _runtime.EndSessionAsync(target, CancellationToken.None);
                 }

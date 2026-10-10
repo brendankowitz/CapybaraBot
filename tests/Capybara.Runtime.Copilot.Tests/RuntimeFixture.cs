@@ -66,7 +66,7 @@ internal sealed class RuntimeFixture : IDisposable
         Registry = new AgentRegistry(fleet ?? [], KillSwitch);
         Inbox = new FileInboxStore(Path.Combine(_dir.Path, "inbox"), Time);
         Tasks = new FileTaskStore(Path.Combine(_dir.Path, "tasks"));
-        Coordinator = new A2ACoordinator(Registry, Envelopes, Inbox, Tasks, new FleetThread(), Taint, KillSwitch, Audit, Consults, new A2AOptions(), Time);
+        Coordinator = new A2ACoordinator(Registry, Envelopes, Inbox, Tasks, new FleetThread(), Taint, KillSwitch, Audit, Consults, new A2AOptions(), Time, Sessions);
         Tools = new CapybaraToolProvider(new Lazy<A2ACoordinator>(() => Coordinator), memory ?? Memory, Taint, Options, proposals);
         Configs = new SessionConfigFactory(Handlers, Usage, Tools, Options, Rules, NullLogger<SessionConfigFactory>.Instance, Secrets, broker);
     }
@@ -119,6 +119,28 @@ internal sealed class RuntimeFixture : IDisposable
 
     public A2ACoordinator Coordinator { get; }
 
+    public SessionLimiter Sessions { get; } = new(new A2AOptions());
+
+    public string InboxRoot => Path.Combine(_dir.Path, "inbox");
+
+    public string TaskRoot => Path.Combine(_dir.Path, "tasks");
+
+    /// <summary>A real runtime that is never started: everything up to talking to the CLI runs.</summary>
+    public Hosting.AgentRuntime Runtime(AgentDefinition agent) => new(
+        agent,
+        Options,
+        Configs,
+        Envelopes,
+        Ledger,
+        KillSwitch,
+        Taint,
+        Allowances,
+        new Hosting.TurnMemory(Memory, Taint, Time, NullLogger<Hosting.TurnMemory>.Instance),
+        Alerts,
+        Sessions,
+        Time,
+        NullLogger<Hosting.AgentRuntime>.Instance);
+
     public SessionConfigFactory Configs { get; }
 
     public EnvelopeFactory Envelopes { get; }
@@ -139,6 +161,7 @@ internal sealed class RuntimeFixture : IDisposable
     public void Dispose()
     {
         Coordinator.Dispose();
+        Sessions.Dispose();
         KillSwitch.Dispose();
         _dir.Dispose();
     }

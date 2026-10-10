@@ -33,6 +33,15 @@ public sealed record FleetTask
 
     public IReadOnlyList<Artifact> Artifacts { get; init; } = [];
 
+    /// <summary>
+    /// Agent-to-agent exchanges between owner and requester under this task's root (the delegation, each question and
+    /// each answer), so the per-pair limit survives restarts (FR-A2A-11).
+    /// </summary>
+    public int Exchanges { get; init; }
+
+    /// <summary>Why the task failed, when <see cref="State"/> is <see cref="FleetTaskState.Failed"/>.</summary>
+    public string? FailureReason { get; init; }
+
     /// <summary>Items the owner could not verify against the objective (FR-A2A-09).</summary>
     public IReadOnlyList<string> Unverified { get; init; } = [];
 
