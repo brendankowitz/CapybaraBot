@@ -40,6 +40,7 @@ public static class CopilotRuntimeServiceCollectionExtensions
         services.AddSingleton(sp => new Lazy<A2ACoordinator>(sp.GetRequiredService<A2ACoordinator>));
         services.AddSingleton<ISessionToolProvider, CapybaraToolProvider>();
         services.AddSingleton<SessionConfigFactory>();
+        services.AddSingleton<TurnMemory>();
 
         services.AddSingleton(sp => new AgentRuntimePool(
             sp.GetRequiredService<Capybara.Orchestration.Registry.AgentRegistry>(),
@@ -77,5 +78,7 @@ public static class CopilotRuntimeServiceCollectionExtensions
         sp.GetRequiredService<KillSwitch>(),
         sp.GetRequiredService<TaintTracker>(),
         sp.GetRequiredService<PermissionAllowances>(),
+        sp.GetRequiredService<TurnMemory>(),
+        sp.GetRequiredService<TimeProvider>(),
         sp.GetRequiredService<ILogger<AgentRuntime>>());
 }
