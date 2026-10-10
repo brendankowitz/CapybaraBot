@@ -13,7 +13,7 @@ try
 {
     return await RunAsync(command, api, token);
 }
-catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or UnauthorizedAccessException or FileNotFoundException or ArgumentException)
+catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or UnauthorizedAccessException or FileNotFoundException or ArgumentException or IOException)
 {
     AnsiConsole.MarkupLine($"[red]{Markup.Escape(ex.Message)}[/]");
     return 1;
@@ -32,17 +32,25 @@ static async Task<int> RunAsync(ParsedCommand command, CapybaraApiClient api, st
         case "approvals":
             await ApprovalsAsync(api, command.Arguments);
             return 0;
+        case "proposals":
+            await ProposalsAsync(api, SubCommand.Parse("proposals", command.Arguments));
+            return 0;
+        case "memory":
+            await MemoryAsync(api, SubCommand.Parse("memory", command.Arguments), command.OutputPath);
+            return 0;
         case "thread":
             foreach (var entry in await api.GetThreadAsync())
             {
-                AnsiConsole.MarkupLine($"[blue]{Markup.Escape(entry.From)}[/] → [green]{Markup.Escape(entry.To)}[/]: {Markup.Escape(entry.Summary)}");
+                AnsiConsole.MarkupLine($"[blue]{Markup.Escape(entry.From)}[/] → [green]{Markup.Escape(entry.To)}[/]: {Markup.Escape(Tables.Clean(entry.Summary))}");
             }
 
             return 0;
         case "kill":
             if (command.ReleaseKillSwitch)
             {
-                AnsiConsole.MarkupLine(await api.ReleaseKillSwitchAsync() ? "Released." : "Release denied by server.");
+                // Release is desktop-only; a phone-class device token gets 403, which surfaces as an error line.
+                await api.ReleaseKillSwitchAsync();
+                AnsiConsole.MarkupLine("Released.");
             }
             else
             {
@@ -52,23 +60,19 @@ static async Task<int> RunAsync(ParsedCommand command, CapybaraApiClient api, st
 
             return 0;
         case "budgets":
-            AnsiConsole.WriteLine((await api.GetBudgetsAsync())?.ToString() ?? "Budget endpoint unavailable.");
+            AnsiConsole.Write(Tables.Budgets(await api.GetBudgetsAsync()));
             return 0;
         case "routines":
-            foreach (var routine in await api.GetRoutinesAsync())
-            {
-                AnsiConsole.MarkupLine($"{Markup.Escape(routine.Id)} {routine.Owner} {routine.Kind} projected={routine.ProjectedMonthlyCredits}");
-            }
-
+            await RoutinesAsync(api, SubCommand.Parse("routines", command.Arguments), command.AcknowledgedCredits);
             return 0;
         case "audit":
-            AnsiConsole.MarkupLine((await api.VerifyAuditAsync())?.Valid == true ? "[green]Audit valid[/]" : "[red]Audit invalid/unavailable[/]");
+            AnsiConsole.MarkupLine((await api.VerifyAuditAsync()).Valid ? "[green]Audit valid[/]" : "[red]Audit invalid[/]");
             return 0;
         case "dashboard":
             await DashboardAsync(api, command.BaseUrl, token);
             return 0;
         default:
-            AnsiConsole.WriteLine("Usage: capybara [--base-url URL] agents|chat <agent>|approvals|thread|kill [--release]|budgets|routines|audit|dashboard");
+            AnsiConsole.WriteLine("Usage: capybara [--base-url URL] agents|chat <agent>|approvals [decide <id> allow-once|always|deny]|proposals [show|approve|reject <id>]|memory [list [prefix]|show <path>|pending|apply <id>|discard <id>|export [--out FILE]]|routines [enable <id> [--ack CREDITS]|disable <id>|dry-run <id>]|thread|kill [--release]|budgets|audit|dashboard");
             return 2;
     }
 }
@@ -85,7 +89,8 @@ static async Task ChatAsync(CapybaraApiClient api, string agent)
         }
 
         var result = await api.SendTurnAsync(agent, prompt);
-        AnsiConsole.WriteLine(result?.Content ?? "No response.");
+        AnsiConsole.Write(Tables.Plain(result.Content));
+        AnsiConsole.WriteLine();
     }
 }
 
@@ -95,16 +100,112 @@ static async Task ApprovalsAsync(CapybaraApiClient api, IReadOnlyList<string> ar
     AnsiConsole.Write(Tables.Approvals(approvals));
     if (args.Count >= 3 && args[0] == "decide")
     {
-        var approval = approvals.First(a => a.Id == args[1]);
-        await api.DecideApprovalAsync(approval.Id, approval.Nonce, args[2]);
+        var approval = approvals.FirstOrDefault(a => a.Id == args[1]) ?? throw new ArgumentException($"No pending approval '{args[1]}'.");
+        await api.DecideApprovalAsync(approval.Id, approval.Nonce, ApprovalChoice.Parse(args[2]));
+        AnsiConsole.MarkupLine("Decision sent.");
     }
+}
+
+static async Task ProposalsAsync(CapybaraApiClient api, SubCommand sub)
+{
+    switch (sub.Verb)
+    {
+        case "show":
+            var proposal = await api.GetProposalAsync(sub.Target!);
+            AnsiConsole.MarkupLine($"[bold]{Markup.Escape(proposal.Kind)}[/] by {Markup.Escape(proposal.Agent)} → {Markup.Escape(proposal.TargetPath)} ({Markup.Escape(proposal.Status)})");
+            AnsiConsole.Write(Tables.Plain(proposal.Rationale));
+            AnsiConsole.WriteLine();
+            AnsiConsole.Write(Tables.Plain(proposal.Diff));
+            AnsiConsole.WriteLine();
+            break;
+        case "approve" or "reject":
+            var decided = await api.DecideProposalAsync(sub.Target!, approve: sub.Verb == "approve");
+            AnsiConsole.MarkupLine($"Proposal {Markup.Escape(decided.Id)}: {Markup.Escape(decided.Status)}{(decided.Error is null ? string.Empty : $" - {Markup.Escape(decided.Error)}")}");
+            break;
+        default:
+            AnsiConsole.Write(Tables.Proposals(await api.GetProposalsAsync()));
+            break;
+    }
+}
+
+static async Task MemoryAsync(CapybaraApiClient api, SubCommand sub, string? outputPath)
+{
+    switch (sub.Verb)
+    {
+        case "show":
+            AnsiConsole.Write(Tables.Plain((await api.GetMemoryPageAsync(sub.Target!)).Content));
+            AnsiConsole.WriteLine();
+            break;
+        case "pending":
+            AnsiConsole.Write(Tables.PendingMemory(await api.GetPendingMemoryAsync()));
+            break;
+        case "apply" or "discard":
+            await api.DecidePendingMemoryAsync(sub.Target!, apply: sub.Verb == "apply");
+            AnsiConsole.MarkupLine("Done.");
+            break;
+        case "export":
+            var path = outputPath ?? "capybara-memory.zip";
+            await using (var zip = await api.ExportMemoryAsync())
+            await using (var file = File.Create(path))
+            {
+                await zip.CopyToAsync(file);
+            }
+
+            AnsiConsole.MarkupLine($"Exported to {Markup.Escape(path)}.");
+            break;
+        default:
+            AnsiConsole.Write(Tables.MemoryPages(await api.GetMemoryPagesAsync(sub.Target)));
+            break;
+    }
+}
+
+static async Task RoutinesAsync(CapybaraApiClient api, SubCommand sub, decimal? acknowledgedCredits)
+{
+    switch (sub.Verb)
+    {
+        case "enable":
+            await EnableRoutineAsync(api, sub.Target!, acknowledgedCredits);
+            break;
+        case "disable":
+            await api.DisableRoutineAsync(sub.Target!);
+            AnsiConsole.MarkupLine("Disabled.");
+            break;
+        case "dry-run":
+            var result = await api.DryRunRoutineAsync(sub.Target!);
+            AnsiConsole.MarkupLine($"Dry run: {Markup.Escape(result.Status)} ({result.Credits:0.##} credits). Auto-denied approvals: {Markup.Escape(result.DeniedApprovals.Count == 0 ? "none" : string.Join(", ", result.DeniedApprovals))}");
+            if (!string.IsNullOrEmpty(result.Output))
+            {
+                AnsiConsole.Write(Tables.Plain(result.Output));
+                AnsiConsole.WriteLine();
+            }
+
+            break;
+        default:
+            AnsiConsole.Write(Tables.Routines(await api.GetRoutinesAsync()));
+            break;
+    }
+}
+
+// FR-RTN-09: each heartbeat is a billed loop, so the projected monthly cost must be acknowledged before enabling.
+static async Task EnableRoutineAsync(CapybaraApiClient api, string id, decimal? acknowledgedCredits)
+{
+    var routine = (await api.GetRoutinesAsync()).FirstOrDefault(r => r.Id == id) ?? throw new ArgumentException($"No routine '{id}'.");
+    AnsiConsole.MarkupLine($"Routine [bold]{Markup.Escape(routine.Id)}[/] projects [yellow]{routine.ProjectedMonthlyCredits:0.##}[/] credits per month.");
+    AnsiConsole.Write(Tables.RoutineRuns(routine));
+    var acknowledged = acknowledgedCredits
+        ?? (AnsiConsole.Confirm($"Acknowledge {routine.ProjectedMonthlyCredits:0.##} credits/month and enable?", defaultValue: false)
+            ? routine.ProjectedMonthlyCredits
+            : throw new InvalidOperationException("Not enabled: cost not acknowledged."));
+    await api.EnableRoutineAsync(id, acknowledged);
+    AnsiConsole.MarkupLine("Enabled.");
 }
 
 static async Task DashboardAsync(CapybaraApiClient api, Uri baseUrl, string token)
 {
     await using var realtime = new CapybaraRealtimeClient(baseUrl, () => Task.FromResult<string?>(token));
-    realtime.OnAgentStatusChanged((id, state, unread) => AnsiConsole.MarkupLine($"{Markup.Escape(id)}: {state} unread={unread}"));
+    realtime.OnAgentStatusChanged((id, state, unread) => AnsiConsole.MarkupLine($"{Markup.Escape(id)}: {Markup.Escape(state)} unread={unread}"));
     realtime.OnKillSwitchChanged(engaged => AnsiConsole.MarkupLine(engaged ? "[red]Kill switch engaged[/]" : "[green]Kill switch released[/]"));
+    realtime.OnApprovalRequested(a => AnsiConsole.MarkupLine($"[yellow]Approval needed[/]: {Markup.Escape(a.Agent)} → {Markup.Escape(a.Tool)}"));
     await realtime.StartAsync();
     AnsiConsole.Write(Tables.Agents(await api.GetAgentsAsync()));
     await Task.Delay(Timeout.InfiniteTimeSpan);
