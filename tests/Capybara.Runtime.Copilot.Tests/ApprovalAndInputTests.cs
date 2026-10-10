@@ -123,7 +123,7 @@ public sealed class ApprovalAndInputTests
     {
         var (f, _) = Fleet();
         using var __ = f;
-        using var resumer = new ApprovalResumer(f.Approvals, f.Inbox, f.Alerts, f.Time, NullLogger<ApprovalResumer>.Instance);
+        using var resumer = new ApprovalResumer(f.Approvals, f.ApprovalTurns, f.Inbox, f.Alerts, f.Time, NullLogger<ApprovalResumer>.Instance);
         await resumer.StartAsync(Ct);
         var (taskId, session) = await DelegateAsync(f);
         await DrainAsync(f, Research.Id);
@@ -143,7 +143,7 @@ public sealed class ApprovalAndInputTests
     {
         var (f, _) = Fleet();
         using var __ = f;
-        using var resumer = new ApprovalResumer(f.Approvals, f.Inbox, f.Alerts, f.Time, NullLogger<ApprovalResumer>.Instance);
+        using var resumer = new ApprovalResumer(f.Approvals, f.ApprovalTurns, f.Inbox, f.Alerts, f.Time, NullLogger<ApprovalResumer>.Instance);
         await resumer.StartAsync(Ct);
         f.Approvals.Request(Ea.Id, SessionIds.Main(Ea.Id), "email_send", "hash", "preview", RiskLevel.High, MessageOrigin.System);
 
@@ -160,7 +160,7 @@ public sealed class ApprovalAndInputTests
     {
         var (f, _) = Fleet();
         using var __ = f;
-        using var resumer = new ApprovalResumer(f.Approvals, f.Inbox, f.Alerts, f.Time, NullLogger<ApprovalResumer>.Instance);
+        using var resumer = new ApprovalResumer(f.Approvals, f.ApprovalTurns, f.Inbox, f.Alerts, f.Time, NullLogger<ApprovalResumer>.Instance);
         await resumer.StartAsync(Ct);
         var request = f.Approvals.Request(Ea.Id, SessionIds.Consult(Ea.Id, Guid.NewGuid()), "email_send", "hash", "preview", RiskLevel.High, MessageOrigin.Agent);
 
@@ -174,7 +174,7 @@ public sealed class ApprovalAndInputTests
     {
         var (f, _) = Fleet();
         using var __ = f;
-        using var resumer = new ApprovalResumer(f.Approvals, f.Inbox, f.Alerts, f.Time, NullLogger<ApprovalResumer>.Instance);
+        using var resumer = new ApprovalResumer(f.Approvals, f.ApprovalTurns, f.Inbox, f.Alerts, f.Time, NullLogger<ApprovalResumer>.Instance);
         await resumer.StartAsync(Ct);
         var routineSession = SessionIds.Task(Ea.Id, "routine-run-7");
         var request = f.Approvals.Request(Ea.Id, routineSession, "email_send", "hash", "preview", RiskLevel.High, MessageOrigin.System);

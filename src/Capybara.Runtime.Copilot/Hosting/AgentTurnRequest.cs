@@ -35,10 +35,10 @@ public sealed record AgentTurnRequest
     public Budget? Budget { get; init; }
 
     /// <summary>
-    /// For a turn that handles another agent's message: the message's envelope. The turn continues that chain — depth,
-    /// carved budget, deadline, root task and taint carry over (FR-A2A-05/06, FR-A2A-11) — instead of starting a fresh
-    /// root. Ignored unless <see cref="Origin"/> is <see cref="MessageOrigin.Agent"/>, and for delegated tasks, which run
-    /// under the task's own envelope.
+    /// The chain this turn continues: another agent's message, or a notice (approval outcome, failed sub-task) about a
+    /// turn that ran in a chain. Depth, carved budget, deadline, root task, root origin and taint carry over
+    /// (FR-A2A-05/06/07, FR-A2A-11) instead of a fresh root. Ignored for delegated tasks, which run under the task's own
+    /// envelope.
     /// </summary>
     public Envelope? Envelope { get; init; }
 }

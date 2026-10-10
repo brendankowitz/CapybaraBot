@@ -31,7 +31,8 @@ public sealed partial class SessionHandlers(
     ILogger<SessionHandlers> logger,
     IAlertSink alerts,
     TimeProvider time,
-    SecretRedactor? redactor = null)
+    SecretRedactor? redactor = null,
+    ApprovalTurnStore? approvalTurns = null)
 {
     public const string UserUnavailableAnswer = "The user is not available right now. Continue without this input or stop and report what is blocked.";
 
@@ -128,6 +129,9 @@ public sealed partial class SessionHandlers(
                 if (verdict.Approval is { } approval)
                 {
                     turn.RecordPendingApproval(approval.Id);
+
+                    // The resume after the decision continues this turn's chain, not a fresh root (FR-A2A-05/07).
+                    approvalTurns?.Save(approval.Id, new ApprovalTurnContext(session.Envelope, session.TurnOrigin, session.TurnFrom));
                 }
 
                 return Deny($"waiting for user approval ({verdict.Approval?.Id}); do not retry until the user has decided");

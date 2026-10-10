@@ -423,13 +423,13 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     private (Envelope Envelope, decimal? CreditLimit) TurnEnvelope(AgentTurnRequest request)
     {
         var cap = request.Budget ?? new Budget(_agent.Budget.SessionMaxCredits, MainTurnToolCalls, _options.TurnTimeout);
-        if (request.Origin == MessageOrigin.Agent && request.Envelope is { } incoming)
+        if (request.Envelope is { } incoming)
         {
             var continued = EnvelopeFactory.ContinueFrom(incoming, _agent.Id, cap);
             return (continued, continued.Budget.Credits);
         }
 
-        return (_envelopes.CreateRoot(request.Principal, _agent.Id, cap, _options.TurnTimeout), cap.Credits);
+        return (_envelopes.CreateRoot(request.Principal, _agent.Id, cap, _options.TurnTimeout, rootOrigin: request.Origin), cap.Credits);
     }
 
     /// <summary>
@@ -640,7 +640,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     private TurnTimings Timings => new(_options.TurnTimeout, _options.AbortTimeout, _options.IdleGrace, _options.LateRunGrace, _time);
 
     private Envelope SystemEnvelope() =>
-        _envelopes.CreateRoot("system", _agent.Id, new Budget(0.01m, 1, TimeSpan.FromMinutes(1)), TimeSpan.FromMinutes(1));
+        _envelopes.CreateRoot("system", _agent.Id, new Budget(0.01m, 1, TimeSpan.FromMinutes(1)), TimeSpan.FromMinutes(1), rootOrigin: MessageOrigin.System);
 
     /// <summary>
     /// Resumes (or first creates) the main session. A session built while the broker was unreachable lacks its broker

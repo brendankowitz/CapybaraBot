@@ -52,7 +52,11 @@ public sealed partial class EscalatingUserInputBroker(
                 : null;
         }
 
-        if (session.TurnOrigin is not (MessageOrigin.User or MessageOrigin.System) || session.Depth > 0 || escalation is null)
+        // The chain must have been started by the user or the host too: a resumed or continued turn keeps its chain's root.
+        if (session.TurnOrigin is not (MessageOrigin.User or MessageOrigin.System)
+            || session.Envelope.RootOrigin is not (MessageOrigin.User or MessageOrigin.System)
+            || session.Depth > 0
+            || escalation is null)
         {
             return null;
         }

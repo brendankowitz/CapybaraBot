@@ -5,6 +5,7 @@ using Capybara.Observability.Alerts;
 using Capybara.Orchestration.Inbox;
 using Capybara.Orchestration.Tasks;
 using Capybara.Policy.Approvals;
+using Capybara.Runtime.Copilot.Hooks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -26,15 +27,17 @@ public sealed partial class ApprovalResumer : IHostedService, IDisposable
     public const string AlertKind = "approval.resume_failed";
 
     private readonly ApprovalService _approvals;
+    private readonly ApprovalTurnStore _turns;
     private readonly IInboxStore _inbox;
     private readonly IAlertSink _alerts;
     private readonly TimeProvider _time;
     private readonly ILogger<ApprovalResumer> _logger;
 
-    public ApprovalResumer(ApprovalService approvals, IInboxStore inbox, IAlertSink alerts, TimeProvider time, ILogger<ApprovalResumer> logger)
+    public ApprovalResumer(ApprovalService approvals, ApprovalTurnStore turns, IInboxStore inbox, IAlertSink alerts, TimeProvider time, ILogger<ApprovalResumer> logger)
     {
         ArgumentNullException.ThrowIfNull(approvals);
         _approvals = approvals;
+        _turns = turns;
         _inbox = inbox;
         _alerts = alerts;
         _time = time;
@@ -74,12 +77,16 @@ public sealed partial class ApprovalResumer : IHostedService, IDisposable
     private void Enqueue(ApprovalRequest request, string body)
     {
         var session = ResumeSession(request);
+        var turn = _turns.Take(request.Id);
+        var envelope = turn?.Envelope ?? RestrictedEnvelope(request);
         var message = new FleetMessage
         {
             To = request.Agent,
+            From = turn?.From,
             Origin = MessageOrigin.System,
             Body = body,
-            Taint = Taint.Clean,
+            Envelope = envelope,
+            Taint = envelope?.Taint ?? Taint.Clean,
             CreatedAt = _time.GetUtcNow(),
             SessionId = session,
             TaskId = SessionIds.TryParseTask(session, out _, out var key) && FileTaskStore.IsTaskId(key) ? key : null,
@@ -99,6 +106,36 @@ public sealed partial class ApprovalResumer : IHostedService, IDisposable
                 CancellationToken.None).AsTask();
         }
     }
+
+    /// <summary>
+    /// Without a recorded turn context (it could not be stored), a turn that a person or the host started resumes as a
+    /// fresh root as before; any other resumes fail closed: at maximum depth (no agent-to-agent tools), tainted, and
+    /// rooted in the original origin, so it can never reach the user's phone.
+    /// </summary>
+    private Envelope? RestrictedEnvelope(ApprovalRequest request)
+    {
+        if (request.Origin is MessageOrigin.User or MessageOrigin.System)
+        {
+            return null;
+        }
+
+        LogRestrictedResume(_logger, request.Agent.Value, request.Id);
+        return new Envelope
+        {
+            TraceId = System.Diagnostics.ActivityTraceId.CreateRandom().ToHexString(),
+            RootTaskId = Guid.NewGuid().ToString("N"),
+            Depth = Envelope.MaxDepth,
+            HopPath = [request.Agent],
+            Budget = new Budget(decimal.MaxValue, int.MaxValue, TimeSpan.MaxValue),
+            Deadline = _time.GetUtcNow() + TimeSpan.FromDays(1),
+            OriginPrincipal = "system",
+            Taint = Taint.Tainted,
+            RootOrigin = request.Origin,
+        };
+    }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "No turn context for approval {ApprovalId} of {Agent}; resuming restricted")]
+    private static partial void LogRestrictedResume(ILogger logger, string agent, string approvalId);
 
     /// <summary>
     /// The approval is bound to the session that asked, so the retry must run there. Consult sessions no longer exist,

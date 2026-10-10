@@ -383,7 +383,7 @@ public sealed partial class InboxPump
                 Target = target,
                 From = message.From,
                 Taint = message.Taint,
-                Envelope = message.Origin == MessageOrigin.Agent && target.Task is null ? message.Envelope : null,
+                Envelope = target.Task is null ? message.Envelope : null,
                 RoutineId = continuation?.Routine.Id,
                 Model = continuation?.Model,
                 Budget = continuation is { } c ? new Budget(c.RemainingCredits, 100, TimeSpan.FromMinutes(20)) : null,

@@ -69,6 +69,7 @@ public static class CopilotRuntimeServiceCollectionExtensions
         // Sessions, hooks and tools.
         services.TryAddSingleton<IUserInputBroker, EscalatingUserInputBroker>();
         services.AddSingleton<PermissionAllowances>();
+        services.AddSingleton<ApprovalTurnStore>();
         services.AddSingleton<SessionHandlers>();
         services.AddSingleton<UsageCapture>();
         services.AddSingleton(sp => new Lazy<A2ACoordinator>(sp.GetRequiredService<A2ACoordinator>));

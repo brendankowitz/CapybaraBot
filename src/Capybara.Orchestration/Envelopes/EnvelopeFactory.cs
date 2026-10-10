@@ -16,7 +16,13 @@ public sealed record EnvelopeResult(Envelope? Child, Envelope? ParentRemainder, 
 /// </summary>
 public sealed class EnvelopeFactory(TimeProvider time)
 {
-    public Envelope CreateRoot(string principal, AgentId rootAgent, Budget budget, TimeSpan timeout, string? rootTaskId = null)
+    /// <param name="principal">The human the chain acts for.</param>
+    /// <param name="rootAgent">The agent whose turn starts the chain.</param>
+    /// <param name="budget">The chain's budget.</param>
+    /// <param name="timeout">Time until the chain's deadline.</param>
+    /// <param name="rootTaskId">An existing root task to continue, or a new one.</param>
+    /// <param name="rootOrigin">Who started the chain; see <see cref="Envelope.RootOrigin"/>.</param>
+    public Envelope CreateRoot(string principal, AgentId rootAgent, Budget budget, TimeSpan timeout, string? rootTaskId = null, MessageOrigin? rootOrigin = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(principal);
         var activity = Activity.Current;
@@ -31,6 +37,7 @@ public sealed class EnvelopeFactory(TimeProvider time)
             Deadline = time.GetUtcNow() + timeout,
             OriginPrincipal = principal,
             Taint = Taint.Clean,
+            RootOrigin = rootOrigin,
         };
     }
 

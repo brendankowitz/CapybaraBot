@@ -58,7 +58,8 @@ internal sealed class RuntimeFixture : IDisposable
         Approvals = new ApprovalService(Rules, new ApprovalOptions(), Time);
         Gate = new PolicyGate(Rules, Taint, Approvals, KillSwitch, Audit);
         Ledger = new CostLedger(Alerts, Time);
-        Handlers = new SessionHandlers(Gate, Taint, Allowances, userInput ?? new UnattendedUserInputBroker(), Options, NullLogger<SessionHandlers>.Instance, Alerts, Time, Redactor);
+        ApprovalTurns = new ApprovalTurnStore(Options, NullLogger<ApprovalTurnStore>.Instance);
+        Handlers = new SessionHandlers(Gate, Taint, Allowances, userInput ?? new UnattendedUserInputBroker(), Options, NullLogger<SessionHandlers>.Instance, Alerts, Time, Redactor, ApprovalTurns);
         Usage = new UsageCapture(Ledger, Time, NullLogger<UsageCapture>.Instance);
         Wiki = new WikiStore(new MemoryOptions { Root = Path.Combine(_dir.Path, "memory") }, new NoMemoryVersioning(), Time);
         Memory = new CompositeMemoryStore(Wiki, [], Time);
@@ -98,6 +99,8 @@ internal sealed class RuntimeFixture : IDisposable
     public PermissionAllowances Allowances { get; } = new();
 
     public SessionHandlers Handlers { get; }
+
+    public ApprovalTurnStore ApprovalTurns { get; }
 
     public UsageCapture Usage { get; }
 
@@ -147,7 +150,7 @@ internal sealed class RuntimeFixture : IDisposable
 
     public CapybaraSession Session(AgentDefinition agent, SessionKind kind = SessionKind.Main, int depth = 0, string? taskId = null)
     {
-        var envelope = Envelopes.CreateRoot("user", agent.Id, new Budget(5m, 50, TimeSpan.FromMinutes(5)), TimeSpan.FromMinutes(5)) with { Depth = depth };
+        var envelope = Envelopes.CreateRoot("user", agent.Id, new Budget(5m, 50, TimeSpan.FromMinutes(5)), TimeSpan.FromMinutes(5), rootOrigin: MessageOrigin.User) with { Depth = depth };
         var id = kind switch
         {
             SessionKind.Consult => SessionIds.Consult(agent.Id, Guid.NewGuid()),
