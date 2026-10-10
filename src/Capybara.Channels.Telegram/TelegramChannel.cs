@@ -2,7 +2,11 @@ using System.Net.Http.Json;
 
 namespace Capybara.Channels.Telegram;
 
-/// <summary>Telegram Bot API notification fallback with web previews disabled and no sensitive content (FR-CLI-03, FR-SAF-07, NFR-06).</summary>
+/// <summary>
+/// Telegram Bot API notification fallback (FR-CLI-03, FR-SAF-07, NFR-06). Plain text only (no parse mode, so nothing is
+/// rendered as markup), link previews disabled, and no action buttons, so no nonce ever leaves the tailnet.
+/// Sensitive notifications are reduced to their kind plus a deep link.
+/// </summary>
 public sealed class TelegramChannel(HttpClient httpClient, TelegramOptions options) : INotificationChannel
 {
     public string Name => "telegram";
@@ -11,9 +15,10 @@ public sealed class TelegramChannel(HttpClient httpClient, TelegramOptions optio
 
     public async ValueTask SendAsync(Notification notification, CancellationToken cancellationToken = default)
     {
+        var link = options.DeepLinkBaseUrl is { } baseUrl ? new Uri(baseUrl, notification.DeepLinkPath).AbsoluteUri : notification.DeepLinkPath;
         var text = notification.IsSensitive
-            ? $"{notification.Kind} notification\n{notification.DeepLinkPath}"
-            : $"{notification.Title}\n{notification.Body}\n{notification.DeepLinkPath}";
+            ? $"{notification.Kind} notification\n{link}"
+            : string.Join('\n', new[] { notification.Title, notification.Body, link }.Where(line => line.Length > 0));
         var payload = new
         {
             chat_id = options.ChatId,

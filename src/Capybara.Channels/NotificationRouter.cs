@@ -40,6 +40,13 @@ public sealed partial class NotificationRouter(
 
     public async ValueTask FlushBatchesAsync(CancellationToken cancellationToken = default)
     {
+        // The batch timer is one-shot: release it so the next low-risk approval arms a fresh window.
+        lock (_batchGate)
+        {
+            _batchTimer?.Dispose();
+            _batchTimer = null;
+        }
+
         List<Notification> items = [];
         while (_batchedLowRiskApprovals.TryDequeue(out var item))
         {
@@ -51,11 +58,16 @@ public sealed partial class NotificationRouter(
             return;
         }
 
-        var first = items[0];
-        var agents = string.Join(", ", items.Select(n => n.Agent?.Value).Where(v => !string.IsNullOrWhiteSpace(v)).Distinct(StringComparer.Ordinal));
-        var title = items.Count == 1 ? first.Title : $"{items.Count} low-risk approvals need review";
-        var body = string.IsNullOrWhiteSpace(agents) ? "Open approvals in the PWA." : $"Agents: {agents}. Open approvals in the PWA.";
-        var summary = new Notification(NotificationKind.Approval, first.Agent, title, body, NotificationPriority.Normal, "/approvals", IsSensitive: false);
+        // Fixed, content-free text: a batch summary must never reuse item titles, which name agents and tools.
+        var title = items.Count == 1 ? "1 approval needs review" : $"{items.Count} approvals need review";
+        var summary = new Notification(
+            NotificationKind.Approval,
+            null,
+            title,
+            "Open approvals in the PWA.",
+            NotificationPriority.Normal,
+            "/approvals",
+            IsSensitive: items.Any(n => n.IsSensitive));
         await DispatchAsync(summary, cancellationToken);
     }
 
@@ -101,10 +113,22 @@ public sealed partial class NotificationRouter(
         lock (_batchGate)
         {
             _batchTimer ??= timeProvider.CreateTimer(
-                static state => _ = ((NotificationRouter)state!).FlushBatchesAsync().AsTask(),
+                static state => _ = ((NotificationRouter)state!).FlushFromTimerAsync(),
                 this,
                 options.LowRiskBatchWindow,
                 Timeout.InfiniteTimeSpan);
+        }
+    }
+
+    private async Task FlushFromTimerAsync()
+    {
+        try
+        {
+            await FlushBatchesAsync();
+        }
+        catch (Exception ex)
+        {
+            LogBatchFlushFailed(_logger, ex.Message, ex);
         }
     }
 
@@ -124,7 +148,7 @@ public sealed partial class NotificationRouter(
                 await channel.SendAsync(outbound, cancellationToken);
                 return;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
                 LogChannelFailed(_logger, channel.Name, ex.Message, ex);
             }
@@ -143,9 +167,13 @@ public sealed partial class NotificationRouter(
             notification.Agent?.Value), cancellationToken);
     }
 
+    /// <summary>
+    /// Reduces a sensitive notification for channels that cannot carry sensitive content. Action buttons are dropped too:
+    /// they would let someone approve blind, and would put a single-use nonce on an untrusted server.
+    /// </summary>
     private static Notification StripSensitive(Notification notification) =>
         notification.IsSensitive
-            ? notification with { Title = $"{notification.Kind} notification", Body = string.Empty, IsSensitive = false }
+            ? notification with { Title = $"{notification.Kind} notification", Body = string.Empty, Actions = [], IsSensitive = false }
             : notification;
 
     private static Notification Sanitize(Notification notification)
@@ -164,10 +192,14 @@ public sealed partial class NotificationRouter(
 
     private static string RemoveUnsafeText(string value) => UrlRegex().Replace(ImageMarkdownRegex().Replace(value, "[image]"), "[link]");
 
-    private static bool IsRelativePath(string value) => value.Length > 0 && value[0] == '/' && !value.StartsWith("//", StringComparison.Ordinal);
+    private static bool IsRelativePath(string value) =>
+        value.Length > 0 && value[0] == '/' && !value.StartsWith("//", StringComparison.Ordinal) && !value.StartsWith("/\\", StringComparison.Ordinal);
 
     [LoggerMessage(1, LogLevel.Debug, "Notification channel {ChannelName} failed: {Reason}")]
     private static partial void LogChannelFailed(ILogger logger, string channelName, string reason, Exception exception);
+
+    [LoggerMessage(2, LogLevel.Error, "Flushing batched approval notifications failed: {Reason}")]
+    private static partial void LogBatchFlushFailed(ILogger logger, string reason, Exception exception);
 
     [GeneratedRegex("!\\[[^\\]]*\\]\\([^)]*\\)", RegexOptions.CultureInvariant)]
     private static partial Regex ImageMarkdownRegex();

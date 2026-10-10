@@ -15,5 +15,16 @@ public sealed record ChannelOptions
 
     public bool ApprovalBypassesQuietHours { get; init; } = true;
 
+    /// <summary>Per-agent notification switch; agents that are not listed are enabled (FR-CLI-07).</summary>
     public IReadOnlyDictionary<AgentId, bool> AgentNotificationToggles { get; init; } = new Dictionary<AgentId, bool>();
+
+    /// <summary>Builds options whose per-agent toggles mirror <see cref="AgentDefinition.Notifications"/> (FR-CLI-07).</summary>
+    public static ChannelOptions FromAgents(IEnumerable<AgentDefinition> agents)
+    {
+        ArgumentNullException.ThrowIfNull(agents);
+        return new ChannelOptions
+        {
+            AgentNotificationToggles = agents.ToDictionary(a => a.Id, a => a.Notifications),
+        };
+    }
 }
