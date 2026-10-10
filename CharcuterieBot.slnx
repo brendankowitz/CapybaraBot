@@ -1,0 +1,22 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Fleet.Contracts/Fleet.Contracts.csproj" />
+    <Project Path="src/Fleet.Gateway/Fleet.Gateway.csproj" />
+    <Project Path="src/Fleet.Memory/Fleet.Memory.csproj" />
+    <Project Path="src/Fleet.Observability/Fleet.Observability.csproj" />
+    <Project Path="src/Fleet.Orchestration/Fleet.Orchestration.csproj" />
+    <Project Path="src/Fleet.Policy/Fleet.Policy.csproj" />
+    <Project Path="src/Fleet.Runtime.Copilot/Fleet.Runtime.Copilot.csproj" />
+    <Project Path="src/Fleet.Scheduling/Fleet.Scheduling.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Fleet.Contracts.Tests/Fleet.Contracts.Tests.csproj" />
+    <Project Path="tests/Fleet.Gateway.Tests/Fleet.Gateway.Tests.csproj" />
+    <Project Path="tests/Fleet.Memory.Tests/Fleet.Memory.Tests.csproj" />
+    <Project Path="tests/Fleet.Observability.Tests/Fleet.Observability.Tests.csproj" />
+    <Project Path="tests/Fleet.Orchestration.Tests/Fleet.Orchestration.Tests.csproj" />
+    <Project Path="tests/Fleet.Policy.Tests/Fleet.Policy.Tests.csproj" />
+    <Project Path="tests/Fleet.Runtime.Copilot.Tests/Fleet.Runtime.Copilot.Tests.csproj" />
+    <Project Path="tests/Fleet.Scheduling.Tests/Fleet.Scheduling.Tests.csproj" />
+  </Folder>
+</Solution>
