@@ -4,9 +4,11 @@ using Capybara.Contracts.Messaging;
 using Capybara.Gateway.Chat;
 using Capybara.Gateway.Realtime;
 using Capybara.Gateway.Security;
+using Capybara.Gateway.Wiring;
 using Capybara.Observability.Cost;
 using Capybara.Orchestration.Inbox;
 using Capybara.Orchestration.Registry;
+using Capybara.Policy.Audit;
 using Capybara.Policy.Safety;
 using Capybara.Runtime.Copilot.Hosting;
 using Capybara.Runtime.Copilot.Supervision;
@@ -36,25 +38,32 @@ public static class AgentEndpoints
                 })
                 .ToList()));
 
-        group.MapPost("/{id}/pause", (string id, AgentRegistry registry, KillSwitch killSwitch) =>
+        // A human pause outlives a restart (journaled) and is audited (FR-SAF-06, FR-SAF-09).
+        group.MapPost("/{id}/pause", async (string id, HttpContext context, AgentRegistry registry, KillSwitch killSwitch, PausedAgentsJournal journal, IAuditLog audit, CancellationToken cancellationToken) =>
         {
             if (Resolve(registry, id) is not { } agent)
             {
                 return Results.NotFound();
             }
 
+            // Paused in memory first: if the journal write fails, the agent is still paused now and the caller hears so.
             killSwitch.Pause(agent);
+            journal.Add(agent);
+            await audit.AppendAsync(new AuditRecord("agent_control", "paused", agent.Value, Detail: $"by {context.GetDevice().PrincipalName}"), cancellationToken);
             return Results.NoContent();
         });
 
-        group.MapPost("/{id}/resume", (string id, AgentRegistry registry, KillSwitch killSwitch) =>
+        group.MapPost("/{id}/resume", async (string id, HttpContext context, AgentRegistry registry, KillSwitch killSwitch, PausedAgentsJournal journal, IAuditLog audit, CancellationToken cancellationToken) =>
         {
             if (Resolve(registry, id) is not { } agent)
             {
                 return Results.NotFound();
             }
 
+            // Journal first: a resume that could not be recorded must not take effect, or a restart would re-pause.
+            journal.Remove(agent);
             killSwitch.Resume(agent);
+            await audit.AppendAsync(new AuditRecord("agent_control", "resumed", agent.Value, Detail: $"by {context.GetDevice().PrincipalName}"), cancellationToken);
             return Results.NoContent();
         });
 

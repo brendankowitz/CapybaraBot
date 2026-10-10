@@ -34,7 +34,12 @@ public static class SchedulingServiceCollectionExtensions
         services.TryAddSingleton(options);
         services.TryAddSingleton(TimeProvider.System);
         services.TryAddSingleton(sp => new RoutineRunHistory(sp.GetRequiredService<IAlertSink>(), sp.GetRequiredService<SchedulingOptions>().SQLitePath));
-        services.TryAddSingleton(sp => new RoutineRegistry(sp.GetRequiredService<SchedulingOptions>().TimeZone));
+        services.TryAddSingleton(sp =>
+        {
+            // The user's enable/disable decisions live next to the interaction times, so a restart never reverts them.
+            var configured = sp.GetRequiredService<SchedulingOptions>();
+            return new RoutineRegistry(configured.TimeZone, configured.SQLitePath);
+        });
         services.TryAddSingleton(sp =>
         {
             var configured = sp.GetRequiredService<SchedulingOptions>();

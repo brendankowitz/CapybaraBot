@@ -15,6 +15,9 @@ internal sealed record StateLayout(string Root)
 
     public string KillSwitch => Path.Combine(Root, "policy", "kill-switch.json");
 
+    /// <summary>Agents a human paused from a client; re-applied on start (FR-SAF-06).</summary>
+    public string PausedAgents => Path.Combine(Root, "policy", "paused-agents.json");
+
     /// <summary>Tainted session ids, so resumed sessions stay tainted across restarts (FR-SAF-03).</summary>
     public string Taint => Path.Combine(Root, "policy", "taint.jsonl");
 

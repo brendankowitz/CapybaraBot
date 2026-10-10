@@ -1,6 +1,8 @@
+using System.Globalization;
 using Capybara.Client;
 using Capybara.Contracts.Routines;
 using Capybara.Gateway.Security;
+using Capybara.Policy.Audit;
 using Capybara.Policy.Safety;
 using Capybara.Scheduling.Dispatch;
 using Capybara.Scheduling.History;
@@ -30,7 +32,7 @@ public static class RoutineEndpoints
                 .Select(r => ToDto(r, registry, history))
                 .ToList()));
 
-        routines.MapPost("/{id}/enable", (string id, EnableRoutineDto request, HttpContext context, RoutineRegistry registry, KillSwitch killSwitch) =>
+        routines.MapPost("/{id}/enable", async (string id, EnableRoutineDto request, HttpContext context, RoutineRegistry registry, KillSwitch killSwitch, IAuditLog audit, CancellationToken cancellationToken) =>
         {
             if (registry.Find(id) is not { } routine)
             {
@@ -51,7 +53,6 @@ public static class RoutineEndpoints
             try
             {
                 registry.Enable(id, request.AcknowledgedMonthlyCredits, Human(context));
-                return Results.NoContent();
             }
             catch (InvalidOperationException ex)
             {
@@ -62,16 +63,20 @@ public static class RoutineEndpoints
             {
                 return Results.NotFound();
             }
+
+            await AuditAsync(audit, routine, "enabled", context, $"acknowledged {request.AcknowledgedMonthlyCredits.ToString(CultureInfo.InvariantCulture)} credits/month", cancellationToken);
+            return Results.NoContent();
         });
 
-        routines.MapPost("/{id}/disable", (string id, HttpContext context, RoutineRegistry registry) =>
+        routines.MapPost("/{id}/disable", async (string id, HttpContext context, RoutineRegistry registry, IAuditLog audit, CancellationToken cancellationToken) =>
         {
-            if (registry.Find(id) is null)
+            if (registry.Find(id) is not { } routine)
             {
                 return Results.NotFound();
             }
 
             registry.Disable(id, Human(context));
+            await AuditAsync(audit, routine, "disabled", context, null, cancellationToken);
             return Results.NoContent();
         });
 
@@ -87,9 +92,9 @@ public static class RoutineEndpoints
             return Results.Ok(new DryRunResultDto(result.Status.ToString(), result.Summary, result.Evidence?.DeniedApprovals ?? [], result.CreditsUsed));
         });
 
-        routines.MapPost("/{id}/confirm-resume", (string id, HttpContext context, RoutineRegistry registry, RoutineAutoPauser autoPauser, KillSwitch killSwitch) =>
+        routines.MapPost("/{id}/confirm-resume", async (string id, HttpContext context, RoutineRegistry registry, RoutineAutoPauser autoPauser, KillSwitch killSwitch, IAuditLog audit, CancellationToken cancellationToken) =>
         {
-            if (registry.Find(id) is null)
+            if (registry.Find(id) is not { } routine)
             {
                 return Results.NotFound();
             }
@@ -100,11 +105,18 @@ public static class RoutineEndpoints
             }
 
             autoPauser.ConfirmResume(id, Human(context));
+            await AuditAsync(audit, routine, "resumed", context, null, cancellationToken);
             return Results.NoContent();
         });
 
         return api;
     }
+
+    /// <summary>Human routine controls are audited like every other control action (FR-SAF-09).</summary>
+    private static async Task AuditAsync(IAuditLog audit, RoutineSpec routine, string decision, HttpContext context, string? note, CancellationToken cancellationToken) =>
+        await audit.AppendAsync(
+            new AuditRecord("routine_control", decision, routine.Owner.Value, Detail: $"routine {routine.Id} by {context.GetDevice().PrincipalName}{(note is null ? string.Empty : "; " + note)}"),
+            cancellationToken);
 
     private static RoutineDto ToDto(RoutineSpec routine, RoutineRegistry registry, RoutineRunHistory history)
     {

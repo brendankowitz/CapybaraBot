@@ -184,14 +184,21 @@ public static class CapybaraServiceCollectionExtensions
 
     private static void AddPolicy(IServiceCollection services, CapybaraConfiguration fleet, StateLayout state, IConfiguration configuration, CapybaraHostOptions host)
     {
-        // A restart is never a release (FR-SAF-06): a journaled engagement is re-applied before anything can run a turn.
+        // A restart is never a release (FR-SAF-06): a journaled engagement, and every agent a human paused, is re-applied
+        // before anything can run a turn.
         services.AddSingleton(new KillSwitchJournal(state.KillSwitch));
+        services.AddSingleton(new PausedAgentsJournal(state.PausedAgents));
         services.AddSingleton(sp =>
         {
             var killSwitch = new KillSwitch(sp.GetRequiredService<TimeProvider>());
             if (sp.GetRequiredService<KillSwitchJournal>().Load() is { } reason)
             {
                 killSwitch.Engage(reason);
+            }
+
+            foreach (var agent in sp.GetRequiredService<PausedAgentsJournal>().Load(fleet.Agents.Select(a => a.Id)))
+            {
+                killSwitch.Pause(agent);
             }
 
             return killSwitch;

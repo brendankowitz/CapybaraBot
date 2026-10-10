@@ -26,6 +26,7 @@ namespace Capybara.Gateway.Wiring;
 public sealed partial class KillSwitchCoordinator(
     KillSwitch killSwitch,
     KillSwitchJournal journal,
+    PausedAgentsJournal pausedAgents,
     BrokerClient broker,
     RuntimeSupervisor supervisor,
     IAuditLog audit,
@@ -56,6 +57,11 @@ public sealed partial class KillSwitchCoordinator(
         if (journal.LoadFailure is { } failure)
         {
             await PublishAsync(new Alert(JournalAlertKind, AlertSeverity.Critical, $"The kill switch journal could not be read ({failure}); the kill switch is engaged until released from the desktop.", time.GetUtcNow()));
+        }
+
+        if (pausedAgents.LoadFailure is { } pausedFailure)
+        {
+            await PublishAsync(new Alert(JournalAlertKind, AlertSeverity.Critical, $"The paused-agents journal could not be read ({pausedFailure}); every agent is paused until resumed.", time.GetUtcNow()));
         }
 
         // Composition re-engaged a switch that was on before the restart. This service starts before the runtimes, so

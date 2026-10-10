@@ -3,7 +3,8 @@ using Microsoft.Data.Sqlite;
 namespace Capybara.Scheduling.Durable;
 
 /// <summary>
-/// The SQLite file shared by Quartz, the durable run history and auto-pause interaction times (FR-RTN-05).
+/// The SQLite file shared by Quartz, the durable run history, auto-pause interaction times and the user's routine
+/// enable/disable decisions (FR-RTN-04, FR-RTN-05).
 /// Pooling is disabled so closing a connection releases the file handle immediately; scheduling volume is low enough
 /// that pooling has no benefit.
 /// </summary>
@@ -22,6 +23,11 @@ internal static class SchedulingDatabase
         CREATE TABLE IF NOT EXISTS capybara_routine_interactions (
             routine_id TEXT PRIMARY KEY,
             at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS capybara_routine_overrides (
+            routine_id TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL,
+            acknowledged_credits TEXT NULL,
+            spec_enabled INTEGER NOT NULL);
         """;
 
     public static string ConnectionString(string path) => new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString();
