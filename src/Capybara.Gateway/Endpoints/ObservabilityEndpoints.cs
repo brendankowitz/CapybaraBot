@@ -1,3 +1,4 @@
+using Capybara.Memory.Admin;
 using Capybara.Memory.Store;
 using Capybara.Observability.Alerts;
 using Capybara.Observability.Cost;
@@ -24,10 +25,15 @@ public static class ObservabilityEndpoints
 
         var memory = app.MapGroup("/api/memory/pending").WithTags("Memory");
 
-        memory.MapGet("/", (WikiStore store) => TypedResults.Ok(store.PendingUserChanges));
+        memory.MapGet("/", async (MemoryAdmin admin) => TypedResults.Ok(await admin.ListPendingAsync(MemoryAdminPrincipal.Human)));
 
-        memory.MapPost("/{id}", async Task<Results<NoContent, NotFound>> (string id, PendingChangeDecisionRequest request, WikiStore store, CancellationToken cancellationToken) =>
-            await store.ResolveUserChangeAsync(id, request.Apply, cancellationToken) ? TypedResults.NoContent() : TypedResults.NotFound());
+        memory.MapPost("/{id}", async Task<Results<NoContent, NotFound, Conflict>> (string id, PendingChangeDecisionRequest request, MemoryAdmin admin, CancellationToken cancellationToken) =>
+            await admin.ResolveChangeAsync(MemoryAdminPrincipal.Human, id, request.Apply, cancellationToken) switch
+            {
+                PendingChangeResult.NotFound => TypedResults.NotFound(),
+                PendingChangeResult.Stale => TypedResults.Conflict(),
+                _ => TypedResults.NoContent(),
+            });
 
         return app;
     }

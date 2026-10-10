@@ -10,6 +10,7 @@ using Capybara.Memory.Paths;
 using Capybara.Memory.Safety;
 using Capybara.Memory.Search;
 using Capybara.Memory.Versioning;
+using Microsoft.Extensions.Logging;
 
 namespace Capybara.Memory.Store;
 
@@ -18,7 +19,7 @@ namespace Capybara.Memory.Store;
 /// <c>remember</c> and <c>forget</c> with scope rules, path safety, provenance, injection quarantine and staged
 /// <c>/user/</c> edits.
 /// </summary>
-public sealed class WikiStore : IMemoryStore
+public sealed class WikiStore : IMemoryStore, IDisposable
 {
     private const int CharsPerToken = 4;
 
@@ -27,7 +28,8 @@ public sealed class WikiStore : IMemoryStore
     private readonly TimeProvider _time;
     private readonly FtsMemoryIndex? _index;
     private readonly string _root;
-    private readonly ConcurrentDictionary<string, PendingUserChange> _pending = new(StringComparer.Ordinal);
+    private readonly FilePendingChangeStore _pending;
+    private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly ConcurrentDictionary<string, byte> _quarantined = new(StringComparer.Ordinal);
 
     public WikiStore(MemoryOptions options, IMemoryVersioning versioning, TimeProvider time)
@@ -35,7 +37,7 @@ public sealed class WikiStore : IMemoryStore
     {
     }
 
-    public WikiStore(MemoryOptions options, IMemoryVersioning versioning, TimeProvider time, FtsMemoryIndex? index)
+    public WikiStore(MemoryOptions options, IMemoryVersioning versioning, TimeProvider time, FtsMemoryIndex? index, ILogger<WikiStore>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         _options = options;
@@ -44,13 +46,20 @@ public sealed class WikiStore : IMemoryStore
         _index = index;
         _root = Path.GetFullPath(options.Root);
         Directory.CreateDirectory(_root);
+        _pending = new FilePendingChangeStore(_root, logger);
     }
 
     public IReadOnlyCollection<string> Quarantined => [.. _quarantined.Keys];
 
-    public IReadOnlyList<PendingUserChange> PendingUserChanges => [.. _pending.Values.OrderBy(p => p.At)];
+    /// <summary>Staged changes awaiting human approval. Persisted under the memory root, so they survive restarts (FR-MEM-05).</summary>
+    internal IReadOnlyList<PendingUserChange> PendingUserChanges => _pending.List();
+
+    /// <summary>True when the page at <paramref name="path"/> was quarantined by a load or approval scan.</summary>
+    internal bool IsQuarantined(string path) => _quarantined.ContainsKey(path);
 
     internal string Root => _root;
+
+    public void Dispose() => _gate.Dispose();
 
     /// <summary>Rebuilds the SQLite FTS5 index from readable disk pages (FR-MEM-11).</summary>
     public async Task RebuildSearchIndexAsync(CancellationToken cancellationToken = default)
@@ -72,8 +81,19 @@ public sealed class WikiStore : IMemoryStore
         await _index.RebuildAsync(pages, cancellationToken);
     }
 
-    /// <summary><c>memory_read</c>. Quarantined pages are never returned to a model.</summary>
+    /// <summary>
+    /// <c>memory_read</c>. Quarantined pages are never returned to a model. A successful read refreshes the page's
+    /// <c>lastAccessed</c> provenance, debounced by <see cref="MemoryOptions.LastAccessedDebounce"/> (FR-MEM-04).
+    /// </summary>
     public async Task<MemoryPage?> ReadAsync(MemoryAccessContext context, string rawPath, CancellationToken cancellationToken = default)
+    {
+        var page = await PeekAsync(context, rawPath, cancellationToken);
+        // Consult sessions are read-only: they must not write, not even access timestamps.
+        return page is null || context.ReadOnly ? page : await TouchAsync(page, cancellationToken);
+    }
+
+    /// <summary>Same access rules as <see cref="ReadAsync"/> but records no access; used for bulk reads such as the per-turn index.</summary>
+    internal async Task<MemoryPage?> PeekAsync(MemoryAccessContext context, string rawPath, CancellationToken cancellationToken)
     {
         if (context.Incognito)
         {
@@ -147,13 +167,14 @@ public sealed class WikiStore : IMemoryStore
     /// </summary>
     public async Task<string> BuildIndexAsync(MemoryAccessContext context, CancellationToken cancellationToken = default)
     {
-        var builder = new MemoryContextBuilder(this, _options);
+        var builder = new MemoryContextBuilder(this, _options) { Reader = PeekAsync };
         return await builder.BuildAsync(context, cancellationToken);
     }
 
     /// <summary>
-    /// <c>remember</c>: merge a fact into a page with an ADD/UPDATE/NOOP decision instead of appending duplicates.
-    /// <c>/user/</c> facts are staged for review.
+    /// <c>remember</c>: merge a fact into a page with an ADD/UPDATE/DELETE/NOOP decision instead of appending duplicates.
+    /// A fact that negates an existing bullet ("no longer ...", "doesn't ...") DELETEs that bullet; the previous page
+    /// version stays in <c>.history</c>. <c>/user/</c> facts are staged for review.
     /// </summary>
     public async Task<MemoryOperation> RememberAsync(
         MemoryAccessContext context,
@@ -169,6 +190,24 @@ public sealed class WikiStore : IMemoryStore
             return MemoryOperation.NoOp;
         }
 
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            return await RememberCoreAsync(context, rawPath, fact, description, cancellationToken);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async Task<MemoryOperation> RememberCoreAsync(
+        MemoryAccessContext context,
+        string rawPath,
+        string fact,
+        string description,
+        CancellationToken cancellationToken)
+    {
         var path = Parse(rawPath);
         var proposesUserChange = MemoryAccessPolicy.CanProposeUserChange(context, path);
         if (!proposesUserChange)
@@ -187,46 +226,93 @@ public sealed class WikiStore : IMemoryStore
         var existing = File.Exists(file) ? await LoadAsync(path, file, cancellationToken) : null;
         var bullet = "- " + fact.Trim();
 
-        if (existing is not null && existing.Body.Contains(fact.Trim(), StringComparison.OrdinalIgnoreCase))
+        string body;
+        MemoryOperation operation;
+        if (existing is not null && FactNegation.Retract(existing.Body, fact.Trim()) is { } retracted)
+        {
+            body = retracted.Trim().Length == 0 ? string.Empty : retracted.TrimEnd() + "\n";
+            operation = MemoryOperation.Delete;
+        }
+        else if (existing is not null && existing.Body.Contains(fact.Trim(), StringComparison.OrdinalIgnoreCase))
         {
             return MemoryOperation.NoOp;
         }
-
-        var now = _time.GetUtcNow();
-        if (existing is not null)
+        else
         {
-            await WriteHistoryAsync(path, existing, now, cancellationToken);
+            body = existing is null ? bullet + "\n" : existing.Body.TrimEnd() + "\n" + bullet + "\n";
+            operation = existing is null ? MemoryOperation.Add : MemoryOperation.Update;
         }
 
+        var now = _time.GetUtcNow();
         var metadata = (existing?.Metadata ?? new PageMetadata { Created = now }) with
         {
             Description = string.IsNullOrWhiteSpace(description) ? existing?.Metadata.Description ?? string.Empty : description,
             Source = $"agent:{context.Agent}/{context.SessionId}",
             Updated = now,
+            LastValidated = now,
             ValidFrom = now,
-            ValidTo = null,
+
+            // A page whose last fact was retracted has no live content left: close its validity window.
+            ValidTo = string.IsNullOrWhiteSpace(body) ? now : null,
             Taint = existing?.Metadata.Taint == Taint.Tainted ? Taint.Tainted : context.SessionTaint,
         };
-        var body = existing is null ? bullet + "\n" : existing.Body.TrimEnd() + "\n" + bullet + "\n";
         var content = FrontmatterSerializer.Write(metadata, body);
         EnsureSize(content);
 
         if (proposesUserChange)
         {
             var before = File.Exists(file) ? await File.ReadAllTextAsync(file, cancellationToken) : null;
-            var change = new PendingUserChange(Guid.NewGuid().ToString("N"), path.Value, context.Agent, before, content, now);
-            _pending[change.Id] = change;
-            return MemoryOperation.Proposed;
+            var change = new PendingUserChange(Guid.NewGuid().ToString("N"), path.Value, context.Agent.Value, before, content, now);
+            return _pending.TryAdd(change, _options.MaxPendingPerProposer) == PendingAddResult.QueueFull
+                ? throw new MemoryAccessDeniedException($"{context.Agent} already has {_options.MaxPendingPerProposer} /user changes awaiting review; wait for them to be approved or discarded.")
+                : MemoryOperation.Proposed;
+        }
+
+        // Proposals write no history: approval snapshots the page it replaces (ResolveUserChangeAsync).
+        if (existing is not null)
+        {
+            await WriteHistoryAsync(path, existing, now, cancellationToken);
         }
 
         await WriteFileAsync(file, content, cancellationToken);
-        if (_index is not null)
+        await SyncIndexAsync(new MemoryPage(path, metadata, body), cancellationToken);
+        await _versioning.CommitAsync($"{operation.ToString().ToLowerInvariant()} {path} by {context.Agent}", cancellationToken);
+        return operation;
+    }
+
+    /// <summary>
+    /// Records that an agent re-verified a page against its source system (FR-MEM-07): sets <c>lastValidated</c>
+    /// (and <c>lastAccessed</c>) to now. Requires direct write access, so <c>/user/</c> pages are not eligible.
+    /// </summary>
+    public async Task<MemoryOperation> MarkValidatedAsync(MemoryAccessContext context, string rawPath, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (context.Incognito)
         {
-            await _index.UpsertAsync(new MemoryPage(path, metadata, body), cancellationToken);
+            return MemoryOperation.NoOp;
         }
 
-        await _versioning.CommitAsync($"{(existing is null ? "add" : "update")} {path} by {context.Agent}", cancellationToken);
-        return existing is null ? MemoryOperation.Add : MemoryOperation.Update;
+        var path = Parse(rawPath);
+        EnsureWritable(context, path);
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            var file = ResolveFile(path);
+            var page = File.Exists(file) ? await LoadAsync(path, file, cancellationToken) : null;
+            if (page is null || page.Metadata.ValidTo is not null)
+            {
+                return MemoryOperation.NoOp;
+            }
+
+            var now = _time.GetUtcNow();
+            await WriteFileAsync(file, FrontmatterSerializer.Write(page.Metadata with { LastValidated = now, LastAccessed = now }, page.Body), cancellationToken);
+            await _versioning.CommitAsync($"revalidate {path} by {context.Agent}", cancellationToken);
+            return MemoryOperation.Update;
+        }
+        finally
+        {
+            _gate.Release();
+        }
     }
 
     /// <summary>
@@ -242,22 +328,30 @@ public sealed class WikiStore : IMemoryStore
 
         var path = Parse(rawPath);
         EnsureWritable(context, path);
-        var file = ResolveFile(path);
-        var page = File.Exists(file) ? await LoadAsync(path, file, cancellationToken) : null;
-        if (page is null || page.Metadata.ValidTo is not null)
+        await _gate.WaitAsync(cancellationToken);
+        try
         {
-            return MemoryOperation.NoOp;
-        }
+            var file = ResolveFile(path);
+            var page = File.Exists(file) ? await LoadAsync(path, file, cancellationToken) : null;
+            if (page is null || page.Metadata.ValidTo is not null)
+            {
+                return MemoryOperation.NoOp;
+            }
 
-        var metadata = page.Metadata with { ValidTo = _time.GetUtcNow() };
-        await WriteFileAsync(file, FrontmatterSerializer.Write(metadata, page.Body), cancellationToken);
-        if (_index is not null)
+            var metadata = page.Metadata with { ValidTo = _time.GetUtcNow() };
+            await WriteFileAsync(file, FrontmatterSerializer.Write(metadata, page.Body), cancellationToken);
+            if (_index is not null)
+            {
+                await _index.DeleteAsync(path.Value, cancellationToken);
+            }
+
+            await _versioning.CommitAsync($"supersede {path} by {context.Agent}", cancellationToken);
+            return MemoryOperation.Update;
+        }
+        finally
         {
-            await _index.DeleteAsync(path.Value, cancellationToken);
+            _gate.Release();
         }
-
-        await _versioning.CommitAsync($"supersede {path} by {context.Agent}", cancellationToken);
-        return MemoryOperation.Update;
     }
 
     /// <summary><c>forget</c>: delete a page in a directly writable scope.</summary>
@@ -270,44 +364,254 @@ public sealed class WikiStore : IMemoryStore
 
         var path = Parse(rawPath);
         EnsureWritable(context, path);
-        var file = ResolveFile(path);
-        if (!File.Exists(file))
+        await _gate.WaitAsync(cancellationToken);
+        try
         {
-            return MemoryOperation.NoOp;
+            var file = ResolveFile(path);
+            if (!File.Exists(file))
+            {
+                return MemoryOperation.NoOp;
+            }
+
+            File.Delete(file);
+            if (_index is not null)
+            {
+                await _index.DeleteAsync(path.Value, cancellationToken);
+            }
+
+            await _versioning.CommitAsync($"forget {path} by {context.Agent}", cancellationToken);
+            return MemoryOperation.Delete;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Apply or discard a staged change (a <c>/user/</c> proposal or a consolidation proposal). Not reachable from agent
+    /// tools: only <see cref="Admin.MemoryAdmin"/> calls it, behind a human-principal check (FR-MEM-05, FR-MEM-12).
+    /// The change leaves the queue only once it is applied or deliberately discarded, so a failure while applying keeps it.
+    /// A stale proposal (page body changed since it was proposed) is discarded rather than clobbering newer content.
+    /// Applied content is injection-scanned: a hit is written for review but quarantined and kept out of the index.
+    /// </summary>
+    internal async Task<PendingChangeResult> ResolveUserChangeAsync(string changeId, bool apply, CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (_pending.Find(changeId) is not { } change)
+            {
+                return PendingChangeResult.NotFound;
+            }
+
+            if (!apply)
+            {
+                _pending.Remove(change.Id);
+                return PendingChangeResult.Discarded;
+            }
+
+            var path = MemoryPath.Parse(change.Path);
+            var file = ResolveFile(path);
+            var current = File.Exists(file) ? await File.ReadAllTextAsync(file, cancellationToken) : null;
+            if (!SameBody(change.Before, current))
+            {
+                _pending.Remove(change.Id);
+                return PendingChangeResult.Stale;
+            }
+
+            if (current is not null)
+            {
+                var (currentMetadata, currentBody) = FrontmatterSerializer.Parse(current);
+                await WriteHistoryAsync(path, new MemoryPage(path, currentMetadata, currentBody), _time.GetUtcNow(), cancellationToken);
+            }
+
+            switch (change.Kind)
+            {
+                case PendingChangeKind.Write:
+                    await WriteFileAsync(file, change.After, cancellationToken);
+                    _pending.Remove(change.Id);
+                    var (metadata, body) = FrontmatterSerializer.Parse(change.After);
+                    if (InjectionScanner.LooksInjected(change.After))
+                    {
+                        _quarantined.TryAdd(path.Value, 0);
+                        await DeleteFromIndexAsync(path, cancellationToken);
+                    }
+                    else
+                    {
+                        _quarantined.TryRemove(path.Value, out _);
+                        await SyncIndexAsync(new MemoryPage(path, metadata, body), cancellationToken);
+                    }
+
+                    break;
+                case PendingChangeKind.Delete:
+                    File.Delete(file);
+                    _pending.Remove(change.Id);
+                    _quarantined.TryRemove(path.Value, out _);
+                    await DeleteFromIndexAsync(path, cancellationToken);
+                    break;
+                case PendingChangeKind.Archive:
+                    var target = Path.Combine(_root, "archive", path.RelativeFileSystemPath);
+                    Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                    File.Move(file, target, overwrite: true);
+                    _pending.Remove(change.Id);
+                    _quarantined.TryRemove(path.Value, out _);
+                    await DeleteFromIndexAsync(path, cancellationToken);
+                    break;
+            }
+
+            await _versioning.CommitAsync($"approve {change.Kind.ToString().ToLowerInvariant()} {path} proposed by {change.ProposedBy}", cancellationToken);
+            return PendingChangeResult.Applied;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Stages a proposal on any page (used by consolidation, FR-MEM-08). Nothing on disk changes until a human resolves it.
+    /// Equivalent pending proposals are not staged twice, so nightly runs do not pile up, and a proposer is capped at
+    /// <see cref="MemoryOptions.MaxPendingPerProposer"/> waiting changes.
+    /// </summary>
+    internal PendingAddResult TryStage(PendingChangeKind kind, MemoryPath path, string proposedBy, string? before, string after, string reason) =>
+        _pending.TryAdd(new PendingUserChange(Guid.NewGuid().ToString("N"), path.Value, proposedBy, before, after, _time.GetUtcNow())
+        {
+            Kind = kind,
+            Reason = reason,
+        }, _options.MaxPendingPerProposer);
+
+    /// <summary>Human edit of any page (FR-MEM-12). Keeps provenance, stores the prior version in history, refreshes the index.</summary>
+    internal async Task WriteHumanPageAsync(MemoryPath path, string description, string body, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            var file = ResolveFile(path);
+            var now = _time.GetUtcNow();
+            PageMetadata metadata;
+            if (File.Exists(file))
+            {
+                var (existing, existingBody) = FrontmatterSerializer.Parse(await File.ReadAllTextAsync(file, cancellationToken));
+                await WriteHistoryAsync(path, new MemoryPage(path, existing, existingBody), now, cancellationToken);
+                metadata = existing with { Description = description, Updated = now, LastValidated = now, Source = "user:pwa" };
+            }
+            else
+            {
+                metadata = new PageMetadata { Description = description, Source = "user:pwa", Created = now, Updated = now, LastValidated = now, ValidFrom = now };
+            }
+
+            var content = FrontmatterSerializer.Write(metadata, body);
+            EnsureSize(content);
+            await WriteFileAsync(file, content, cancellationToken);
+            if (InjectionScanner.LooksInjected(content))
+            {
+                // Stays on disk for review but never reaches a model or the index.
+                _quarantined.TryAdd(path.Value, 0);
+                await DeleteFromIndexAsync(path, cancellationToken);
+            }
+            else
+            {
+                _quarantined.TryRemove(path.Value, out _);
+                await SyncIndexAsync(new MemoryPage(path, metadata, body), cancellationToken);
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>Human delete of any page (FR-MEM-12). The deleted content is kept in history.</summary>
+    internal async Task<bool> DeleteHumanPageAsync(MemoryPath path, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            var file = ResolveFile(path);
+            if (!File.Exists(file))
+            {
+                return false;
+            }
+
+            var (metadata, body) = FrontmatterSerializer.Parse(await File.ReadAllTextAsync(file, cancellationToken));
+            await WriteHistoryAsync(path, new MemoryPage(path, metadata, body), _time.GetUtcNow(), cancellationToken);
+            File.Delete(file);
+            _quarantined.TryRemove(path.Value, out _);
+            await DeleteFromIndexAsync(path, cancellationToken);
+            return true;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async Task<MemoryPage?> TouchAsync(MemoryPage page, CancellationToken cancellationToken)
+    {
+        var now = _time.GetUtcNow();
+        if (IsFresh(page.Metadata, now))
+        {
+            return page;
         }
 
-        File.Delete(file);
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            // Re-read under the gate so a concurrent write is never overwritten with stale content.
+            var file = ResolveFile(page.Path);
+            if (!File.Exists(file) || await LoadAsync(page.Path, file, cancellationToken) is not { } current)
+            {
+                return null;
+            }
+
+            if (IsFresh(current.Metadata, now))
+            {
+                return current;
+            }
+
+            var touched = current with { Metadata = current.Metadata with { LastAccessed = now } };
+            await WriteFileAsync(file, FrontmatterSerializer.Write(touched.Metadata, touched.Body), cancellationToken);
+            return touched;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private bool IsFresh(PageMetadata metadata, DateTimeOffset now) =>
+        metadata.LastAccessed is { } last && now - last < _options.LastAccessedDebounce;
+
+    /// <summary>True when the two file contents have the same page body; metadata-only drift (such as <c>lastAccessed</c>) is ignored.</summary>
+    private static bool SameBody(string? left, string? right) =>
+        left is null || right is null
+            ? left is null && right is null
+            : string.Equals(FrontmatterSerializer.Parse(left).Body, FrontmatterSerializer.Parse(right).Body, StringComparison.Ordinal);
+
+    private async Task SyncIndexAsync(MemoryPage page, CancellationToken cancellationToken)
+    {
+        if (_index is null)
+        {
+            return;
+        }
+
+        if (page.Metadata.ValidTo is null)
+        {
+            await _index.UpsertAsync(page, cancellationToken);
+        }
+        else
+        {
+            await _index.DeleteAsync(page.Path.Value, cancellationToken);
+        }
+    }
+
+    private async Task DeleteFromIndexAsync(MemoryPath path, CancellationToken cancellationToken)
+    {
         if (_index is not null)
         {
             await _index.DeleteAsync(path.Value, cancellationToken);
         }
-
-        await _versioning.CommitAsync($"forget {path} by {context.Agent}", cancellationToken);
-        return MemoryOperation.Delete;
-    }
-
-    /// <summary>Human-only: apply or discard a staged <c>/user/</c> change from the PWA.</summary>
-    public async Task<bool> ResolveUserChangeAsync(string changeId, bool apply, CancellationToken cancellationToken = default)
-    {
-        if (!_pending.TryRemove(changeId, out var change))
-        {
-            return false;
-        }
-
-        if (apply)
-        {
-            var path = MemoryPath.Parse(change.Path);
-            await WriteFileAsync(ResolveFile(path), change.After, cancellationToken);
-            if (_index is not null)
-            {
-                var (metadata, body) = FrontmatterSerializer.Parse(change.After);
-                await _index.UpsertAsync(new MemoryPage(path, metadata, body), cancellationToken);
-            }
-
-            await _versioning.CommitAsync($"approve user change {path} proposed by {change.ProposedBy}", cancellationToken);
-        }
-
-        return true;
     }
 
     private static int CountOccurrences(string haystack, string term)
@@ -360,7 +664,7 @@ public sealed class WikiStore : IMemoryStore
     }
 
     /// <summary>Maps a validated path onto disk and refuses anything that escapes the root or crosses a symlink.</summary>
-    private string ResolveFile(MemoryPath path)
+    internal string ResolveFile(MemoryPath path)
     {
         var full = Path.GetFullPath(Path.Combine(_root, path.RelativeFileSystemPath));
         if (!full.StartsWith(_root + Path.DirectorySeparatorChar, StringComparison.Ordinal))

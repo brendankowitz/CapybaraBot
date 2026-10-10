@@ -14,6 +14,12 @@ public sealed partial class MemoryContextBuilder(IMemoryStore store, MemoryOptio
 {
     private const int CharsPerToken = 4;
 
+    /// <summary>Overrides how pages are read, so building the per-turn index does not count as an access (FR-MEM-04).</summary>
+    internal Func<MemoryAccessContext, string, CancellationToken, Task<MemoryPage?>>? Reader { get; init; }
+
+    private Task<MemoryPage?> ReadAsync(MemoryAccessContext context, string path, CancellationToken cancellationToken) =>
+        Reader is { } reader ? reader(context, path, cancellationToken) : store.ReadAsync(context, path, cancellationToken);
+
     public async Task<string> BuildAsync(MemoryAccessContext context, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -25,7 +31,7 @@ public sealed partial class MemoryContextBuilder(IMemoryStore store, MemoryOptio
         var pages = new List<MemoryPage>();
         foreach (var path in store.List(context))
         {
-            if (await store.ReadAsync(context, path, cancellationToken) is { } page && page.Metadata.ValidTo is null)
+            if (await ReadAsync(context, path, cancellationToken) is { } page && page.Metadata.ValidTo is null)
             {
                 pages.Add(page);
             }
@@ -54,7 +60,7 @@ public sealed partial class MemoryContextBuilder(IMemoryStore store, MemoryOptio
 
         builder.Append("</memory-index>");
 
-        if (context.CanReadUser && await store.ReadAsync(context, "/user/profile.md", cancellationToken) is { } profile)
+        if (context.CanReadUser && await ReadAsync(context, "/user/profile.md", cancellationToken) is { } profile)
         {
             var cap = options.ProfileTokenBudget * CharsPerToken;
             var body = profile.Body.Length > cap ? profile.Body[..cap] + "…" : profile.Body;

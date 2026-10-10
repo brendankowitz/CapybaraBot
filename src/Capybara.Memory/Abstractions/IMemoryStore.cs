@@ -4,11 +4,12 @@ using Capybara.Memory.Store;
 
 namespace Capybara.Memory.Abstractions;
 
-/// <summary>Host-owned memory operations exposed to runtime tools (FR-MEM-02, FR-MEM-03, FR-MEM-05, FR-MEM-12).</summary>
+/// <summary>
+/// Host-owned memory operations exposed to runtime tools (FR-MEM-02, FR-MEM-03, FR-MEM-05, FR-MEM-12). Deliberately has no
+/// way to list or resolve staged changes: approval is human-only and lives on <c>MemoryAdmin</c>.
+/// </summary>
 public interface IMemoryStore
 {
-    IReadOnlyList<PendingUserChange> PendingUserChanges { get; }
-
     Task<MemoryPage?> ReadAsync(MemoryAccessContext context, string rawPath, CancellationToken cancellationToken = default);
 
     IReadOnlyList<string> List(MemoryAccessContext context, string? prefix = null);
@@ -23,5 +24,6 @@ public interface IMemoryStore
 
     Task<MemoryOperation> ForgetAsync(MemoryAccessContext context, string rawPath, CancellationToken cancellationToken = default);
 
-    Task<bool> ResolveUserChangeAsync(string changeId, bool apply, CancellationToken cancellationToken = default);
+    /// <summary>Records that the agent re-verified the page against its source system, setting <c>lastValidated</c> (FR-MEM-04, FR-MEM-07).</summary>
+    Task<MemoryOperation> MarkValidatedAsync(MemoryAccessContext context, string rawPath, CancellationToken cancellationToken = default);
 }
