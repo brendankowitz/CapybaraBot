@@ -261,6 +261,31 @@ public sealed class MemoryReviewFixTests : IDisposable
     // Minors -----------------------------------------------------------------------------------------------------
 
     [Fact]
+    public async Task Proposals_against_an_existing_user_page_write_no_history_even_when_the_queue_is_full()
+    {
+        var store = NewStore(new MemoryOptions { Root = _dir.Path, MaxPendingPerProposer = 2 });
+        await WriteAsync("user/prefs.md", "---\ndescription: prefs\ntaint: clean\nupdated: 2026-01-01T00:00:00.0000000+00:00\n---\n- Likes oat milk\n", Ct);
+        var history = Path.Combine(_dir.Path, ".history");
+
+        await store.RememberAsync(Context(), "/user/prefs", "Fact one", "Prefs", Ct);
+        await store.RememberAsync(Context(), "/user/prefs", "Fact two", "Prefs", Ct);
+        for (var i = 0; i < 20; i++)
+        {
+            _time.Advance(TimeSpan.FromSeconds(1));
+            await Assert.ThrowsAsync<MemoryAccessDeniedException>(() => store.RememberAsync(Context(), "/user/prefs", $"Fact extra {i}", "Prefs", Ct));
+            Assert.Equal(MemoryOperation.Proposed, await store.RememberAsync(Context(), "/user/prefs", "Fact one", "Prefs", Ct));
+        }
+
+        Assert.Equal(2, store.PendingUserChanges.Count);
+        Assert.False(Directory.Exists(history) && Directory.EnumerateFiles(history, "*", SearchOption.AllDirectories).Any());
+
+        // Approval is what snapshots the replaced page.
+        var first = store.PendingUserChanges[0];
+        Assert.Equal(PendingChangeResult.Applied, await store.ResolveUserChangeAsync(first.Id, apply: true, Ct));
+        Assert.Single(Directory.EnumerateFiles(history, "*", SearchOption.AllDirectories));
+    }
+
+    [Fact]
     public async Task Read_only_consult_sessions_do_not_update_last_accessed()
     {
         var store = NewStore();

@@ -244,11 +244,6 @@ public sealed class WikiStore : IMemoryStore, IDisposable
         }
 
         var now = _time.GetUtcNow();
-        if (existing is not null)
-        {
-            await WriteHistoryAsync(path, existing, now, cancellationToken);
-        }
-
         var metadata = (existing?.Metadata ?? new PageMetadata { Created = now }) with
         {
             Description = string.IsNullOrWhiteSpace(description) ? existing?.Metadata.Description ?? string.Empty : description,
@@ -271,6 +266,12 @@ public sealed class WikiStore : IMemoryStore, IDisposable
             return _pending.TryAdd(change, _options.MaxPendingPerProposer) == PendingAddResult.QueueFull
                 ? throw new MemoryAccessDeniedException($"{context.Agent} already has {_options.MaxPendingPerProposer} /user changes awaiting review; wait for them to be approved or discarded.")
                 : MemoryOperation.Proposed;
+        }
+
+        // Proposals write no history: approval snapshots the page it replaces (ResolveUserChangeAsync).
+        if (existing is not null)
+        {
+            await WriteHistoryAsync(path, existing, now, cancellationToken);
         }
 
         await WriteFileAsync(file, content, cancellationToken);

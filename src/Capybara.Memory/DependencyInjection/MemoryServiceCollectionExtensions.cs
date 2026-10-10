@@ -18,7 +18,7 @@ public static class MemoryServiceCollectionExtensions
     /// Registers the wiki (<see cref="WikiStore"/> with its FTS5 index, rebuilt on start), the <see cref="IMemoryStore"/>
     /// composite over any registered <see cref="IMemoryProvider"/>s, <see cref="MemoryAdmin"/>, <see cref="MemoryExporter"/>
     /// and the nightly <see cref="ConsolidationJob"/> hosted service. Consolidation only stages proposals; apply or discard
-    /// them with <see cref="WikiStore.ResolveUserChangeAsync"/>.
+    /// them with <c>MemoryAdmin.ResolveChangeAsync</c>.
     /// </summary>
     /// <remarks>
     /// <see cref="TimeProvider"/> and <see cref="IMemoryVersioning"/> (default: git CLI on the memory root) are registered

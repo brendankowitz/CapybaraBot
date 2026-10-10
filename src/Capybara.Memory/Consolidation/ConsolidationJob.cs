@@ -80,7 +80,7 @@ public sealed partial class ConsolidationJob(WikiStore store, MemoryOptions opti
             }
 
             var content = await File.ReadAllTextAsync(daily, cancellationToken);
-            if (InjectionScanner.LooksInjected(content))
+            if (LooksInjected(content))
             {
                 continue;
             }
@@ -104,7 +104,7 @@ public sealed partial class ConsolidationJob(WikiStore store, MemoryOptions opti
             var notesPath = MemoryPath.Parse(notesRelative);
             var notesFile = Path.Combine(store.Root, notesPath.RelativeFileSystemPath);
             var before = File.Exists(notesFile) ? await File.ReadAllTextAsync(notesFile, cancellationToken) : null;
-            if (before is not null && (store.IsQuarantined(notesRelative) || InjectionScanner.LooksInjected(before)))
+            if (before is not null && (store.IsQuarantined(notesRelative) || LooksInjected(before)))
             {
                 continue;
             }
@@ -244,6 +244,19 @@ public sealed partial class ConsolidationJob(WikiStore store, MemoryOptions opti
         }
 
         return FrontmatterSerializer.Write(metadata, text[..Math.Max(keep, 0)] + TruncationMarker);
+    }
+
+    /// <summary>The scanner's regex has a timeout; a timeout means hostile or pathological input, so treat it as injected.</summary>
+    private static bool LooksInjected(string content)
+    {
+        try
+        {
+            return InjectionScanner.LooksInjected(content);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return true;
+        }
     }
 
     /// <summary>Pages in the live wiki, in a stable order. History, archive and the pending area are not live.</summary>
