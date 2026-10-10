@@ -40,6 +40,8 @@ LoadCredentialEncrypted=broker-api-key:/etc/capybara/credentials/broker-api-key.
 #LoadCredentialEncrypted=webpush-vapid-private-key:/etc/capybara/credentials/webpush-vapid-private-key.cred
 # ntfy access token: the name is whatever Capybara:Channels:Ntfy:AccessTokenCredential says.
 #LoadCredentialEncrypted=ntfy-access-token:/etc/capybara/credentials/ntfy-access-token.cred
+# Webhook HMAC secrets: one per Capybara:Events:Sources:{name}, named by its SecretCredential (a source without one is refused).
+#LoadCredentialEncrypted=events-github-secret:/etc/capybara/credentials/events-github-secret.cred
 # Per-agent secrets the sessions resolve by name (FR-AGT-10): one line per name used in agent.yaml, credential name = that name.
 #   BYOK provider key  -> provider.apiKeySecret        e.g. LoadCredentialEncrypted=openai-key:/etc/capybara/credentials/openai-key.cred
 #   http MCP bearer    -> mcpServers[].tokenSecret      e.g. LoadCredentialEncrypted=mcp-docs-token:/etc/capybara/credentials/mcp-docs-token.cred

@@ -21,6 +21,11 @@
 ## Install steps
 
 1. Create the service users (`capybara`, `capybara-broker`) and `install -d -o capybara -g capybara -m 0700 /var/backups/capybara`.
+   Publish each process into its own directory for the host's RID (FR-HST-04; `linux-arm64` on ARM), as root:
+   `dotnet publish src/Capybara.Gateway/Capybara.Gateway.csproj -c Release -r linux-x64 --self-contained -o /opt/capybara` and
+   `dotnet publish src/Capybara.Broker/Capybara.Broker.csproj -c Release -r linux-x64 --self-contained -o /opt/capybara-broker`.
+   Never publish both into one directory: each process's content root is its working directory, so one would read the other's
+   `appsettings.json`.
 2. Put the config tree in `/etc/capybara` (`agents/`, `rules.yaml`, `routines.yaml`) owned by `capybara:capybara`, directories
    `0750` and files `0640`: `chown -R capybara:capybara /etc/capybara && find /etc/capybara -type d -exec chmod 0750 {} + && find
    /etc/capybara -type f -exec chmod 0640 {} +`. capybara-broker reads every `agents/*/agent.yaml` for its grants through the
@@ -30,14 +35,16 @@
    capybarad commits every change with git, so `git` must be installed.
 3. Encrypt the credentials into `/etc/capybara/credentials` with `systemd-creds encrypt --name=<name> <file> <name>.cred`:
    - capybarad: `github-token` (Copilot PAT), `broker-api-key` (random, shared with the broker), optionally `telegram-bot-token` and
-     `webpush-vapid-private-key` or the ntfy access token (then uncomment their lines in `capybarad.service`), and one credential per
-     secret name agents use: `provider.apiKeySecret` (BYOK key) and `mcpServers[].tokenSecret` (http MCP bearer), named exactly as in
-     `agent.yaml`;
+     `webpush-vapid-private-key` or the ntfy access token (then uncomment their lines in `capybarad.service`), one credential per
+     webhook source named by its `Capybara:Events:Sources:{name}:SecretCredential` (the HMAC secret; uncomment and adapt the sample
+     line), and one credential per secret name agents use: `provider.apiKeySecret` (BYOK key) and `mcpServers[].tokenSecret` (http MCP
+     bearer), named exactly as in `agent.yaml`;
    - capybara-broker: `broker-api-key` (same value), `broker-vault-key` (`head -c32 /dev/urandom | base64`), `connection-github`,
      `oauth-google-client-secret`, plus one line per further connection.
 4. Copy `systemd/capybarad.egress.sample.conf` to `/etc/systemd/system/capybarad.service.d/egress.conf` and list the public
    endpoints capybarad must reach.
-5. `systemctl enable --now capybara-broker capybarad` (capybarad orders itself after the broker). Then `tailscale serve` the loopback
+5. `systemctl enable --now capybara-broker capybarad`. Both units are `Type=notify`, so capybarad (ordered after the broker) starts
+   only once the broker is listening, and its agents' start-up self-tests find their broker tools. Then `tailscale serve` the loopback
    port.
 6. Backups: either keep `Capybara:Backup:InProcess=true` (default) with sources in capybarad's config, or enable
    `capybara-backup.timer` and set `Capybara__Backup__InProcess=false` in a capybarad drop-in. Never both.
@@ -49,6 +56,7 @@
   `systemd/capybarad.egress.sample.conf` to `/etc/systemd/system/capybarad.service.d/egress.conf`. Until you do, capybarad can only reach
   loopback and the tailnet. Per-agent domain egress is enforced by srt, not by the unit.
 - `MemoryDenyWriteExecute` is deliberately never set: the .NET JIT and the Copilot CLI's Node runtime need executable pages (FR-HST-02).
+- `capybara-broker.service` is `Type=notify` too (the broker calls `AddSystemd()`) and runs from `/opt/capybara-broker`.
 - `capybara-agent@.service` is a **Phase 2** template. It runs `capybarad agent <id>` (per-agent mode of the gateway binary). Do not
   enable it yet: without the gateway<->agent RPC, capybarad still runs every agent itself.
 

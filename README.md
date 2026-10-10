@@ -3,7 +3,7 @@
 A small, hardened fleet of personal agents (`ea`, `code`, `research`, …) built on the
 [GitHub Copilot SDK for .NET](https://www.nuget.org/packages/GitHub.Copilot.SDK). It runs as a single
 daemon, `capybarad`, on a home server and can only be reached over your tailnet. See [`spec.md`](spec.md)
-for the full specification. Requirement IDs such as `FR-POL-03` appear in XML docs throughout the code.
+for the full specification. Requirement IDs such as `FR-SAF-03` appear in XML docs throughout the code.
 
 The model only ever *proposes* actions. Policy, budgets, taint and approvals are enforced in code
 that the model cannot change.
@@ -78,7 +78,8 @@ name a systemd credential read from `$CREDENTIALS_DIRECTORY`.
 | `Capybara:Incognito` | `IdleTimeout` (default 30 min) after which an unused incognito conversation's CLI session is deleted, and `SweepInterval` (default 5 min). Sessions from before a restart are deleted at start. |
 | `Capybara:Hosting` | `StateDatabasePath` and `BlobRoot` (backup archives; default `{StateRoot}/blobs`). |
 | `Capybara:Backup` | `Sources[]`, `RetainCount`, `ScheduleUtc`, shared with `capybarad backup`. `InProcess` (default `true`) runs the nightly job inside capybarad; set `false` when `capybara-backup.timer` runs it. |
-| `Capybara:Runtime` | `AutoStart`, `CliPath`/`CliArgs` (unsandboxed only), `TurnTimeout`, `FrontDoorAgent`, `ReviewerModel`, `ToolSearchDeferThreshold`, `BuiltInSkillDirectory`, plus the isolation settings below. |
+| `Capybara:Runtime` | `AutoStart`, `CliPath`/`CliArgs` (unsandboxed only), `TurnTimeout`, `ConsultTimeout` (default 5 min per `ask_agent` answer), `FrontDoorAgent`, `ReviewerModel`, `ReviewerTimeout` (default 45 s; running out escalates the call to you), `ToolSearchDeferThreshold`, `BuiltInSkillDirectory`, plus the isolation settings below. |
+| `Capybara:Runtime:UntrustedInputTools` | Tools whose results are untrusted, so using one taints the session (FR-SAF-03). Default `web_fetch`, `web_search`, `email_read`, `calendar_read`; add every tool that returns outside content (MCP readers, other connectors), or its output counts as clean. |
 | `Capybara:Runtime:CliEnvironmentPassthrough` | Host variables copied into each CLI's otherwise empty environment (proxies, CA bundles). Credential-like names are dropped even if listed. |
 | `Capybara:Runtime:SessionScopedGitHubToken` | `true` (default): the PAT goes to each session over RPC, never into the CLI's environment. `false` is a rollback switch only. |
 | `Capybara:Runtime:StdioMcpIsolation` | `ClearEnvironment` (Unix default, wraps stdio MCP servers in `env -i`) or `Refuse` (Windows default). |
@@ -86,7 +87,7 @@ name a systemd credential read from `$CREDENTIALS_DIRECTORY`.
 | `Capybara:Runtime:Sandbox` | `SrtPath` and `CopilotCliPath` turn on per-agent srt sandboxing (`SettingsDirectory` defaults to `{StateRoot}/srt`). |
 | `Capybara:Supervisor` | `CheckInterval`, `MaxCrashes` and back-off for runtime restarts. |
 | `Capybara:Broker` | `BaseAddress` or `UnixSocketPath` of capybara-broker, `ApiKeyCredential` (default `broker-api-key`), `TokenExpiryLeadTime`. |
-| `Capybara:Channels` | `Ntfy` (`BaseUrl`, `Topic`, `AccessTokenCredential`, `SupportsSensitiveContent` default `true` for a tailnet-only server, `GatewayBaseUrl`), `WebPush` (`Subject`, `PublicKey`, `PrivateKeyCredential`), `Telegram` (`BotTokenCredential`, `ChatId`, `AllowedUserId` enables DM polling), `QuietHours`. Channels without settings are off; preference is ntfy, Web Push, Telegram. |
+| `Capybara:Channels` | `Ntfy` (`BaseUrl`, `Topic`, `AccessTokenCredential`, `SupportsSensitiveContent` default `true` for a tailnet-only server, `GatewayBaseUrl`: the PWA's tailnet URL, used for the tap target and the "Review" button, which opens the approval in the PWA), `WebPush` (`Subject`, `PublicKey`, `PrivateKeyCredential`), `Telegram` (`BotTokenCredential`, `ChatId`, `AllowedUserId` enables DM polling, `DeepLinkBaseUrl`: the PWA's tailnet URL, so the link in a Telegram message opens the PWA instead of a bare path), `QuietHours`. Channels without settings are off; preference is ntfy, Web Push, Telegram. |
 | `Capybara:Scheduling` | `TimeZone`, `ConcurrencyCap`, `AutoPauseDays`, `CatchUpPolicy` (`Skip` or `FireOnceNow`). |
 | `Capybara:Approvals` / `Capybara:A2A` / `Capybara:Quota` | Approval TTLs; A2A limits; quota `PollInterval`. |
 | `Capybara:Telemetry` | `OtlpEndpoint` (an OTLP/HTTP collector such as the Aspire dashboard or Grafana LGTM; unset = no export) and `OtlpProtocol`. With `http/protobuf` the same endpoint is passed to every agent CLI; the CLI cannot export over gRPC, so with `grpc` set `Capybara:Runtime:OtlpEndpoint` to an OTLP/HTTP endpoint separately (a startup warning says so). Content capture is always off. |
@@ -96,15 +97,32 @@ Command-line modes: `capybarad backup`, `capybarad restore <archive> <destinatio
 
 ### Deployment
 
-1. Kestrel binds to `127.0.0.1` only. Publish it with `tailscale serve --bg 8787`, never with Funnel.
-2. Encrypt the secrets with `systemd-creds encrypt` into `/etc/capybara/credentials`: `github-token` and `broker-api-key` for
-   capybarad; `broker-api-key`, `broker-vault-key`, `connection-*` and `oauth-*-client-secret` for capybara-broker.
-3. Install `deploy/systemd/capybara-broker.service` and `capybarad.service` (`Type=notify`, ordered after the broker) and, if you
-   want out-of-process backups, the backup timer. `deploy/README.md` has the full steps, the egress drop-in and the srt notes.
-4. Webhooks from the internet (GitHub, mail push) reach capybarad only through a relay you run on the tailnet. Give that relay its
+1. Publish both processes for the host's RID (FR-HST-04; use `linux-arm64` on ARM). Each gets its own directory: the content root
+   is the working directory, so sharing one would make each process read the other's `appsettings.json`.
+
+   ```bash
+   dotnet publish src/Capybara.Gateway/Capybara.Gateway.csproj -c Release -r linux-x64 --self-contained -o /opt/capybara
+   dotnet publish src/Capybara.Broker/Capybara.Broker.csproj -c Release -r linux-x64 --self-contained -o /opt/capybara-broker
+   ```
+
+   The SDK version is pinned in `global.json`, which pins the Copilot CLI the SDK ships. Upgrade deliberately: the agents' start-up
+   tool self-test (FR-AGT-09) is the gate.
+2. Kestrel binds to `127.0.0.1` only. Publish it with `tailscale serve --bg 8787`, never with Funnel.
+3. Encrypt the secrets with `systemd-creds encrypt` into `/etc/capybara/credentials`: `github-token` and `broker-api-key` for
+   capybarad, plus one credential per webhook source, named by `Capybara:Events:Sources:{name}:SecretCredential` (uncomment and
+   adapt its `LoadCredentialEncrypted` line in `capybarad.service`); `broker-api-key`, `broker-vault-key`, `connection-*` and
+   `oauth-*-client-secret` for capybara-broker.
+4. Install `deploy/systemd/capybara-broker.service` and `capybarad.service` (both `Type=notify`; capybarad waits until the broker is
+   ready) and, if you want out-of-process backups, the backup timer. `deploy/README.md` has the full steps, the egress drop-in and the
+   srt notes.
+5. Webhooks from the internet (GitHub, mail push) reach capybarad only through a relay you run on the tailnet. Give that relay its
    own device entry with `Surface: EventRelay` and nothing else: an `EventRelay` token is refused on every route except
    `POST /api/events/**` (including approvals, proposals, memory, the kill switch and the hub), so a compromised relay can post
    events, which are HMAC-checked and always tainted, but cannot act as you. Never give the relay a phone or desktop token.
+6. The TUI (`src/Capybara.Tui`) talks to the same API as the PWA, so it must go through Tailscale Serve: set `CAPYBARA_URL` (or
+   `--base-url`) to the tailnet Serve URL, e.g. `https://capybara.<tailnet>.ts.net`. The default `http://127.0.0.1:8787` is always
+   refused with 401, because a loopback request carries no `Tailscale-User-Login`. Give it its own device entry with `Surface: Tui`
+   and pass the token in `CAPYBARA_TOKEN` or a `0600` file at `~/.config/capybara/token`.
 
 ## Security model at a glance
 
@@ -114,7 +132,11 @@ Command-line modes: `capybarad backup`, `capybarad restore <archive> <destinatio
   approves only a call the gate has just allowed, and rejects everything else.
 - **Lethal trifecta.** Reading untrusted input (`web_fetch`, email, tainted memory) taints the session.
   `AllowUnlessTainted` rules then block exfiltration paths such as sending messages to non-allowlisted
-  destinations.
+  destinations. Taint is journaled, so a session resumed after a restart is still tainted.
+- **Config edits apply live.** An approved proposal or a hand edit reaches the running agent at its next turn (its main session is
+  rebuilt; its CLI restarts for egress, MCP or provider changes) and the tool self-test runs again. Agent-proposed routines land
+  disabled until you enable them with their projected cost; a routine's `approvalBoundary` tools need approval in its runs.
+- **Human controls stick.** Agent pauses and routine enable/disable decisions survive restarts and are audited.
 - **A2A envelopes.** Envelopes carry depth (max 2), hop path (no cycles), deadline and a budget slice.
   Consults are read-only and ephemeral, ping-pong between agents is capped, and taint flows back to the caller.
 - **Kill switch.** Any device can engage it. Only a desktop can release it.
@@ -122,9 +144,25 @@ Command-line modes: `capybarad backup`, `capybarad restore <archive> <destinatio
 
 ## Not yet implemented
 
-- **PWA and TUI completion (WP12):** rich approval previews, proposal diffs, routines and budget pages, Web Push subscription.
-- **Per-agent processes (Phase 2).** `capybarad agent <id>` starts and supervises one agent's CLI, but there is no gateway-to-agent RPC,
-  so it receives no turns; every agent still runs inside capybarad. An agent created at runtime gets its runtime at the next restart.
+- **OAuth authorize and callback (FR-CON-08).** The broker can begin and complete a Google or Microsoft authorization
+  (`BrokerClient.BeginAuthorizationAsync` / `CompleteAuthorizationAsync`), but no route starts it and nothing handles the provider's
+  redirect. Until a desktop-only authorize route and a PWA `/oauth/callback` page exist, OAuth connections cannot be authorized, so the
+  sample `ea` agent's email and calendar tools do not work; token-based connections (such as `connection-github`) do.
+- **Per-agent processes (Phase 2, FR-HST-01, NFR-09).** The `IAgentHost` implementations are registered but do not run agents.
+  `capybarad agent <id>` starts and supervises one agent's CLI, but there is no gateway-to-agent RPC, so it receives no turns; every
+  agent still runs inside capybarad.
+- **Agents created at runtime** (lifecycle API) get their runtime at the next capybarad restart. Edits to existing agents apply live.
+- **File-change triggers (FR-RTN-01).** `FileChangeEventSource` exists but is never registered; heartbeat, cron and webhook triggers work.
+- **Routine `input` / `onMissingInput` (FR-RTN-02)** are parsed but not checked: a routine runs whether or not its inputs are available.
+- **Tracing (FR-OBS-01, NFR-10).** Spans are exported, and audit records carry the envelope's trace id, but there is no single root span
+  per run and no span per A2A hop, so one request is not one trace yet.
+- **Consult sessions (FR-A2A-02)** are deleted as soon as the answer is returned, not kept for the audit retention period, and produce
+  no artifacts; the fleet thread and audit log keep the record.
+- **Memory provenance (FR-MEM-04)** is per page, not per section.
+- **Project memory (FR-MEM-05).** The `/projects/` scope exists in the access policy, but no session is ever given a project, so it is
+  unreachable.
+- **Memory steward model (FR-MEM-08).** Nightly consolidation is deterministic (it stages promotions of daily logs and removals of
+  duplicates for review); there is no steward model session to summarize.
 - **Phone replies.** A DM that arrived on a phone channel is answered in the PWA; the phone gets a content-free "finished" push
   (Telegram never carries sensitive content).
 - **Egress spike alerts** count policy denials of tool calls that carry a URL; network-level denials inside srt are not yet read.
@@ -135,7 +173,10 @@ Command-line modes: `capybarad backup`, `capybarad restore <archive> <destinatio
 
 Assumptions marked in code that the tests cannot prove:
 
-- nano-AIU to credit conversion; whether `SessionLimits.MaxAiCredits` is cumulative over a long-lived main session.
+- nano-AIU to credit conversion; that an empty `SessionLimits` on resume clears a limit stored with the session (the main session is
+  resumed with none; `LiveSessionCreationTests`).
+- The SDK's `PreToolUse` hook timeout must be longer than `Capybara:Runtime:ReviewerTimeout` (45 s): if the hook times out first, the
+  CLI treats the host tool call as allowed. Built-in and broker tools stay fail-closed either way.
 - `OnPreToolUse` firing for SDK custom tools; the steering race (`immediate` mode at turn end); `SetModelAsync` on a resumed session;
   resuming or deleting a missing session; tool metadata being null until tools initialize; the reviewer session with no tools.
 - Client-level calls (ping, delete session, tool metadata, `account.getQuota`) with only a session-scoped token; `account.getQuota`
