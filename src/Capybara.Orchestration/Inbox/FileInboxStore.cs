@@ -43,19 +43,34 @@ public sealed class FileInboxStore : IInboxStore
 
     public async ValueTask<FleetMessage?> PeekAsync(AgentId agent, CancellationToken cancellationToken = default)
     {
-        var file = Files(agent).FirstOrDefault();
-        if (file is null)
+        foreach (var file in Files(agent))
         {
-            return null;
+            if (await TryReadAsync(file, cancellationToken) is { } message)
+            {
+                return message;
+            }
         }
 
-        await using var stream = File.OpenRead(file);
-        return await JsonSerializer.DeserializeAsync<FleetMessage>(stream, JsonOptions, cancellationToken);
+        return null;
+    }
+
+    public async ValueTask<IReadOnlyList<FleetMessage>> ListAsync(AgentId agent, CancellationToken cancellationToken = default)
+    {
+        var messages = new List<FleetMessage>();
+        foreach (var file in Files(agent).ToList())
+        {
+            if (await TryReadAsync(file, cancellationToken) is { } message)
+            {
+                messages.Add(message);
+            }
+        }
+
+        return messages;
     }
 
     public ValueTask AcknowledgeAsync(AgentId agent, string messageId, CancellationToken cancellationToken = default)
     {
-        foreach (var file in Files(agent).Where(f => f.EndsWith($"-{messageId}.json", StringComparison.Ordinal)))
+        foreach (var file in FilesFor(agent, messageId))
         {
             File.Delete(file);
         }
@@ -63,8 +78,38 @@ public sealed class FileInboxStore : IInboxStore
         return ValueTask.CompletedTask;
     }
 
+    /// <summary>Moves the message to <c>{root}/{agent}/dead/</c>, outside the queue.</summary>
+    public ValueTask DeadLetterAsync(AgentId agent, string messageId, CancellationToken cancellationToken = default)
+    {
+        var dead = Path.Combine(AgentDirectory(agent), "dead");
+        Directory.CreateDirectory(dead);
+        foreach (var file in FilesFor(agent, messageId))
+        {
+            File.Move(file, Path.Combine(dead, Path.GetFileName(file)), overwrite: true);
+        }
+
+        return ValueTask.CompletedTask;
+    }
+
     public ValueTask<int> CountAsync(AgentId agent, CancellationToken cancellationToken = default) =>
         ValueTask.FromResult(Files(agent).Count());
+
+    /// <summary>A message acknowledged between listing and reading is simply gone.</summary>
+    private static async ValueTask<FleetMessage?> TryReadAsync(string file, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var stream = File.OpenRead(file);
+            return await JsonSerializer.DeserializeAsync<FleetMessage>(stream, JsonOptions, cancellationToken);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return null;
+        }
+    }
+
+    private List<string> FilesFor(AgentId agent, string messageId) =>
+        [.. Files(agent).Where(f => f.EndsWith($"-{messageId}.json", StringComparison.Ordinal))];
 
     private IEnumerable<string> Files(AgentId agent) =>
         Directory.EnumerateFiles(AgentDirectory(agent), "*.json").Order(StringComparer.Ordinal);

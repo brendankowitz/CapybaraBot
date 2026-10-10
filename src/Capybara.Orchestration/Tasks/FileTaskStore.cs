@@ -54,10 +54,13 @@ public sealed class FileTaskStore : ITaskStore
         }
     }
 
+    /// <summary>Task ids are generated as 32 lower-case hex chars; anything else is not a task id.</summary>
+    public static bool IsTaskId(string? taskId) => taskId is { Length: 32 } && taskId.All(char.IsAsciiHexDigitLower);
+
     private string PathFor(string taskId)
     {
-        // Task ids are generated as 32 hex chars; reject anything else so ids can never address other files.
-        if (taskId.Length != 32 || !taskId.All(char.IsAsciiHexDigitLower))
+        // Reject anything that is not a generated id, so ids can never address other files.
+        if (!IsTaskId(taskId))
         {
             throw new ArgumentException("Invalid task id.", nameof(taskId));
         }

@@ -68,9 +68,12 @@ internal sealed class FakeExecutor : IAgentTurnExecutor
 
     public List<(AgentId Target, Envelope Envelope)> Calls { get; } = [];
 
+    /// <summary>When set, consults throw it.</summary>
+    public Exception? Failure { get; set; }
+
     public Task<ConsultReply> ConsultAsync(AgentDefinition target, string sessionId, string question, Envelope envelope, CancellationToken cancellationToken)
     {
         Calls.Add((target.Id, envelope));
-        return Task.FromResult(new ConsultReply(Answer, ReplyTaint, []));
+        return Failure is { } failure ? Task.FromException<ConsultReply>(failure) : Task.FromResult(new ConsultReply(Answer, ReplyTaint, []));
     }
 }

@@ -5,10 +5,15 @@ using Capybara.Contracts.Messaging;
 namespace Capybara.Policy.Gate;
 
 /// <summary>One pending tool call as seen by <c>OnPreToolUse</c> / <c>OnPermissionRequest</c>.</summary>
+/// <remarks>
+/// <c>DryRun</c> marks a call from a routine dry run (FR-RTN-08): anything that would need a human is denied instead,
+/// and no approval request is raised, so nobody is prompted by a test.
+/// </remarks>
 public sealed record ToolCallContext(
     AgentDefinition Agent,
     string SessionId,
     string Tool,
     JsonElement? Args,
     MessageOrigin Origin,
-    string? TraceId = null);
+    string? TraceId = null,
+    bool DryRun = false);

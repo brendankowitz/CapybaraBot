@@ -12,6 +12,12 @@ public sealed record FleetTask
 
     public required AgentId RequestedBy { get; init; }
 
+    /// <summary>
+    /// The requester's session that delegated the task; questions and the result go back to it (FR-A2A-07).
+    /// <see langword="null"/> means the requester's main session.
+    /// </summary>
+    public string? RequesterSessionId { get; init; }
+
     public required string Objective { get; init; }
 
     public string? OutputSchema { get; init; }
