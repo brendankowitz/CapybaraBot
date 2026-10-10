@@ -51,6 +51,10 @@ public sealed class BrokerClient(HttpClient http)
 
     public ValueTask UnfreezeAsync(CancellationToken cancellationToken = default) => PostAsync<object?>("/broker/unfreeze", null, cancellationToken);
 
+    /// <summary>Drops an archived or deleted agent's grants and MCP bearer until the broker restarts (FR-AGT-07).</summary>
+    public ValueTask RevokeAgentAsync(string agentId, CancellationToken cancellationToken = default) =>
+        PostAsync<object?>($"/broker/agents/{Uri.EscapeDataString(agentId)}/revoke", null, cancellationToken);
+
     /// <summary>The agent's MCP path and bearer, for attaching the broker as an http MCP server to a session (FR-CON-03).</summary>
     public async ValueTask<McpAgentEndpoint> GetMcpEndpointAsync(string agentId, CancellationToken cancellationToken = default)
     {

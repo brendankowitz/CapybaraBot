@@ -1,4 +1,5 @@
 using Capybara.Connections.Connectors;
+using Capybara.Connections.Grants;
 using Capybara.Connections.Health;
 using Capybara.Connections.Mcp;
 using Capybara.Connections.Model;
@@ -23,6 +24,7 @@ namespace Capybara.Connections.Broker;
 /// <item><c>POST /broker/oauth/complete</c> <see cref="OAuthCompletion"/> → <see cref="ConnectionStatus"/></item>
 /// <item><c>POST /broker/freeze</c> <see cref="BrokerFreezeRequest"/> → <see cref="FreezeOutcome"/>, <c>POST /broker/unfreeze</c> → 204</item>
 /// <item><c>POST /broker/mcp/{agentId}/token</c> → <see cref="McpAgentEndpoint"/></item>
+/// <item><c>POST /broker/agents/{agentId}/revoke</c> → 204 (grants and MCP bearer dropped)</item>
 /// <item><c>GET /broker/health</c> → <see cref="BrokerHealth"/></item>
 /// </list>
 /// </summary>
@@ -85,6 +87,18 @@ public static class BrokerApiEndpoints
             var endpoint = new McpAgentEndpoint($"/mcp/{Uri.EscapeDataString(agentId)}", tokens.GetOrIssue(agentId));
             await audit.AppendAsync(new AuditRecord("mcp_token_issued", "allow", Agent: agentId), ct);
             return endpoint;
+        });
+
+        // FR-AGT-07: an archived or deleted agent loses its grants and MCP bearer at once. Revocation only removes
+        // privilege, so capybarad may ask for it; granting still needs a config change and a broker restart (FR-CON-07).
+        api.MapPost("/agents/{agentId}/revoke", async (string agentId, ConfigGrantProvider grants, PerAgentBearerTokenIssuer tokens, IAuditLog audit) =>
+        {
+            var had = grants.Revoke(agentId);
+            tokens.Revoke(agentId);
+
+            // Not bound to the request token: the revocation already happened and must be audited.
+            await audit.AppendAsync(new AuditRecord("grants_revoked", "allow", Agent: agentId, Detail: had ? "grants revoked" : "no grants"), CancellationToken.None);
+            return Results.NoContent();
         });
         api.MapGet("/health", (BrokerFreeze freeze) => new BrokerHealth("ok", freeze.IsFrozen, freeze.Reason));
         return endpoints;

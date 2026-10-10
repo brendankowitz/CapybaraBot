@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Capybara.Contracts.Connections;
 using YamlDotNet.Core;
 using YamlDotNet.Serialization;
@@ -8,7 +9,8 @@ namespace Capybara.Connections.Grants;
 /// <summary>
 /// Read-only grants loaded by the broker itself from <c>{ConfigRoot}/agents/*/agent.yaml</c> (FR-CON-02). The broker
 /// reads the user-owned config directly rather than trusting capybarad to tell it what an agent may do, and nothing
-/// can change grants at runtime: editing them is a human config change followed by a broker restart (FR-CON-07).
+/// can add or widen grants at runtime: editing them is a human config change followed by a broker restart (FR-CON-07).
+/// The only runtime change is <see cref="Revoke"/>, which can only take privilege away (FR-AGT-07).
 /// </summary>
 public sealed class ConfigGrantProvider : IGrantProvider
 {
@@ -17,14 +19,20 @@ public sealed class ConfigGrantProvider : IGrantProvider
         .IgnoreUnmatchedProperties()
         .Build();
 
-    private readonly Dictionary<string, IReadOnlyList<Grant>> _grants;
+    private readonly ConcurrentDictionary<string, IReadOnlyList<Grant>> _grants;
 
-    private ConfigGrantProvider(Dictionary<string, IReadOnlyList<Grant>> grants) => _grants = grants;
+    private ConfigGrantProvider(Dictionary<string, IReadOnlyList<Grant>> grants) => _grants = new(grants, StringComparer.Ordinal);
 
     /// <summary>Grants per agent id, including agents with none.</summary>
     public IReadOnlyDictionary<string, IReadOnlyList<Grant>> All => _grants;
 
     public IReadOnlyList<Grant> GetGrants(string agentId) => _grants.GetValueOrDefault(agentId, []);
+
+    /// <summary>
+    /// Drops every grant of an agent that was archived or deleted, until a restart reloads the config (where the agent
+    /// is gone). Returns whether the agent had an entry. Idempotent.
+    /// </summary>
+    public bool Revoke(string agentId) => _grants.TryRemove(agentId, out _);
 
     /// <summary>Loads every agent's grants. Fails closed: any unreadable or malformed file aborts the load.</summary>
     /// <exception cref="GrantConfigurationException">With every error found.</exception>
