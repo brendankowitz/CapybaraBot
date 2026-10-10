@@ -4,7 +4,7 @@
   kind: heartbeat
   every: 2h
   activeHours: 07:00-21:00
-  prompt: Check the inbox and calendar. If nothing needs the user, reply HEARTBEAT_OK.
+  prompt: Check the inbox and calendar for anything that needs the user.
   deliver: push
   budgetCredits: 1
 - id: morning-brief

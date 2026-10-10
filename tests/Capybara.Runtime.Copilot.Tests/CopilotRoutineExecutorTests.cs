@@ -53,10 +53,13 @@ public sealed class CopilotRoutineExecutorTests : IAsyncDisposable
 
     private static TurnResult Reply(string content, TurnEvidence? evidence = null) => TurnResult.Completed(content, evidence ?? TurnEvidence.Empty);
 
-    [Fact]
-    public async Task A_silent_heartbeat_runs_in_the_main_session_and_reports_nothing()
+    [Theory]
+    [InlineData("NOTHING_TO_REPORT")]
+    [InlineData("HEARTBEAT_OK")]
+    [InlineData(" heartbeat_ok\n")]
+    public async Task A_silent_heartbeat_runs_in_the_main_session_and_reports_nothing(string reply)
     {
-        _runtime.Turn = (_, _) => Task.FromResult(Reply("NOTHING_TO_REPORT"));
+        _runtime.Turn = (_, _) => Task.FromResult(Reply(reply));
 
         var result = await _executor.ExecuteAsync(Invocation(TriggerKind.Heartbeat), Ct);
 

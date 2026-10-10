@@ -688,7 +688,7 @@ public sealed class ChannelAdapterTests
     }
 
     [Fact]
-    public async Task Ntfy_with_sensitive_support_keeps_nonce_bound_buttons()
+    public async Task Ntfy_with_sensitive_support_names_the_tool_and_offers_a_review_button_into_the_pwa()
     {
         var time = new FakeTimeProvider(Noon);
         var handler = new RecordingHandler();
@@ -699,7 +699,9 @@ public sealed class ChannelAdapterTests
 
         using var json = JsonDocument.Parse(Assert.Single(handler.Bodies));
         Assert.Equal("approval needed: ea → email_send", json.RootElement.GetProperty("title").GetString());
-        Assert.Equal(2, json.RootElement.GetProperty("actions").GetArrayLength());
+        var action = Assert.Single(json.RootElement.GetProperty("actions").EnumerateArray());
+        Assert.Equal("view", action.GetProperty("action").GetString());
+        Assert.Equal("https://capybara.tailnet/approvals", action.GetProperty("url").GetString());
     }
 
     [Fact]

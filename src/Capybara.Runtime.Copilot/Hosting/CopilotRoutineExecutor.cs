@@ -31,6 +31,11 @@ public sealed partial class CopilotRoutineExecutor(AgentRuntimePool runtimes, Co
     /// <summary>A heartbeat with nothing worth reporting answers exactly this, and stays silent.</summary>
     public const string NothingToReport = "NOTHING_TO_REPORT";
 
+    /// <summary>
+    /// The OpenClaw-style heartbeat acknowledgement; also silent, since hand-written routine prompts commonly ask for it.
+    /// </summary>
+    public const string HeartbeatOk = "HEARTBEAT_OK";
+
     /// <summary>Lines starting with this list what the run could not verify.</summary>
     public const string UnverifiedMarker = "UNVERIFIED:";
 
@@ -217,7 +222,9 @@ public sealed partial class CopilotRoutineExecutor(AgentRuntimePool runtimes, Co
     }
 
     private static bool IsSilent(string? content) =>
-        string.IsNullOrWhiteSpace(content) || string.Equals(content.Trim(), NothingToReport, StringComparison.OrdinalIgnoreCase);
+        string.IsNullOrWhiteSpace(content)
+        || string.Equals(content.Trim(), NothingToReport, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(content.Trim(), HeartbeatOk, StringComparison.OrdinalIgnoreCase);
 
     private static IReadOnlyList<string> Unverified(string? content) => content is null
         ? []

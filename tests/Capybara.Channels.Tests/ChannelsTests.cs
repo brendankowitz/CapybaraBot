@@ -48,10 +48,15 @@ public sealed class ChannelsTests
         Assert.Equal("https://capybara.tailnet/approvals", root.GetProperty("click").GetString());
         Assert.False(root.GetProperty("markdown").GetBoolean());
         var action = Assert.Single(root.GetProperty("actions").EnumerateArray());
-        Assert.Equal("http", action.GetProperty("action").GetString());
-        Assert.Equal("Allow once", action.GetProperty("label").GetString());
-        Assert.Equal("https://capybara.tailnet/api/approvals/abc/act?nonce=n&decision=allow-once", action.GetProperty("url").GetString());
-        Assert.Equal("POST", action.GetProperty("method").GetString());
+        Assert.Equal("view", action.GetProperty("action").GetString());
+        Assert.Equal(NtfyChannel.ReviewLabel, action.GetProperty("label").GetString());
+        Assert.Equal("https://capybara.tailnet/approvals", action.GetProperty("url").GetString());
+        Assert.False(action.TryGetProperty("method", out _));
+
+        // The phone's ntfy app has no device token, so it is never handed a gateway POST it could only fail, nor the nonce.
+        var raw = System.Text.Encoding.UTF8.GetString(handler.Bodies[0]);
+        Assert.DoesNotContain("/api/", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("nonce", raw, StringComparison.Ordinal);
     }
 
     [Fact]

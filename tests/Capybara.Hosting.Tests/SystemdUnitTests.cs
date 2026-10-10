@@ -9,7 +9,7 @@ public sealed class SystemdUnitTests
 
     private static readonly string[] RequiredNamespaces = ["user", "mnt", "pid"];
 
-    private static readonly string[] ProducedExecutables = ["/opt/capybara/capybarad", "/opt/capybara/capybara-broker"];
+    private static readonly string[] ProducedExecutables = ["/opt/capybara/capybarad", "/opt/capybara-broker/capybara-broker"];
 
     private static string[] Unit(string name) => File.ReadAllLines(Path.Combine(RepositoryPaths.Root, "deploy", "systemd", name));
 
@@ -69,6 +69,23 @@ public sealed class SystemdUnitTests
         Assert.Contains("RestrictNamespaces=yes", directives);
         Assert.DoesNotContain("AF_NETLINK", directives.Single(l => l.StartsWith("RestrictAddressFamilies=", StringComparison.Ordinal)), StringComparison.Ordinal);
         Assert.Contains("ProtectProc=invisible", directives);
+    }
+
+    /// <summary>
+    /// capybarad starts After= the broker; with Type=notify that waits for the broker to listen, not just to launch, so
+    /// agents' start-up self-tests do not find their broker tools missing and pause them.
+    /// </summary>
+    [Fact]
+    public void Broker_unit_reports_readiness_and_runs_from_its_own_publish_directory()
+    {
+        var directives = Directives("capybara-broker.service").ToList();
+
+        Assert.Contains("Type=notify", directives);
+        Assert.Contains("NotifyAccess=main", directives);
+        Assert.Contains("ExecStart=/opt/capybara-broker/capybara-broker", directives);
+        Assert.Contains("WorkingDirectory=/opt/capybara-broker", directives);
+        Assert.Contains("WorkingDirectory=/opt/capybara", Directives("capybarad.service"));
+        Assert.Contains(Directives("capybarad.service"), l => l.StartsWith("After=", StringComparison.Ordinal) && l.Split(' ').Contains("capybara-broker.service"));
     }
 
     [Fact]

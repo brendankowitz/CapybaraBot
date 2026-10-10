@@ -8,12 +8,14 @@ namespace Capybara.Channels.Ntfy;
 /// <summary>
 /// Preferred self-hosted ntfy push adapter (FR-CLI-03, NFR-06). Publishes as JSON so titles may contain any Unicode
 /// (HTTP headers cannot); markdown is off and no attachments are sent, so nothing is rendered or fetched remotely (FR-SAF-07).
-/// Action buttons POST to the nonce-bound gateway URL; the click target deep-links to the PWA.
+/// A notification with actions (an approval) gets one <c>view</c> button opening its deep link in the PWA, where the device
+/// token is: the phone's ntfy app holds no gateway credential, so a button POSTing to the gateway could only be rejected,
+/// and the approval's single-use nonce never leaves the gateway for the ntfy server (FR-CLI-03, FR-SAF-04).
 /// </summary>
 public sealed class NtfyChannel(HttpClient httpClient, NtfyOptions options) : INotificationChannel
 {
-    /// <summary>ntfy renders at most three action buttons.</summary>
-    private const int MaxActions = 3;
+    /// <summary>Label of the button that opens a notification's actions in the PWA.</summary>
+    public const string ReviewLabel = "Review";
 
     private static readonly JsonSerializerOptions JsonOptions = new() { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
 
@@ -33,7 +35,7 @@ public sealed class NtfyChannel(HttpClient httpClient, NtfyOptions options) : IN
             gateway is null ? null : new Uri(gateway, notification.DeepLinkPath).AbsoluteUri,
             gateway is null || notification.Actions.Count == 0
                 ? null
-                : [.. notification.Actions.Take(MaxActions).Select(a => new NtfyAction("http", a.Label, new Uri(gateway, a.CallbackPath).AbsoluteUri, "POST", true))]);
+                : [new NtfyAction("view", ReviewLabel, new Uri(gateway, notification.DeepLinkPath).AbsoluteUri, Clear: true)]);
 
         using var request = new HttpRequestMessage(HttpMethod.Post, options.BaseUrl)
         {
@@ -79,6 +81,5 @@ public sealed class NtfyChannel(HttpClient httpClient, NtfyOptions options) : IN
         [property: JsonPropertyName("action")] string Action,
         [property: JsonPropertyName("label")] string Label,
         [property: JsonPropertyName("url")] string Url,
-        [property: JsonPropertyName("method")] string Method,
         [property: JsonPropertyName("clear")] bool Clear);
 }

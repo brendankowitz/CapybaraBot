@@ -6,14 +6,19 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=exec
+# Type=notify: the broker calls AddSystemd() and reports readiness once it listens, so capybarad (After=capybara-broker.service)
+# never runs its agents' start-up self-tests against a broker that is not accepting connections yet.
+Type=notify
+NotifyAccess=main
 User=capybara-broker
 Group=capybara-broker
 # Read access to capybarad's config tree (0750/0640, group capybara) for agents/*/agent.yaml grants (FR-CON-02). The broker
 # cannot traverse /var/lib/capybara (StateDirectoryMode=0700), so this grants nothing else.
 SupplementaryGroups=capybara
-ExecStart=/opt/capybara/capybara-broker
-WorkingDirectory=/opt/capybara
+# Its own publish directory (FR-HST-04: dotnet publish -c Release -r linux-x64 -o /opt/capybara-broker). The content root is
+# the working directory, so sharing /opt/capybara would make the broker read capybarad's appsettings.json (or vice versa).
+ExecStart=/opt/capybara-broker/capybara-broker
+WorkingDirectory=/opt/capybara-broker
 Environment=DOTNET_ENVIRONMENT=Production
 Restart=on-failure
 RestartSec=5s
