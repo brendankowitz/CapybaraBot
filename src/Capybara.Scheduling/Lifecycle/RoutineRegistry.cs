@@ -24,13 +24,42 @@ public sealed class RoutineRegistry
     private readonly ConcurrentDictionary<string, RoutineSpec> _routines = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, RoutineState> _states = new(StringComparer.Ordinal);
 
+    /// <summary>Raised after any change to the set of routines or their lifecycle state, so the scheduler can resynchronize (FR-RTN-05).</summary>
+    public event EventHandler? Changed;
+
     public IReadOnlyList<RoutineSpec> Routines => [.. _routines.Values];
 
+    /// <summary>
+    /// Adds a routine, or replaces its definition. A new routine starts in the state its spec declares; for an existing
+    /// one, the lifecycle state is kept unless the spec's <see cref="RoutineSpec.Enabled"/> flag itself changed, which is
+    /// the user editing the config file.
+    /// </summary>
     public void AddOrUpdate(RoutineSpec routine, RoutinePrincipal principal)
     {
         EnsureHuman(principal);
+        var previous = _routines.TryGetValue(routine.Id, out var existing) ? existing : null;
         _routines[routine.Id] = routine;
-        _states.TryAdd(routine.Id, new RoutineState(routine.Enabled, Paused: false, AutoPaused: false, null));
+        if (previous is null || !_states.ContainsKey(routine.Id))
+        {
+            _states[routine.Id] = new RoutineState(routine.Enabled, Paused: false, AutoPaused: false, null);
+        }
+        else if (previous.Enabled != routine.Enabled)
+        {
+            _states[routine.Id] = GetState(routine.Id) with { Enabled = routine.Enabled, Reason = routine.Enabled ? null : "disabled" };
+        }
+
+        Changed?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>Removes a routine (for example one deleted from the config file) and its state.</summary>
+    public void Remove(string routineId, RoutinePrincipal principal)
+    {
+        EnsureHuman(principal);
+        if (_routines.TryRemove(routineId, out _))
+        {
+            _states.TryRemove(routineId, out _);
+            Changed?.Invoke(this, EventArgs.Empty);
+        }
     }
 
     public RoutineSpec? Find(string routineId) => _routines.GetValueOrDefault(routineId);
@@ -49,29 +78,32 @@ public sealed class RoutineRegistry
             throw new InvalidOperationException($"Projected monthly cost {projected:0.##} credits must be acknowledged before enabling.");
         }
 
-        _states[routineId] = GetState(routineId) with { Enabled = true, Paused = false, AutoPaused = false, Reason = null };
+        SetState(routineId, GetState(routineId) with { Enabled = true, Paused = false, AutoPaused = false, Reason = null });
     }
 
     public void Disable(string routineId, RoutinePrincipal principal)
     {
         EnsureHuman(principal);
-        _states[routineId] = GetState(routineId) with { Enabled = false, Reason = "disabled" };
+        SetState(routineId, GetState(routineId) with { Enabled = false, Reason = "disabled" });
     }
 
-    public void Pause(string routineId, string reason)
-    {
-        _states[routineId] = GetState(routineId) with { Paused = true, Reason = reason };
-    }
+    public void Pause(string routineId, string reason) =>
+        SetState(routineId, GetState(routineId) with { Paused = true, Reason = reason });
 
-    public void AutoPause(string routineId, string reason)
-    {
-        _states[routineId] = GetState(routineId) with { AutoPaused = true, Reason = reason };
-    }
+    public void AutoPause(string routineId, string reason) =>
+        SetState(routineId, GetState(routineId) with { AutoPaused = true, Reason = reason });
 
     public void Resume(string routineId, RoutinePrincipal principal)
     {
         EnsureHuman(principal);
-        _states[routineId] = GetState(routineId) with { Paused = false, AutoPaused = false, Reason = null };
+        SetState(routineId, GetState(routineId) with { Paused = false, AutoPaused = false, Reason = null });
+    }
+
+    private void SetState(string routineId, RoutineState state)
+    {
+        _ = RequireRoutine(routineId);
+        _states[routineId] = state;
+        Changed?.Invoke(this, EventArgs.Empty);
     }
 
     private RoutineSpec RequireRoutine(string routineId) =>

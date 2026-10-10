@@ -70,7 +70,7 @@ public sealed class SchedulerFeatureTests
         var missing = await harness.Dispatcher.DispatchAsync(new RoutineFiring(Routine(), DateTimeOffset.UnixEpoch, "missing"), TestContext.Current.CancellationToken);
         Assert.Equal(RoutineExecutionStatus.Skipped, missing.Status);
 
-        harness = new DispatcherHarness(new CapturingExecutor(new RoutineExecutionResult(RoutineExecutionStatus.Succeeded)));
+        harness = new DispatcherHarness(new CapturingExecutor(new RoutineExecutionResult(RoutineExecutionStatus.Succeeded)), new Capybara.Scheduling.Dispatch.SchedulingOptions { TimeZone = TimeZoneInfo.Utc });
         harness.Registry.AddOrUpdate(Routine() with { InputSource = null, ActiveFrom = new TimeOnly(9, 0), ActiveTo = new TimeOnly(10, 0) }, RoutinePrincipal.Human("user"));
         var silent = await harness.Dispatcher.DispatchAsync(new RoutineFiring(Routine() with { InputSource = null, ActiveFrom = new TimeOnly(9, 0), ActiveTo = new TimeOnly(10, 0) }, new DateTimeOffset(2026, 1, 1, 11, 0, 0, TimeSpan.Zero), "silent"), TestContext.Current.CancellationToken);
         Assert.Equal(RoutineExecutionStatus.NothingToReport, silent.Status);
@@ -139,25 +139,22 @@ public sealed class SchedulerFeatureTests
         Directory.CreateDirectory(root);
         var db = Path.Combine(root, $"quartz-{Guid.NewGuid():n}.sqlite");
         var executor = new SignalingExecutor();
-        var harness = new DispatcherHarness(executor, new Capybara.Scheduling.Dispatch.SchedulingOptions { SQLitePath = db });
-        var factory = new QuartzSchedulerFactory(new Capybara.Scheduling.Dispatch.SchedulingOptions { SQLitePath = db });
+        var options = new Capybara.Scheduling.Dispatch.SchedulingOptions { SQLitePath = db };
+        var harness = new DispatcherHarness(executor, options);
+        var factory = new QuartzSchedulerFactory(options);
         var scheduler = await factory.CreateSchedulerAsync(TestContext.Current.CancellationToken);
+        using var synchronizer = new Capybara.Scheduling.Hosting.ScheduleSynchronizer(harness.Registry, scheduler, harness.Dispatcher, harness.KillSwitch, options, harness.Alerts, TimeProvider.System);
         try
         {
-            scheduler.Context.Add(nameof(RoutineDispatcher), harness.Dispatcher);
             harness.Registry.AddOrUpdate(Routine() with { InputSource = null }, RoutinePrincipal.Human("user"));
-            var job = Quartz.JobBuilder.Create<RoutineJob>()
-                .WithIdentity(new JobKey("routine-a", "ea"))
-                .UsingJobData(RoutineJob.RoutineJsonKey, System.Text.Json.JsonSerializer.Serialize(Routine() with { InputSource = null }))
-                .StoreDurably()
-                .Build();
-            await scheduler.AddJob(job, new AddJobOptions { Replace = true }, TestContext.Current.CancellationToken);
+            await synchronizer.SynchronizeAsync(TestContext.Current.CancellationToken);
             await scheduler.Start(TestContext.Current.CancellationToken);
             await scheduler.TriggerJob(new JobKey("routine-a", "ea"), new JobDataMap(), TestContext.Current.CancellationToken);
             await executor.Fired.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         }
         finally
         {
+            synchronizer.Detach();
             await scheduler.Shutdown(true, CancellationToken.None);
             if (File.Exists(db))
             {

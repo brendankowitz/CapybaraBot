@@ -1,5 +1,6 @@
 using Capybara.Contracts.Agents;
 using Capybara.Contracts.Routines;
+using Capybara.Scheduling.Planning;
 using Capybara.Scheduling.Triggers;
 
 namespace Capybara.Scheduling.Validation;
@@ -42,8 +43,11 @@ public static class RoutineValidator
 
             switch (routine.Kind)
             {
+                case TriggerKind.Cron when !string.IsNullOrWhiteSpace(routine.Cron):
+                    ValidateCron(routine, errors);
+                    break;
                 case TriggerKind.Heartbeat or TriggerKind.Cron when routine.Interval is null:
-                    errors.Add($"{routine.Id}: {routine.Kind} routines need an interval.");
+                    errors.Add($"{routine.Id}: {routine.Kind} routines need an interval{(routine.Kind == TriggerKind.Cron ? " or a cron expression" : string.Empty)}.");
                     break;
                 case TriggerKind.Heartbeat or TriggerKind.Cron when routine.Interval < RoutineLimits.MinimumInterval:
                     errors.Add($"{routine.Id}: interval {routine.Interval} is below the {RoutineLimits.MinimumInterval.TotalMinutes}-minute minimum.");
@@ -68,5 +72,19 @@ public static class RoutineValidator
         }
 
         return errors;
+    }
+
+    private static void ValidateCron(RoutineSpec routine, List<string> errors)
+    {
+        if (!CronSchedule.TryParse(routine.Cron, TimeZoneInfo.Utc, out var cron, out var error))
+        {
+            errors.Add($"{routine.Id}: cron expression '{routine.Cron}' is invalid: {error}");
+            return;
+        }
+
+        if (CronSchedule.MinimumGap(cron) is { } gap && gap < RoutineLimits.MinimumInterval)
+        {
+            errors.Add($"{routine.Id}: cron expression '{routine.Cron}' can fire {gap.TotalSeconds:0} seconds apart, below the {RoutineLimits.MinimumInterval.TotalMinutes}-minute minimum.");
+        }
     }
 }

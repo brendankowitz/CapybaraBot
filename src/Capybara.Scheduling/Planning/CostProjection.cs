@@ -12,6 +12,20 @@ public static class CostProjection
     public static double RunsPerMonth(RoutineSpec routine)
     {
         ArgumentNullException.ThrowIfNull(routine);
+        if (routine.Kind == TriggerKind.Event)
+        {
+            return 0;
+        }
+
+        // A cron expression takes precedence over Interval (RoutineSpec.Cron). The cron itself defines when it fires, so
+        // active hours do not apply; the projection is the number of fires Quartz computes in a fixed 30-day window.
+        if (!string.IsNullOrWhiteSpace(routine.Cron))
+        {
+            return CronSchedule.TryParse(routine.Cron, TimeZoneInfo.Utc, out var cron, out _)
+                ? CronSchedule.FiresPerMonth(cron)
+                : 0;
+        }
+
         if (routine.Interval is not { } interval || interval <= TimeSpan.Zero)
         {
             return 0;

@@ -74,7 +74,7 @@ public sealed record EventFilter(string Source, string EventType, IReadOnlyDicti
         var current = element;
         foreach (var segment in path)
         {
-            if (!current.TryGetProperty(segment, out current))
+            if (current.ValueKind != JsonValueKind.Object || !current.TryGetProperty(segment, out current))
             {
                 value = null;
                 return false;

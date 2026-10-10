@@ -12,5 +12,9 @@ public sealed class SchedulerHostedService(IScheduler scheduler, ScheduleSynchro
         await scheduler.Start(cancellationToken);
     }
 
-    public async Task StopAsync(CancellationToken cancellationToken) => await scheduler.Shutdown(waitForJobsToComplete: true, cancellationToken);
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        synchronizer.Detach();
+        await scheduler.Shutdown(waitForJobsToComplete: true, cancellationToken);
+    }
 }
