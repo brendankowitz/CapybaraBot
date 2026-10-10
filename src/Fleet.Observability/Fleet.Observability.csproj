@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Cost ledger, budgets with host-side hard stops, and alerts.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Fleet.Contracts\Fleet.Contracts.csproj" />
+  </ItemGroup>
+</Project>

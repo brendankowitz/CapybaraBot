@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Routine validation, jittered scheduling and cost projection.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Fleet.Contracts\Fleet.Contracts.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Per-agent GitHub Copilot SDK runtime: Empty mode, isolated BaseDirectory, re-registration on resume, supervision.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Fleet.Contracts\Fleet.Contracts.csproj" />
+    <ProjectReference Include="..\Fleet.Policy\Fleet.Policy.csproj" />
+    <ProjectReference Include="..\Fleet.Observability\Fleet.Observability.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="GitHub.Copilot.SDK" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
+  </ItemGroup>
+</Project>

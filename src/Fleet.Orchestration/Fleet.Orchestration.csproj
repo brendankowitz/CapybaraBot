@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Agent registry, config loading, envelopes, inboxes and agent-to-agent tools.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Fleet.Contracts\Fleet.Contracts.csproj" />
+    <ProjectReference Include="..\Fleet.Policy\Fleet.Policy.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="YamlDotNet" />
+  </ItemGroup>
+</Project>

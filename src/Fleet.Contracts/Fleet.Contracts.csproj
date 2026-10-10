@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>A2A-shaped records shared by every fleet component.</Description>
+  </PropertyGroup>
+</Project>
