@@ -54,6 +54,9 @@ public sealed partial class InboxPump
     private readonly Dictionary<string, int> _attempts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTimeOffset> _notBefore = new(StringComparer.Ordinal);
 
+    /// <summary>Credits failed attempts at a message already spent from its carved budget (FR-A2A-05).</summary>
+    private readonly Dictionary<string, decimal> _spent = new(StringComparer.Ordinal);
+
     /// <summary>Handled messages whose acknowledgement failed: never run again, acknowledged on a later pass.</summary>
     private readonly HashSet<string> _handled = new(StringComparer.Ordinal);
 
@@ -240,6 +243,8 @@ public sealed partial class InboxPump
             steered = await EndTurnAsync();
         }
 
+        await RecordSpendAsync(message, plan, result);
+
         switch (result.Status)
         {
             case TurnStatus.Completed or TurnStatus.LimitExceeded:
@@ -364,6 +369,13 @@ public sealed partial class InboxPump
             }
         }
 
+        var envelope = target.Task is null ? Remaining(message) : null;
+        if (envelope is { Budget.Credits: <= 0 })
+        {
+            LogBudgetSpent(_logger, message.Id, Agent.Value);
+            return null;
+        }
+
         var prompt = message.Origin switch
         {
             MessageOrigin.User => message.Body,
@@ -383,7 +395,7 @@ public sealed partial class InboxPump
                 Target = target,
                 From = message.From,
                 Taint = message.Taint,
-                Envelope = target.Task is null ? message.Envelope : null,
+                Envelope = envelope,
                 RoutineId = continuation?.Routine.Id,
                 Model = continuation?.Model,
                 Budget = continuation is { } c ? new Budget(c.RemainingCredits, 100, TimeSpan.FromMinutes(20)) : null,
@@ -400,8 +412,6 @@ public sealed partial class InboxPump
         {
             if (target.Task is { } task)
             {
-                // The task's own spend comes out of its carved budget (FR-A2A-05).
-                await _coordinator.RecordTaskSpendAsync(Agent, task.Id, result.Evidence.Credits, CancellationToken.None);
                 if (plan.Assignment)
                 {
                     await _coordinator.MarkWorkingAsync(Agent, task.Id, CancellationToken.None);
@@ -427,6 +437,49 @@ public sealed partial class InboxPump
         {
             LogHousekeepingFailed(_logger, ex, Agent.Value);
         }
+    }
+
+    /// <summary>
+    /// Every attempt's spend comes out of the budget carved for the work (FR-A2A-05), whatever the outcome, so retries
+    /// cannot multiply it: a task's turns are debited from the task; a chained message that will be retried runs its next
+    /// attempt with what is left of its envelope.
+    /// </summary>
+    private async Task RecordSpendAsync(FleetMessage message, TurnPlan plan, TurnResult result)
+    {
+        var credits = result.Evidence.Credits;
+        if (credits <= 0)
+        {
+            return;
+        }
+
+        if (plan.Request.Target.Task is { } task)
+        {
+            await _coordinator.RecordTaskSpendAsync(Agent, task.Id, credits, CancellationToken.None);
+        }
+        else if (message.Envelope is not null && !Handled(result))
+        {
+            lock (_gate)
+            {
+                _spent[message.Id] = _spent.GetValueOrDefault(message.Id) + credits;
+            }
+        }
+    }
+
+    /// <summary>The message's envelope less what failed attempts spent; <see langword="null"/> when that is nothing.</summary>
+    private Envelope? Remaining(FleetMessage message)
+    {
+        if (message.Envelope is not { } envelope)
+        {
+            return null;
+        }
+
+        decimal spent;
+        lock (_gate)
+        {
+            spent = _spent.GetValueOrDefault(message.Id);
+        }
+
+        return spent == 0 ? envelope : envelope with { Budget = envelope.Budget with { Credits = envelope.Budget.Credits - spent } };
     }
 
     /// <summary>
@@ -568,6 +621,7 @@ public sealed partial class InboxPump
         {
             _attempts.Remove(messageId);
             _notBefore.Remove(messageId);
+            _spent.Remove(messageId);
         }
     }
 
@@ -704,6 +758,9 @@ public sealed partial class InboxPump
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Message {MessageId} for {Agent} concerns a finished task; acknowledged without a turn")]
     private static partial void LogSkipped(ILogger logger, string messageId, string agent);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Message {MessageId} of {Agent} is dropped: failed attempts spent its whole budget")]
+    private static partial void LogBudgetSpent(ILogger logger, string messageId, string agent);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Inbox of {Agent} is on hold: {Reason}")]
     private static partial void LogBlocked(ILogger logger, string agent, string? reason);
