@@ -193,6 +193,69 @@ public sealed class InboxPumpTests
     }
 
     [Fact]
+    public async Task A_user_dm_during_a_routine_heartbeat_joins_it_and_is_acknowledged_when_it_completes()
+    {
+        using var f = Fleet();
+        var runtime = new FakeAgentRuntime(Ea.Id);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        runtime.Turn = async (_, _) =>
+        {
+            await release.Task;
+            return TurnResult.Completed("brief + answer", TurnEvidence.Empty);
+        };
+        var pump = Pump(f, runtime);
+        InboxTurnCompletedEventArgs? completed = null;
+        pump.TurnCompleted += (_, e) => completed = e;
+
+        // The heartbeat comes from the routine executor, not the pump.
+        var heartbeat = runtime.RunTurnAsync(new AgentTurnRequest { Prompt = "heartbeat", Origin = MessageOrigin.System, Principal = "routine:hb", RoutineId = "hb" }, Ct);
+        await f.Inbox.EnqueueAsync(Message(Ea.Id, "what's next?", MessageOrigin.User), Ct);
+
+        await RunningAsync(pump, async () =>
+        {
+            await Eventually.TrueAsync(() => !runtime.Steered.IsEmpty, "DM joined the heartbeat");
+            Assert.Equal(1, await f.Inbox.CountAsync(Ea.Id, Ct));
+            release.SetResult();
+            await Eventually.TrueAsync(async () => await f.Inbox.CountAsync(Ea.Id, Ct) == 0, "DM acknowledged after the heartbeat");
+            return 0;
+        });
+        await heartbeat;
+
+        Assert.Single(runtime.Requests);
+        Assert.Equal("brief + answer", completed!.Result.Content);
+    }
+
+    [Fact]
+    public async Task A_user_dm_never_joins_a_dry_run_and_runs_as_its_own_turn()
+    {
+        using var f = Fleet();
+        var runtime = new FakeAgentRuntime(Ea.Id);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        runtime.Turn = async (request, _) =>
+        {
+            if (request.DryRun)
+            {
+                await release.Task;
+            }
+
+            return TurnResult.Completed("ok", TurnEvidence.Empty);
+        };
+        var dryRun = runtime.RunTurnAsync(new AgentTurnRequest { Prompt = "test", Origin = MessageOrigin.System, Principal = "routine:hb", DryRun = true }, Ct);
+        await f.Inbox.EnqueueAsync(Message(Ea.Id, "hello", MessageOrigin.User), Ct);
+
+        await RunningAsync(Pump(f, runtime), async () =>
+        {
+            await Eventually.TrueAsync(async () => await f.Inbox.CountAsync(Ea.Id, Ct) == 0, "DM ran");
+            return 0;
+        });
+        release.SetResult();
+        await dryRun;
+
+        Assert.Empty(runtime.Steered);
+        Assert.Contains(runtime.Requests, r => r.Origin == MessageOrigin.User && !r.DryRun);
+    }
+
+    [Fact]
     public async Task A_delegated_task_runs_in_its_task_session_and_its_result_bubbles_back_to_the_requester()
     {
         using var f = Fleet();

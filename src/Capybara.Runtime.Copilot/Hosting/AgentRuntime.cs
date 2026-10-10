@@ -27,8 +27,10 @@ namespace Capybara.Runtime.Copilot.Hosting;
 /// <see cref="TurnStatus.Failed"/> results; only cancellation by the caller throws.
 /// </para>
 /// <para>
-/// A user DM steered into a turn in flight (<see cref="SteerAsync"/>) uses <c>immediate</c> mode. If the turn finishes
-/// at the same instant, the CLI queues the message as the next run of the same session, so turns still never overlap.
+/// A user DM steered into a turn in flight (<see cref="SteerAsync"/>) uses <c>immediate</c> mode and shares that turn's
+/// outcome; dry-run turns are never steered into. If the turn finishes at the same instant, the CLI queues the message
+/// as the next run of the same session, so turns still never overlap (that run's reply is in the session history but
+/// is not returned to the caller).
 /// </para>
 /// </remarks>
 public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, ISessionEventHistory
@@ -51,11 +53,13 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _sessionLocks = new(StringComparer.Ordinal);
 
+    private readonly Lock _turnGate = new();
+
     private CopilotClient? _client;
     private CopilotSession? _main;
     private CapybaraSession? _mainSession;
     private string _model;
-    private int _mainTurnInFlight;
+    private InFlightTurn? _mainTurn;
 
     public AgentRuntime(
         AgentDefinition agent,
@@ -164,17 +168,23 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         }
     }
 
-    public async Task<bool> SteerAsync(string prompt, MessageOrigin origin, CancellationToken cancellationToken)
+    public async Task<TurnResult?> SteerAsync(string prompt, MessageOrigin origin, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
-        if (Volatile.Read(ref _mainTurnInFlight) == 0 || _main is not { } session)
+        InFlightTurn? turn;
+        lock (_turnGate)
         {
-            return false;
+            turn = _mainTurn;
         }
 
-        await session.SendAsync(new MessageOptions { Prompt = prompt, Source = SourceFor(origin, null), Mode = ImmediateMode }, cancellationToken);
+        if (turn is not { Steerable: true })
+        {
+            return null;
+        }
+
+        await turn.Session.SendAsync(new MessageOptions { Prompt = prompt, Source = SourceFor(origin, null), Mode = ImmediateMode }, cancellationToken);
         LogSteered(_logger, _agent.Id.Value);
-        return true;
+        return await turn.Done.Task.WaitAsync(cancellationToken);
     }
 
     public async Task SetModelAsync(string model, CancellationToken cancellationToken)
@@ -345,19 +355,31 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
             }
 
             var prompt = await _memory.PrepareAsync(context, request.Prompt, cancellationToken);
-            Volatile.Write(ref _mainTurnInFlight, 1);
-            string? reply;
+            var inFlight = new InFlightTurn(session, Steerable: !request.DryRun);
+            lock (_turnGate)
+            {
+                _mainTurn = inFlight;
+            }
+
+            TurnResult? result = null;
             try
             {
-                reply = await SendAsync(session, prompt, SourceFor(request.Origin, request.From), cancellationToken);
+                var reply = await SendAsync(session, prompt, SourceFor(request.Origin, request.From), cancellationToken);
+                result = TurnResult.Completed(reply, turn.Snapshot());
             }
             finally
             {
-                Volatile.Write(ref _mainTurnInFlight, 0);
+                lock (_turnGate)
+                {
+                    _mainTurn = null;
+                }
+
+                // Messages steered into this turn share its outcome.
+                inFlight.Done.TrySetResult(result ?? TurnResult.Failed("the turn did not complete", turn.Snapshot()));
             }
 
-            await _memory.IngestAsync(context, request.Prompt, reply, cancellationToken);
-            return TurnResult.Completed(reply, turn.Snapshot());
+            await _memory.IngestAsync(context, request.Prompt, result.Content, cancellationToken);
+            return result;
         }
         finally
         {
@@ -508,6 +530,12 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
             LogResumeFallback(_logger, context.SessionId, ex.Message);
             return await client.CreateSessionAsync(await _configs.CreateConfigAsync(context, cancellationToken), cancellationToken);
         }
+    }
+
+    /// <summary>A main-session turn in flight; user DMs may be steered into it unless it is a dry run.</summary>
+    private sealed record InFlightTurn(CopilotSession Session, bool Steerable)
+    {
+        public TaskCompletionSource<TurnResult> Done { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     private MessageSource SourceFor(MessageOrigin origin, AgentId? from) => origin switch

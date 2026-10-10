@@ -213,6 +213,19 @@ public sealed class SessionToolGatingTests
         Assert.Equal("deny", inMain.PermissionDecision);
     }
 
+    [Fact]
+    public void The_main_session_credit_limit_is_the_agent_cap_not_the_envelope_of_the_turn_that_built_it()
+    {
+        using var f = new RuntimeFixture();
+        var main = f.Session(Ea);
+        main.Envelope = main.Envelope with { Budget = new Budget(0.01m, 1, TimeSpan.FromMinutes(1)) };
+        var task = f.Session(Ea, SessionKind.Task);
+        task.Envelope = main.Envelope;
+
+        Assert.Equal((double)Ea.Budget.SessionMaxCredits, f.Configs.CreateConfig(main).SessionLimits!.MaxAiCredits);
+        Assert.Equal(0.01, f.Configs.CreateConfig(task).SessionLimits!.MaxAiCredits);
+    }
+
     private sealed class FakeBroker(params string[] names) : IBrokerToolSource
     {
         public Exception? Failure { get; init; }

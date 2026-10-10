@@ -16,7 +16,8 @@ namespace Capybara.Runtime.Copilot.Inbox;
 /// The single consumer of one agent's durable inbox (FR-AGT-05). Messages run one turn at a time, oldest first, and a
 /// message is acknowledged only after its turn completed — the runtime has persisted it — so a crash loses nothing
 /// (NFR-02). A user DM pre-empts background work: it is taken before any queued background item, and while a
-/// main-session turn is in flight it is interjected into that turn in <c>immediate</c> mode and acknowledged with it.
+/// main-session turn is in flight — the pump's own or a routine heartbeat — it is interjected into that turn in
+/// <c>immediate</c> mode and acknowledged once that turn has completed. Dry-run turns are never joined.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -166,16 +167,25 @@ public sealed partial class InboxPump
             return;
         }
 
-        BeginTurn(message, plan.Request.Target);
         TurnResult result;
-        IReadOnlyList<FleetMessage> steered;
-        try
+        IReadOnlyList<FleetMessage> steered = [];
+        if (IsUserDm(message) && plan.Request.Target.Kind == SessionKind.Main
+            && await _runtime.SteerAsync(message.Body, MessageOrigin.User, stoppingToken) is { } joined)
         {
-            result = await _runtime.RunTurnAsync(plan.Request, stoppingToken);
+            // A main turn that is not ours (a routine heartbeat) was in flight: the DM joined it and shares its outcome.
+            result = joined;
         }
-        finally
+        else
         {
-            steered = await EndTurnAsync();
+            BeginTurn(message, plan.Request.Target);
+            try
+            {
+                result = await _runtime.RunTurnAsync(plan.Request, stoppingToken);
+            }
+            finally
+            {
+                steered = await EndTurnAsync();
+            }
         }
 
         switch (result.Status)
@@ -377,7 +387,8 @@ public sealed partial class InboxPump
         {
             if (_mainTurnMessageId is { } inFlight)
             {
-                _steering.Add(SteerPendingDmsAsync(inFlight));
+                // Started on the pool, not inline: this runs on the enqueuer's thread, under the lock.
+                _steering.Add(Task.Run(() => SteerPendingDmsAsync(inFlight)));
             }
         }
     }
@@ -387,26 +398,31 @@ public sealed partial class InboxPump
     {
         try
         {
+            var claimed = new List<FleetMessage>();
             foreach (var dm in (await _inbox.ListAsync(Agent, CancellationToken.None)).Where(m => IsUserDm(m) && !IsIncognito(m)))
             {
                 lock (_gate)
                 {
-                    if (_mainTurnMessageId != inFlight || !_claimed.Add(dm.Id))
+                    if (_mainTurnMessageId == inFlight && _claimed.Add(dm.Id))
                     {
-                        continue;
+                        claimed.Add(dm);
                     }
                 }
+            }
 
-                var steered = await _runtime.SteerAsync(dm.Body, MessageOrigin.User, CancellationToken.None);
-                lock (_gate)
+            // Sent in arrival order; each call then waits for the turn they all joined.
+            var outcomes = await Task.WhenAll(claimed.Select(dm => _runtime.SteerAsync(dm.Body, MessageOrigin.User, CancellationToken.None)));
+            lock (_gate)
+            {
+                for (var i = 0; i < claimed.Count; i++)
                 {
-                    if (steered)
+                    if (outcomes[i] is not null)
                     {
-                        _steered.Add(dm);
+                        _steered.Add(claimed[i]);
                     }
                     else
                     {
-                        _claimed.Remove(dm.Id);
+                        _claimed.Remove(claimed[i].Id);
                     }
                 }
             }

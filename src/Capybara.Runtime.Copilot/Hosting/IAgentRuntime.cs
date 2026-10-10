@@ -25,9 +25,11 @@ public interface IAgentRuntime : IAsyncDisposable
 
     /// <summary>
     /// Interjects <paramref name="prompt"/> into the main-session turn in flight using <c>immediate</c> mode, so a user
-    /// DM pre-empts background work (FR-AGT-05). Returns <see langword="false"/> when no main turn is in flight.
+    /// DM pre-empts background work, including routine heartbeats (FR-AGT-05). Waits for that turn to finish and returns
+    /// its result, so the caller can acknowledge the DM only once it is persisted. Returns <see langword="null"/> when no
+    /// main turn is in flight, or the one in flight is a dry run (a user's message must never run under dry-run rules).
     /// </summary>
-    Task<bool> SteerAsync(string prompt, MessageOrigin origin, CancellationToken cancellationToken);
+    Task<TurnResult?> SteerAsync(string prompt, MessageOrigin origin, CancellationToken cancellationToken);
 
     /// <summary>Changes the agent's model for its main session and later turns (FR-AGT-08).</summary>
     Task SetModelAsync(string model, CancellationToken cancellationToken);

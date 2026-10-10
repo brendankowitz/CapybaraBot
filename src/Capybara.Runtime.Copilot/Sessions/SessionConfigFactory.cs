@@ -192,9 +192,13 @@ public sealed partial class SessionConfigFactory(
         };
         config.OnEvent = e => usage.OnEvent(session, e);
 
+        // The main session is long-lived and its limit is fixed when it is built, so it gets the agent's session cap rather
+        // than the envelope of whichever turn happened to build it; other sessions live for one envelope.
         config.SessionLimits = new SessionLimitsConfig
         {
-            MaxAiCredits = (double)Math.Min(agent.Budget.SessionMaxCredits, session.Envelope.Budget.Credits),
+            MaxAiCredits = (double)(session.Kind == SessionKind.Main
+                ? agent.Budget.SessionMaxCredits
+                : Math.Min(agent.Budget.SessionMaxCredits, session.Envelope.Budget.Credits)),
         };
         config.InfiniteSessions = new InfiniteSessionConfig { Enabled = session.Kind == SessionKind.Main };
 

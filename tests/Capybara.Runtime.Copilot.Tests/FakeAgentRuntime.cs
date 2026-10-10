@@ -10,7 +10,8 @@ namespace Capybara.Runtime.Copilot.Tests;
 /// <summary>An <see cref="IAgentRuntime"/> without a CLI: records every call and runs scripted turns.</summary>
 internal sealed class FakeAgentRuntime(AgentId agent) : IAgentRuntime
 {
-    private int _inFlight;
+    private readonly Lock _gate = new();
+    private (bool Steerable, TaskCompletionSource<TurnResult> Done)? _inFlight;
 
     public AgentId Agent { get; } = agent;
 
@@ -29,30 +30,50 @@ internal sealed class FakeAgentRuntime(AgentId agent) : IAgentRuntime
     public async Task<TurnResult> RunTurnAsync(AgentTurnRequest request, CancellationToken cancellationToken)
     {
         Requests.Enqueue(request);
+        var done = new TaskCompletionSource<TurnResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         if (request.Target.Kind == SessionKind.Main)
         {
-            Interlocked.Exchange(ref _inFlight, 1);
+            lock (_gate)
+            {
+                _inFlight = (!request.DryRun, done);
+            }
         }
 
+        TurnResult? result = null;
         try
         {
-            return await Turn(request, cancellationToken);
+            result = await Turn(request, cancellationToken);
+            return result;
         }
         finally
         {
-            Interlocked.Exchange(ref _inFlight, 0);
+            lock (_gate)
+            {
+                if (_inFlight?.Done == done)
+                {
+                    _inFlight = null;
+                }
+            }
+
+            done.TrySetResult(result ?? TurnResult.Failed("threw"));
         }
     }
 
-    public Task<bool> SteerAsync(string prompt, MessageOrigin origin, CancellationToken cancellationToken)
+    public async Task<TurnResult?> SteerAsync(string prompt, MessageOrigin origin, CancellationToken cancellationToken)
     {
-        if (Volatile.Read(ref _inFlight) == 0)
+        (bool Steerable, TaskCompletionSource<TurnResult> Done)? turn;
+        lock (_gate)
         {
-            return Task.FromResult(false);
+            turn = _inFlight;
+        }
+
+        if (turn is not { Steerable: true } current)
+        {
+            return null;
         }
 
         Steered.Enqueue(prompt);
-        return Task.FromResult(true);
+        return await current.Done.Task.WaitAsync(cancellationToken);
     }
 
     public Task SetModelAsync(string model, CancellationToken cancellationToken)
