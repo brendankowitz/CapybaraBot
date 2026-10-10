@@ -13,7 +13,7 @@ namespace Capybara.Runtime.Copilot.Supervision;
 /// the wrong tools, or that cannot be tested at all, is paused through the <see cref="KillSwitch"/> and the user is
 /// alerted. Only a human resumes it, after fixing the cause.
 /// </summary>
-public sealed partial class SelfTestGuard(KillSwitch killSwitch, IAlertSink alerts, TimeProvider time, ILogger logger)
+public sealed partial class SelfTestGuard(KillSwitch killSwitch, IAlertSink alerts, TimeProvider time, ILogger<SelfTestGuard> logger)
 {
     public const string AlertKind = "runtime.selftest";
 

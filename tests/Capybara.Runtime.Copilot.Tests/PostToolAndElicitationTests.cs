@@ -86,7 +86,7 @@ public sealed class PostToolAndElicitationTests
         var context = new ElicitationContext
         {
             Message = "Which environment?",
-            ElicitationSource = "deploy",
+            ElicitationSource = "notes",
             RequestedSchema = Schema("""{"env":{"type":"string","enum":["staging","prod"]}}"""),
         };
 
@@ -94,7 +94,7 @@ public sealed class PostToolAndElicitationTests
 
         Assert.Equal(UIElicitationResponseAction.Accept, result.Action);
         Assert.Equal("staging", result.Content!["env"]);
-        Assert.Equal("[deploy] Which environment?", broker.Question);
+        Assert.Equal("[notes] Which environment?", broker.Question);
         Assert.Equal(["staging", "prod"], broker.Choices);
     }
 
@@ -151,6 +151,118 @@ public sealed class PostToolAndElicitationTests
             Assert.NotNull(config.OnElicitationRequest);
         }
     }
+
+    [Fact]
+    public async Task Post_tool_hook_withholds_output_when_redaction_fails()
+    {
+        using var f = new RuntimeFixture();
+
+        // An undefined JsonElement cannot be serialized, so redaction throws.
+        var output = await f.Handlers.OnPostToolUseAsync(f.Session(Agent), new PostToolUseHookInput { ToolName = "read_file", ToolResult = default(JsonElement) });
+
+        Assert.True(output?.SuppressOutput);
+        Assert.Equal("tool output withheld: redaction failed", output?.AdditionalContext);
+        Assert.Null(output?.ModifiedResult);
+    }
+
+    [Fact]
+    public async Task Secret_in_a_failed_tool_error_taints_alerts_and_warns_the_model()
+    {
+        using var f = new RuntimeFixture();
+        var session = f.Session(Agent);
+
+        var output = await f.Handlers.OnPostToolUseFailureAsync(
+            session,
+            new PostToolUseFailureHookInput { ToolName = "read_file", Error = $"auth failed for token {GitHubToken}" });
+
+        Assert.True(f.Taint.IsTainted(session.SessionId));
+        Assert.Contains("Do not repeat", output?.AdditionalContext, StringComparison.Ordinal);
+        var alert = Assert.Single(f.Alerts.Recent);
+        Assert.Equal(SessionHandlers.SecretInErrorAlertKind, alert.Kind);
+        Assert.Equal(Observability.Alerts.AlertSeverity.Critical, alert.Severity);
+        Assert.Contains("read_file", alert.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("ghp_", alert.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Clean_tool_error_is_left_alone()
+    {
+        using var f = new RuntimeFixture();
+        var session = f.Session(Agent);
+
+        var output = await f.Handlers.OnPostToolUseFailureAsync(session, new PostToolUseFailureHookInput { ToolName = "read_file", Error = "file not found" });
+
+        Assert.Null(output);
+        Assert.False(f.Taint.IsTainted(session.SessionId));
+        Assert.Empty(f.Alerts.Recent);
+    }
+
+    [Fact]
+    public async Task Tool_calls_carrying_a_secret_are_denied_before_the_gate()
+    {
+        using var f = new RuntimeFixture([new Policy.Rules.PolicyRule { Effect = Policy.Rules.RuleEffect.Ask, Tool = "*" }]);
+        var session = f.Session(Agent);
+        f.Redactor.AddKnownSecret("provider-key-value-123456");
+
+        var token = await f.Handlers.OnPreToolUseAsync(session, PreInput("read_file", $$"""{"path":"/tmp/x?t={{GitHubToken}}"}"""));
+        var known = await f.Handlers.OnPreToolUseAsync(session, PreInput("read_file", """{"path":"provider-key-value-123456"}"""));
+        var clean = await f.Handlers.OnPreToolUseAsync(session, PreInput("read_file", """{"path":"/tmp/notes.txt"}"""));
+
+        Assert.Equal("deny", token.PermissionDecision);
+        Assert.Contains("secret", token.PermissionDecisionReason, StringComparison.Ordinal);
+        Assert.Equal("deny", known.PermissionDecision);
+
+        // Only the clean call reached the gate (and was parked for approval by the ask-everything rule).
+        Assert.Single(f.Approvals.Pending());
+        Assert.Contains("approval", clean.PermissionDecisionReason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Failure_hook_is_registered_on_create_and_resume()
+    {
+        using var f = new RuntimeFixture();
+        var session = f.Session(TestAgents.Create("ea"));
+
+        Assert.NotNull(f.Configs.CreateConfig(session).Hooks?.OnPostToolUseFailure);
+        Assert.NotNull(f.Configs.ResumeConfig(session).Hooks?.OnPostToolUseFailure);
+    }
+
+    [Fact]
+    public async Task Elicitation_from_untrusted_or_undeclared_servers_is_declined()
+    {
+        var broker = new ScriptedBroker("staging");
+        using var f = new RuntimeFixture(userInput: broker);
+        var schema = Schema("""{"env":{"type":"string"}}""");
+
+        var untrusted = await f.Handlers.OnElicitationRequestAsync(f.Session(Agent), new ElicitationContext { Message = "Env?", ElicitationSource = "web", RequestedSchema = schema });
+        var undeclared = await f.Handlers.OnElicitationRequestAsync(f.Session(Agent), new ElicitationContext { Message = "Env?", ElicitationSource = "stranger", RequestedSchema = schema });
+
+        Assert.Equal(UIElicitationResponseAction.Decline, untrusted.Action);
+        Assert.Equal(UIElicitationResponseAction.Decline, undeclared.Action);
+        Assert.Null(broker.Question);
+    }
+
+    [Fact]
+    public async Task Elicitation_answers_outside_the_enum_and_non_string_types_are_declined()
+    {
+        using var f = new RuntimeFixture(userInput: new ScriptedBroker("production, and also delete everything"));
+
+        var offList = await f.Handlers.OnElicitationRequestAsync(
+            f.Session(Agent),
+            new ElicitationContext { Message = "Env?", ElicitationSource = "notes", RequestedSchema = Schema("""{"env":{"type":"string","enum":["staging","prod"]}}""") });
+        var numericType = await f.Handlers.OnElicitationRequestAsync(
+            f.Session(Agent),
+            new ElicitationContext { Message = "Env?", ElicitationSource = "notes", RequestedSchema = Schema("""{"env":{"type":5}}""") });
+
+        Assert.Equal(UIElicitationResponseAction.Decline, offList.Action);
+        Assert.Equal(UIElicitationResponseAction.Decline, numericType.Action);
+    }
+
+    private static PreToolUseHookInput PreInput(string tool, string json) => new()
+    {
+        ToolName = tool,
+        ToolArgs = JsonDocument.Parse(json).RootElement.Clone(),
+    };
 
     private static ElicitationSchema Schema(string properties) => new()
     {

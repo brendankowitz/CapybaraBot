@@ -9,6 +9,7 @@ using Capybara.Runtime.Copilot.Tools;
 using Capybara.Runtime.Copilot.Usage;
 using GitHub.Copilot;
 using Microsoft.Extensions.Logging;
+using RemoteSessionMode = GitHub.Copilot.Rpc.RemoteSessionMode;
 
 namespace Capybara.Runtime.Copilot.Sessions;
 
@@ -89,6 +90,7 @@ public sealed partial class SessionConfigFactory(
         var available = AvailableToolsFor(session);
 
         config.Model = agent.Model;
+        config.RemoteSession = RemoteSessionFor(session);
         config.Provider = ProviderFor(agent.Provider, resolved.ProviderKey);
         config.AvailableTools = [.. available, .. InfrastructureTools];
         config.Tools = [.. tools.GetTools(session, [.. available])];
@@ -105,6 +107,7 @@ public sealed partial class SessionConfigFactory(
         {
             OnPreToolUse = async (input, _) => await handlers.OnPreToolUseAsync(session, input),
             OnPostToolUse = (input, _) => handlers.OnPostToolUseAsync(session, input),
+            OnPostToolUseFailure = (input, _) => handlers.OnPostToolUseFailureAsync(session, input),
         };
         config.OnEvent = e => usage.OnEvent(session, e);
 
@@ -117,18 +120,59 @@ public sealed partial class SessionConfigFactory(
         // The SDK's cross-session store would bypass memory scoping; the wiki is the only memory (FR-MEM-01).
         config.EnableSessionStore = false;
 
-        // Tiered, pinned and scanned skills only (FR-SKL-01, FR-SKL-04). Bodies load on demand (FR-SKL-02).
+        ApplySkills(config, agent);
+        return config;
+    }
+
+    /// <summary>
+    /// Tiered, pinned and scanned skills only (FR-SKL-01, FR-SKL-04); bodies load on demand (FR-SKL-02).
+    /// </summary>
+    /// <remarks>
+    /// Each verified skill folder is passed as its own root, never a tier root. The runtime walks a root for
+    /// <c>SKILL.md</c> at any depth, so a tier root would also load what the resolver never verified: staged
+    /// <c>pending/{name}</c> proposals, <c>_</c>-prefixed folders and nested layouts. A verified folder that itself
+    /// contains a nested <c>SKILL.md</c> is excluded for the same reason. <c>DisabledSkills</c> is kept as defence in
+    /// depth only; it cannot separate a pending proposal from the active skill of the same name.
+    /// </remarks>
+    private void ApplySkills(SessionConfigBase config, AgentDefinition agent)
+    {
         var skills = _skills.Resolve(agent.Id);
         foreach (var rejected in skills.Rejected)
         {
             LogSkillRejected(logger, rejected.Name, rejected.Tier, agent.Id.Value, rejected.Reason);
         }
 
+        var directories = new List<string>();
+        var disabled = new SortedSet<string>(skills.Disabled, StringComparer.Ordinal);
+        foreach (var skill in skills.Active)
+        {
+            if (HasNestedSkill(skill.Directory))
+            {
+                LogSkillRejected(logger, skill.Name, skill.Tier, agent.Id.Value, "contains a nested SKILL.md");
+                disabled.Add(skill.Name);
+                continue;
+            }
+
+            directories.Add(skill.Directory);
+        }
+
         config.EnableSkills = true;
-        config.SkillDirectories = [.. skills.Directories];
-        config.DisabledSkills = [.. skills.Disabled];
-        return config;
+        config.SkillDirectories = directories;
+        config.DisabledSkills = [.. disabled];
     }
+
+    private static bool HasNestedSkill(string skillDirectory) =>
+        Directory.EnumerateFiles(skillDirectory, "SKILL.md", SearchOption.AllDirectories)
+            .Any(f => !string.Equals(Path.GetDirectoryName(f), Path.TrimEndingDirectorySeparator(skillDirectory), StringComparison.Ordinal));
+
+    /// <summary>
+    /// FR-CLI-08: an opted-in agent's main session is exported to GitHub (Mission Control) read-only. Never <c>On</c>:
+    /// remote steering would let GitHub web/mobile drive the agent around the gateway's tailnet authentication and the
+    /// inbox. Consult and task sessions are never exported. Always set explicitly, because the setting is not persisted
+    /// across resume.
+    /// </summary>
+    private static RemoteSessionMode RemoteSessionFor(CapybaraSession session) =>
+        session.Kind == SessionKind.Main && session.Agent.EnableRemoteSessions ? RemoteSessionMode.Export : RemoteSessionMode.Off;
 
     /// <summary>FR-SAF-01 layer 1: the runtime enforces static deny/ask itself, as defense in depth.</summary>
     private ManagedSettings ManagedSettingsFor(AgentDefinition agent)
@@ -156,7 +200,7 @@ public sealed partial class SessionConfigFactory(
     /// Vendored MCP servers (FR-CON-03). Only individually enabled tools are exposed; stdio executables must match
     /// their pin (FR-SKL-04); http servers get their bearer token from the secret store.
     /// </summary>
-    private static Dictionary<string, McpServerConfig> McpServersFor(AgentDefinition agent, IReadOnlyDictionary<string, string> tokens)
+    private Dictionary<string, McpServerConfig> McpServersFor(AgentDefinition agent, IReadOnlyDictionary<string, string> tokens)
     {
         var servers = new Dictionary<string, McpServerConfig>(StringComparer.Ordinal);
         foreach (var server in agent.McpServers)
@@ -181,16 +225,26 @@ public sealed partial class SessionConfigFactory(
         return servers;
     }
 
-    private static McpStdioServerConfig Stdio(AgentId agent, McpServerSpec server, int? timeout)
+    private McpStdioServerConfig Stdio(AgentId agent, McpServerSpec server, int? timeout) => new()
     {
-        return new McpStdioServerConfig
-        {
-            Command = McpServerPins.Verify(agent, server),
-            Args = [.. server.Args],
-            Tools = [.. server.Tools],
-            Timeout = timeout,
-        };
-    }
+        Command = McpServerPins.Verify(agent, server),
+        Args = [.. server.Args],
+        Tools = [.. server.Tools],
+        Timeout = timeout,
+        Env = MinimalEnvironment(agent),
+    };
+
+    /// <summary>
+    /// An explicit, minimal environment for stdio MCP servers, so the CLI's environment (which carries the GitHub token)
+    /// and the host's are not handed to third-party code. <c>HOME</c> is the agent's workspace, the only place the
+    /// sandbox lets it write.
+    /// </summary>
+    private Dictionary<string, string> MinimalEnvironment(AgentId agent) => new(StringComparer.Ordinal)
+    {
+        ["PATH"] = Environment.GetEnvironmentVariable("PATH") is { Length: > 0 } path ? path : "/usr/local/bin:/usr/bin:/bin",
+        ["HOME"] = options.AgentWorkingDirectory(agent),
+        ["LANG"] = Environment.GetEnvironmentVariable("LANG") is { Length: > 0 } lang ? lang : "C.UTF-8",
+    };
 
     private async ValueTask<SessionSecrets> ResolveSecretsAsync(AgentDefinition agent, CancellationToken cancellationToken)
     {

@@ -40,7 +40,7 @@ internal sealed class RuntimeFixture : IDisposable
         Approvals = new ApprovalService(Rules, new ApprovalOptions(), Time);
         Gate = new PolicyGate(Rules, Taint, Approvals, KillSwitch, new InMemoryAuditLog());
         Ledger = new CostLedger(Alerts, Time);
-        Handlers = new SessionHandlers(Gate, Taint, Allowances, userInput ?? new UnattendedUserInputBroker(), Options, NullLogger<SessionHandlers>.Instance, Redactor);
+        Handlers = new SessionHandlers(Gate, Taint, Allowances, userInput ?? new UnattendedUserInputBroker(), Options, NullLogger<SessionHandlers>.Instance, Alerts, Time, Redactor);
         Usage = new UsageCapture(Ledger, Time, NullLogger<UsageCapture>.Instance);
         var memory = new WikiStore(new MemoryOptions { Root = Path.Combine(_dir.Path, "memory") }, new NoMemoryVersioning(), Time);
         Tools = new CapybaraToolProvider(new Lazy<A2ACoordinator>(() => throw new InvalidOperationException("not used")), memory, Taint);

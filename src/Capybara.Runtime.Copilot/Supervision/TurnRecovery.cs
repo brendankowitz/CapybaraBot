@@ -22,12 +22,15 @@ public enum TurnRecoveryState
 
 /// <summary>
 /// What the event log says about the most recent turn of a main session (FR-AGT-04). Turns on one session are serial,
-/// so only the last <c>user.message</c> can be in flight. <see cref="UnfinishedTools"/> lists tool calls that started
+/// so only the last <c>user.message</c> can be in flight. <see cref="InteractionId"/> identifies that turn. <see cref="UnfinishedTools"/> lists tool calls that started
 /// but never reported completion: they may or may not have taken effect and must be verified, not blindly retried.
 /// </summary>
 public sealed record TurnRecovery(TurnRecoveryState State, string? InteractionId, IReadOnlyList<string> UnfinishedTools)
 {
     public static TurnRecovery Unavailable { get; } = new(TurnRecoveryState.Unavailable, null, []);
+
+    /// <summary>The user must check something: the turn was cut off, or tool calls never reported completion.</summary>
+    public bool NeedsAttention => State == TurnRecoveryState.Interrupted || UnfinishedTools.Count > 0;
 
     public static TurnRecovery Analyze(IReadOnlyList<SessionEvent> events)
     {
@@ -48,7 +51,8 @@ public sealed record TurnRecovery(TurnRecoveryState State, string? InteractionId
             return new TurnRecovery(TurnRecoveryState.NoTurn, null, []);
         }
 
-        var interaction = ((UserMessageEvent)events[lastUser]).Data?.InteractionId;
+        // The interaction id identifies the turn across restarts; the event id stands in when the runtime assigned none.
+        var interaction = ((UserMessageEvent)events[lastUser]).Data?.InteractionId ?? events[lastUser].Id.ToString("N");
         var openTurns = new HashSet<string>(StringComparer.Ordinal);
         var openTools = new Dictionary<string, string>(StringComparer.Ordinal);
         AssistantMessageData? finalMessage = null;
@@ -59,7 +63,7 @@ public sealed record TurnRecovery(TurnRecoveryState State, string? InteractionId
             switch (e)
             {
                 case AbortEvent:
-                    return new TurnRecovery(TurnRecoveryState.Aborted, interaction, [.. openTools.Values]);
+                    return new TurnRecovery(TurnRecoveryState.Aborted, interaction, [.. openTools.Values.Order(StringComparer.Ordinal)]);
 
                 case AssistantTurnStartEvent { Data.TurnId: { } turn }:
                     openTurns.Add(turn);

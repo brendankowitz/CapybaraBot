@@ -11,19 +11,28 @@ namespace Capybara.Runtime.Copilot.Hosting;
 /// that fails to start is reported and left for the supervisor; one that fails its self-test is paused (fail closed,
 /// FR-AGT-09). Neither takes the rest of the fleet down.
 /// </summary>
-/// <remarks>The reconciler is optional so existing composition keeps resolving this service; production wires it.</remarks>
+/// <remarks>
+/// The reconciler is optional so composition that predates it keeps resolving this service; without it, start-up does
+/// not report turns a crash interrupted, which is logged as Critical.
+/// </remarks>
 public sealed partial class AgentRuntimeHostedService(
     AgentRuntimePool pool,
     IAlertSink alerts,
     KillSwitch killSwitch,
     TimeProvider time,
     ILogger<AgentRuntimeHostedService> logger,
+    ILogger<SelfTestGuard> selfTestLogger,
     ISessionReconciler? reconciler = null) : IHostedService
 {
-    private readonly SelfTestGuard _selfTest = new(killSwitch, alerts, time, logger);
+    private readonly SelfTestGuard _selfTest = new(killSwitch, alerts, time, selfTestLogger);
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
+        if (reconciler is null)
+        {
+            LogReconcilerMissing(logger);
+        }
+
         foreach (var runtime in pool.Supervised)
         {
             var agent = runtime.Agent.Value;
@@ -74,4 +83,7 @@ public sealed partial class AgentRuntimeHostedService(
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Reconciling runtime {Agent} on start failed")]
     private static partial void LogReconcileFailed(ILogger logger, Exception exception, string agent);
+
+    [LoggerMessage(Level = LogLevel.Critical, Message = "No session reconciler is registered; turns interrupted by a crash will not be reported")]
+    private static partial void LogReconcilerMissing(ILogger logger);
 }

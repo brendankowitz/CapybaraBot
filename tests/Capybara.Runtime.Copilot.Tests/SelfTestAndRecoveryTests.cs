@@ -1,8 +1,10 @@
 using Capybara.Contracts.Agents;
 using Capybara.Observability.Alerts;
 using Capybara.Policy.Safety;
+using Capybara.Runtime.Copilot.Configuration;
 using Capybara.Runtime.Copilot.Hosting;
 using Capybara.Runtime.Copilot.Supervision;
+using Capybara.Testing;
 using GitHub.Copilot;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
@@ -15,12 +17,16 @@ public sealed class SelfTestAndRecoveryTests : IDisposable
     private readonly FakeTimeProvider _time = new(DateTimeOffset.UnixEpoch);
     private readonly InMemoryAlertSink _alerts = new();
     private readonly KillSwitch _killSwitch;
+    private readonly TempDirectory _state = new();
 
     public SelfTestAndRecoveryTests() => _killSwitch = new KillSwitch(_time);
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
-    private SelfTestGuard Guard() => new(_killSwitch, _alerts, _time, NullLogger.Instance);
+    private SelfTestGuard Guard() => new(_killSwitch, _alerts, _time, NullLogger<SelfTestGuard>.Instance);
+
+    private EventLogReconciler Reconciler() =>
+        new(_alerts, _time, new CopilotRuntimeOptions { StateRoot = _state.Path }, NullLogger<EventLogReconciler>.Instance);
 
     [Fact]
     public async Task Failed_self_test_pauses_the_agent_and_alerts()
@@ -164,7 +170,7 @@ public sealed class SelfTestAndRecoveryTests : IDisposable
     public async Task Event_log_reconciler_alerts_on_an_interrupted_turn()
     {
         var runtime = new HistoryRuntime([User("i5"), TurnStart("t1"), ToolStart("c9", "calendar_write")]);
-        var reconciler = new EventLogReconciler(_alerts, _time, NullLogger<EventLogReconciler>.Instance);
+        var reconciler = Reconciler();
 
         var recovery = await reconciler.ReconcileAsync(runtime, Ct);
 
@@ -177,7 +183,7 @@ public sealed class SelfTestAndRecoveryTests : IDisposable
     [Fact]
     public async Task Event_log_reconciler_reports_unavailable_without_an_event_history()
     {
-        var reconciler = new EventLogReconciler(_alerts, _time, NullLogger<EventLogReconciler>.Instance);
+        var reconciler = Reconciler();
 
         var recovery = await reconciler.ReconcileAsync(new ScriptedRuntime(), Ct);
 
@@ -185,7 +191,73 @@ public sealed class SelfTestAndRecoveryTests : IDisposable
         Assert.Empty(_alerts.Recent);
     }
 
-    public void Dispose() => _killSwitch.Dispose();
+    [Fact]
+    public async Task Same_interrupted_turn_is_alerted_once_across_restarts()
+    {
+        var runtime = new HistoryRuntime([User("i6"), TurnStart("t1"), ToolStart("c1", "email_send")]);
+
+        await Reconciler().ReconcileAsync(runtime, Ct);
+        await Reconciler().ReconcileAsync(runtime, Ct); // a new instance = a process restart
+
+        Assert.Single(_alerts.Recent);
+        Assert.True(File.Exists(Path.Combine(_state.Path, "agents", "ea", "host", EventLogReconciler.FileName)));
+
+        var next = new HistoryRuntime([User("i6"), TurnStart("t1"), ToolStart("c1", "email_send"), User("i7"), TurnStart("t2")]);
+        await Reconciler().ReconcileAsync(next, Ct);
+        Assert.Equal(2, _alerts.Recent.Count);
+    }
+
+    [Fact]
+    public async Task Aborted_turn_with_unfinished_tools_is_alerted()
+    {
+        var runtime = new HistoryRuntime(
+            [User("i8"), TurnStart("t1"), ToolStart("c1", "git_push"), new AbortEvent { Data = new AbortData { Reason = AbortReason.UserAbort } }]);
+
+        var recovery = await Reconciler().ReconcileAsync(runtime, Ct);
+
+        Assert.Equal(TurnRecoveryState.Aborted, recovery.State);
+        Assert.Contains("git_push", Assert.Single(_alerts.Recent).Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Failed_alert_is_retried_on_the_next_start()
+    {
+        var runtime = new HistoryRuntime([User("i9"), TurnStart("t1")]);
+        var failing = new EventLogReconciler(new ThrowingAlertSink(), _time, new CopilotRuntimeOptions { StateRoot = _state.Path }, NullLogger<EventLogReconciler>.Instance);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => failing.ReconcileAsync(runtime, Ct));
+        await Reconciler().ReconcileAsync(runtime, Ct);
+
+        Assert.Single(_alerts.Recent);
+    }
+
+    [Fact]
+    public void Supervisor_and_hosted_service_degrade_loudly_without_their_dependencies()
+    {
+        var logger = new CapturingLogger<RuntimeSupervisor>();
+
+        _ = new RuntimeSupervisor([], _alerts, new SupervisorOptions(), _time, logger);
+
+        Assert.Equal(2, logger.Critical.Count);
+        Assert.Contains(logger.Critical, m => m.Contains("self-test", StringComparison.Ordinal));
+        Assert.Contains(logger.Critical, m => m.Contains("reconciliation", StringComparison.Ordinal));
+
+        var wired = new CapturingLogger<RuntimeSupervisor>();
+        _ = new RuntimeSupervisor([], _alerts, new SupervisorOptions(), _time, wired, Guard(), Reconciler());
+        Assert.Empty(wired.Critical);
+    }
+
+    public void Dispose()
+    {
+        _killSwitch.Dispose();
+        _state.Dispose();
+    }
+
+    private sealed class ThrowingAlertSink : IAlertSink
+    {
+        public ValueTask PublishAsync(Alert alert, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("alert channel down");
+    }
 
     private static UserMessageEvent User(string interaction) => new() { Data = new UserMessageData { Content = "do it", InteractionId = interaction } };
 

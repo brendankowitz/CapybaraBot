@@ -25,6 +25,12 @@ public sealed record McpServerSpec
     /// <summary>Lower-case hex SHA-256 of <see cref="Command"/>. Required for stdio servers.</summary>
     public string? Sha256 { get; init; }
 
+    /// <summary>
+    /// Lower-case hex SHA-256 of the script an interpreter command (<c>node</c>, <c>python</c>, <c>deno</c>, ...) runs,
+    /// i.e. its first script argument. Required at runtime when <see cref="Command"/> is an interpreter (FR-SKL-04).
+    /// </summary>
+    public string? ScriptSha256 { get; init; }
+
     /// <summary>Results from this server are untrusted input and taint the session (FR-SAF-03).</summary>
     public bool Untrusted { get; init; } = true;
 

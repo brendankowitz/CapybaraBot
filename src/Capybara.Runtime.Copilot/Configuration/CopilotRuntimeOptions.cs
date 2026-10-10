@@ -62,4 +62,7 @@ public sealed class CopilotRuntimeOptions
     public string AgentBaseDirectory(string agentId) => Path.Combine(StateRoot, "agents", agentId, "copilot");
 
     public string AgentWorkingDirectory(string agentId) => Path.Combine(StateRoot, "agents", agentId, "workspace");
+
+    /// <summary>Host-owned per-agent state that is neither the CLI's home nor the agent's workspace.</summary>
+    public string AgentStateDirectory(string agentId) => Path.Combine(StateRoot, "agents", agentId, "host");
 }

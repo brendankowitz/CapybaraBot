@@ -6,6 +6,7 @@ using Capybara.Runtime.Copilot.Hosting;
 using Capybara.Runtime.Copilot.Sessions;
 using Capybara.Testing;
 using GitHub.Copilot;
+using RemoteSessionMode = GitHub.Copilot.Rpc.RemoteSessionMode;
 
 namespace Capybara.Runtime.Copilot.Tests;
 
@@ -106,9 +107,100 @@ public sealed class SessionConfigCompletenessTests
 
         var config = f.Configs.CreateConfig(f.Session(TestAgents.Create("ea")));
 
-        Assert.Equal([f.Options.BuiltInSkillDirectory, shared], config.SkillDirectories);
+        Assert.Equal([Path.Combine(f.Options.BuiltInSkillDirectory, "builtin"), Path.Combine(shared, "pinned")], config.SkillDirectories);
         Assert.Equal(["tampered", "unpinned"], config.DisabledSkills);
         Assert.True(config.EnableSkills);
+    }
+
+    [Fact]
+    public void Only_verified_skill_folders_are_passed_never_tier_roots()
+    {
+        using var f = new RuntimeFixture();
+        var tier = Path.Combine(f.Options.ConfigRoot, "agents", "ea", "skills");
+        WriteSkill(tier, "good");
+        WriteSkill(tier, "tampered");
+        WriteSkill(tier, "bundle");
+        WriteSkill(Path.Combine(tier, "bundle"), "inner");
+        SkillLock.Pin(tier, "good");
+        SkillLock.Pin(tier, "tampered");
+        SkillLock.Pin(tier, "bundle");
+        File.AppendAllText(Path.Combine(tier, "tampered", "SKILL.md"), "\nchanged after pinning");
+
+        // Layouts the resolver never inspects but the runtime would load from a tier root.
+        WriteSkill(Path.Combine(tier, "pending"), "good");
+        WriteSkill(tier, "_foo");
+        WriteSkill(Path.Combine(tier, "foo"), "bar");
+
+        var config = f.Configs.CreateConfig(f.Session(TestAgents.Create("ea")));
+
+        var good = Path.Combine(tier, "good");
+        Assert.Equal([good], config.SkillDirectories);
+        foreach (var root in config.SkillDirectories!)
+        {
+            Assert.Equal([Path.Combine(root, "SKILL.md")], Directory.EnumerateFiles(root, "SKILL.md", SearchOption.AllDirectories));
+        }
+
+        Assert.Contains("tampered", config.DisabledSkills!);
+        Assert.Contains("bundle", config.DisabledSkills!);
+    }
+
+    [Fact]
+    public async Task Remote_sessions_export_only_the_main_session_of_an_opted_in_agent()
+    {
+        using var f = new RuntimeFixture();
+        var opted = TestAgents.Create("code", a => a with { EnableRemoteSessions = true });
+
+        Assert.Equal(RemoteSessionMode.Export, (await f.Configs.CreateConfigAsync(f.Session(opted), Ct)).RemoteSession);
+        Assert.Equal(RemoteSessionMode.Export, (await f.Configs.ResumeConfigAsync(f.Session(opted), Ct)).RemoteSession);
+        Assert.Equal(RemoteSessionMode.Off, f.Configs.CreateConfig(f.Session(opted, SessionKind.Consult)).RemoteSession);
+        Assert.Equal(RemoteSessionMode.Off, f.Configs.CreateConfig(f.Session(TestAgents.Create("ea"))).RemoteSession);
+    }
+
+    [Fact]
+    public void Interpreter_mcp_servers_must_pin_their_script_too()
+    {
+        using var f = new RuntimeFixture();
+        var node = WriteExecutable(f, "node");
+        var script = WriteExecutable(f, "server.js");
+        McpServerSpec Server(string? scriptPin, params string[] args) => new()
+        {
+            Name = "local",
+            Type = "stdio",
+            Command = node,
+            Args = args,
+            Tools = ["search"],
+            Sha256 = Sha256(node),
+            ScriptSha256 = scriptPin,
+        };
+        CapybaraSession SessionWith(McpServerSpec server) =>
+            f.Session(TestAgents.Create("ea", a => a with { Tools = ["mcp:local-search"], McpServers = [server] }));
+
+        var scriptPin = Sha256(script);
+        Assert.Single(f.Configs.CreateConfig(SessionWith(Server(scriptPin, "--no-warnings", script))).McpServers!);
+
+        Assert.Throws<InvalidOperationException>(() => f.Configs.CreateConfig(SessionWith(Server(null, script))));
+        Assert.Throws<InvalidOperationException>(() => f.Configs.CreateConfig(SessionWith(Server(scriptPin, "server.js"))));
+        Assert.Throws<InvalidOperationException>(() => f.Configs.CreateConfig(SessionWith(Server(scriptPin, "-e", "require('x')"))));
+
+        File.AppendAllText(script, "// trojan");
+        Assert.Throws<InvalidOperationException>(() => f.Configs.CreateConfig(SessionWith(Server(scriptPin, script))));
+    }
+
+    [Fact]
+    public void Stdio_mcp_servers_get_a_minimal_explicit_environment()
+    {
+        using var f = new RuntimeFixture();
+        var exe = WriteExecutable(f, "server.bin");
+        var agent = TestAgents.Create("ea", a => a with
+        {
+            Tools = ["mcp:local-search"],
+            McpServers = [new McpServerSpec { Name = "local", Type = "stdio", Command = exe, Tools = ["search"], Sha256 = Sha256(exe) }],
+        });
+
+        var stdio = Assert.IsType<McpStdioServerConfig>(f.Configs.CreateConfig(f.Session(agent)).McpServers!["local"]);
+
+        Assert.Equal(["HOME", "LANG", "PATH"], stdio.Env!.Keys.Order(StringComparer.Ordinal));
+        Assert.Equal(f.Options.AgentWorkingDirectory("ea"), stdio.Env["HOME"]);
     }
 
     [Fact]
