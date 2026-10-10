@@ -157,53 +157,6 @@ public sealed class SessionConfigCompletenessTests
     }
 
     [Fact]
-    public void Interpreter_mcp_servers_must_pin_their_script_too()
-    {
-        using var f = new RuntimeFixture();
-        var node = WriteExecutable(f, "node");
-        var script = WriteExecutable(f, "server.js");
-        McpServerSpec Server(string? scriptPin, params string[] args) => new()
-        {
-            Name = "local",
-            Type = "stdio",
-            Command = node,
-            Args = args,
-            Tools = ["search"],
-            Sha256 = Sha256(node),
-            ScriptSha256 = scriptPin,
-        };
-        CapybaraSession SessionWith(McpServerSpec server) =>
-            f.Session(TestAgents.Create("ea", a => a with { Tools = ["mcp:local-search"], McpServers = [server] }));
-
-        var scriptPin = Sha256(script);
-        Assert.Single(f.Configs.CreateConfig(SessionWith(Server(scriptPin, "--no-warnings", script))).McpServers!);
-
-        Assert.Throws<InvalidOperationException>(() => f.Configs.CreateConfig(SessionWith(Server(null, script))));
-        Assert.Throws<InvalidOperationException>(() => f.Configs.CreateConfig(SessionWith(Server(scriptPin, "server.js"))));
-        Assert.Throws<InvalidOperationException>(() => f.Configs.CreateConfig(SessionWith(Server(scriptPin, "-e", "require('x')"))));
-
-        File.AppendAllText(script, "// trojan");
-        Assert.Throws<InvalidOperationException>(() => f.Configs.CreateConfig(SessionWith(Server(scriptPin, script))));
-    }
-
-    [Fact]
-    public void Stdio_mcp_servers_get_a_minimal_explicit_environment()
-    {
-        using var f = new RuntimeFixture();
-        var exe = WriteExecutable(f, "server.bin");
-        var agent = TestAgents.Create("ea", a => a with
-        {
-            Tools = ["mcp:local-search"],
-            McpServers = [new McpServerSpec { Name = "local", Type = "stdio", Command = exe, Tools = ["search"], Sha256 = Sha256(exe) }],
-        });
-
-        var stdio = Assert.IsType<McpStdioServerConfig>(f.Configs.CreateConfig(f.Session(agent)).McpServers!["local"]);
-
-        Assert.Equal(["HOME", "LANG", "PATH"], stdio.Env!.Keys.Order(StringComparer.Ordinal));
-        Assert.Equal(f.Options.AgentWorkingDirectory("ea"), stdio.Env["HOME"]);
-    }
-
-    [Fact]
     public void Managed_settings_come_from_rules_and_approval_required_tools()
     {
         using var f = new RuntimeFixture(Rules);
@@ -235,7 +188,7 @@ public sealed class SessionConfigCompletenessTests
         var agent = TestAgents.Create("ea", a => a with
         {
             Tools = ["mcp:local-search"],
-            McpServers = [new McpServerSpec { Name = "local", Type = "stdio", Command = exe, Tools = ["search"], Sha256 = Sha256(exe) }],
+            McpServers = [new McpServerSpec { Name = "local", Type = "stdio", Command = exe, Tools = ["search"], Sha256 = Sha256(exe), SelfContained = true }],
         });
 
         Assert.Single(f.Configs.CreateConfig(f.Session(agent)).McpServers!);
@@ -305,7 +258,7 @@ public sealed class SessionConfigCompletenessTests
             McpServers =
             [
                 new McpServerSpec { Name = "broker", Type = "http", Url = "http://127.0.0.1:7071/mcp/research", Tools = ["ask"], TokenSecret = BrokerTokenName },
-                new McpServerSpec { Name = "local", Type = "stdio", Command = exe, Tools = ["search"], Sha256 = Sha256(exe), TimeoutSeconds = 30 },
+                new McpServerSpec { Name = "local", Type = "stdio", Command = exe, Tools = ["search"], Sha256 = Sha256(exe), SelfContained = true, TimeoutSeconds = 30 },
             ],
         });
     }
@@ -351,12 +304,12 @@ public sealed class SessionConfigCompletenessTests
         File.WriteAllText(Path.Combine(dir, "SKILL.md"), $"---\nname: {name}\ndescription: {name} skill\n---\nDo the {name} thing.\n");
     }
 
-    private static string WriteExecutable(RuntimeFixture f, string name)
+    internal static string WriteExecutable(RuntimeFixture f, string name)
     {
         var path = Path.Combine(f.Root, name);
         File.WriteAllText(path, "vendored mcp server " + name);
         return path;
     }
 
-    private static string Sha256(string path) => Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(path)));
+    internal static string Sha256(string path) => Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(path)));
 }

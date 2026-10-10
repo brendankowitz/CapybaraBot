@@ -80,6 +80,8 @@ internal sealed class McpServerYaml
 
     public string? ScriptSha256 { get; set; }
 
+    public bool SelfContained { get; set; }
+
     public bool? Untrusted { get; set; }
 
     public string? TokenSecret { get; set; }

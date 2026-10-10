@@ -45,12 +45,19 @@ public static class CopilotRuntimeServiceCollectionExtensions
             sp.GetRequiredService<Capybara.Orchestration.Registry.AgentRegistry>(),
             agent => CreateRuntime(sp, agent)));
         services.AddSingleton<IAgentTurnExecutor, CopilotTurnExecutor>();
+
+        // Fail-closed supervision (FR-AGT-04, FR-AGT-09): the self-test reruns and the interrupted turn is reconciled
+        // after every start and restart. RuntimeSupervisor logs Critical if either is ever missing.
+        services.TryAddSingleton<SelfTestGuard>();
+        services.TryAddSingleton<ISessionReconciler, EventLogReconciler>();
         services.AddSingleton(sp => new RuntimeSupervisor(
             sp.GetRequiredService<AgentRuntimePool>().Supervised,
             sp.GetRequiredService<Capybara.Observability.Alerts.IAlertSink>(),
             sp.GetRequiredService<SupervisorOptions>(),
             sp.GetRequiredService<TimeProvider>(),
-            sp.GetRequiredService<ILogger<RuntimeSupervisor>>()));
+            sp.GetRequiredService<ILogger<RuntimeSupervisor>>(),
+            sp.GetRequiredService<SelfTestGuard>(),
+            sp.GetRequiredService<ISessionReconciler>()));
 
         if (runtimeOptions.AutoStart)
         {

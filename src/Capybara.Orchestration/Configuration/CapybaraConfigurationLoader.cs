@@ -357,6 +357,12 @@ public static class CapybaraConfigurationLoader
                     return null;
                 }
 
+                if (yaml.ScriptSha256 is null && !yaml.SelfContained)
+                {
+                    errors.Add($"{prefix} must pin the script it runs (scriptSha256) or declare selfContained: true.");
+                    return null;
+                }
+
                 break;
             case "http":
                 if (!Uri.TryCreate(yaml.Url, UriKind.Absolute, out var url) || (url.Scheme != Uri.UriSchemeHttps && !url.IsLoopback))
@@ -387,6 +393,7 @@ public static class CapybaraConfigurationLoader
             Tools = yaml.Tools,
             Sha256 = yaml.Sha256?.ToLowerInvariant(),
             ScriptSha256 = yaml.ScriptSha256?.ToLowerInvariant(),
+            SelfContained = yaml.SelfContained,
             Untrusted = yaml.Untrusted ?? true,
             TokenSecret = yaml.TokenSecret,
             TimeoutSeconds = yaml.Timeout,

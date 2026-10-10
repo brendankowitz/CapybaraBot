@@ -39,6 +39,9 @@ public sealed partial class SessionConfigFactory(
     /// <remarks>The name matches the SDK's internal <c>CopilotSession.ToolSearchToolName</c>, which is not public.</remarks>
     public static readonly IReadOnlyList<string> InfrastructureTools = ["tool_search_tool"];
 
+    /// <summary>Lifetime advertised for the session-scoped token; the SDK requires a positive value (eight hours is typical).</summary>
+    private const long GitHubTokenLifetimeSeconds = 8 * 60 * 60;
+
     private readonly SkillResolver _skills = new(options.BuiltInSkillDirectory, options.ConfigRoot);
 
     public async ValueTask<SessionConfig> CreateConfigAsync(CapybaraSession session, CancellationToken cancellationToken)
@@ -92,6 +95,7 @@ public sealed partial class SessionConfigFactory(
         config.Model = agent.Model;
         config.RemoteSession = RemoteSessionFor(session);
         config.Provider = ProviderFor(agent.Provider, resolved.ProviderKey);
+        config.GitHubTokenProvider = GitHubTokenProvider();
         config.AvailableTools = [.. available, .. InfrastructureTools];
         config.Tools = [.. tools.GetTools(session, [.. available])];
         config.McpServers = McpServersFor(agent, resolved.McpTokens);
@@ -174,6 +178,29 @@ public sealed partial class SessionConfigFactory(
     private static RemoteSessionMode RemoteSessionFor(CapybaraSession session) =>
         session.Kind == SessionKind.Main && session.Agent.EnableRemoteSessions ? RemoteSessionMode.Export : RemoteSessionMode.Off;
 
+    /// <summary>
+    /// Supplies the GitHub token to the session over RPC, so it never sits in the CLI's environment where child
+    /// processes inherit it (FR-SAF-08). The runtime asks again when the advertised lifetime runs out; the current
+    /// option value is read each time, so a rotated token is picked up. The token is also registered with the redactor.
+    /// </summary>
+    private Func<GitHubTokenProviderArgs, Task<GitHubTokenProviderResult>>? GitHubTokenProvider()
+    {
+        if (options.GitHubToken is not { Length: > 0 } token)
+        {
+            return null;
+        }
+
+        handlers.Redactor.AddKnownSecret(token);
+        if (!options.SessionScopedGitHubToken)
+        {
+            return null;
+        }
+
+        return _ => options.GitHubToken is { Length: > 0 } current
+            ? Task.FromResult(GitHubTokenProviderResult.FromToken(new GitHubToken { AccessToken = current, ExpiresIn = GitHubTokenLifetimeSeconds }))
+            : Task.FromResult(GitHubTokenProviderResult.Cancel());
+    }
+
     /// <summary>FR-SAF-01 layer 1: the runtime enforces static deny/ask itself, as defense in depth.</summary>
     private ManagedSettings ManagedSettingsFor(AgentDefinition agent)
     {
@@ -197,8 +224,9 @@ public sealed partial class SessionConfigFactory(
         };
 
     /// <summary>
-    /// Vendored MCP servers (FR-CON-03). Only individually enabled tools are exposed; stdio executables must match
-    /// their pin (FR-SKL-04); http servers get their bearer token from the secret store.
+    /// Vendored MCP servers (FR-CON-03). Only individually enabled tools are exposed; stdio servers must match their pins
+    /// (FR-SKL-04) and start with an empty environment (<see cref="McpStdioLaunch"/>); http servers get their bearer token
+    /// from the secret store.
     /// </summary>
     private Dictionary<string, McpServerConfig> McpServersFor(AgentDefinition agent, IReadOnlyDictionary<string, string> tokens)
     {
@@ -208,7 +236,7 @@ public sealed partial class SessionConfigFactory(
             int? timeout = server.TimeoutSeconds is { } seconds ? seconds * 1000 : null;
             servers[server.Name] = server.Type switch
             {
-                "stdio" => Stdio(agent.Id, server, timeout),
+                "stdio" => McpStdioLaunch.Build(agent.Id, server, options, timeout),
                 "http" => new McpHttpServerConfig
                 {
                     Url = server.Url ?? throw new InvalidOperationException($"MCP server '{server.Name}' of {agent.Id} has no URL."),
@@ -224,27 +252,6 @@ public sealed partial class SessionConfigFactory(
 
         return servers;
     }
-
-    private McpStdioServerConfig Stdio(AgentId agent, McpServerSpec server, int? timeout) => new()
-    {
-        Command = McpServerPins.Verify(agent, server),
-        Args = [.. server.Args],
-        Tools = [.. server.Tools],
-        Timeout = timeout,
-        Env = MinimalEnvironment(agent),
-    };
-
-    /// <summary>
-    /// An explicit, minimal environment for stdio MCP servers, so the CLI's environment (which carries the GitHub token)
-    /// and the host's are not handed to third-party code. <c>HOME</c> is the agent's workspace, the only place the
-    /// sandbox lets it write.
-    /// </summary>
-    private Dictionary<string, string> MinimalEnvironment(AgentId agent) => new(StringComparer.Ordinal)
-    {
-        ["PATH"] = Environment.GetEnvironmentVariable("PATH") is { Length: > 0 } path ? path : "/usr/local/bin:/usr/bin:/bin",
-        ["HOME"] = options.AgentWorkingDirectory(agent),
-        ["LANG"] = Environment.GetEnvironmentVariable("LANG") is { Length: > 0 } lang ? lang : "C.UTF-8",
-    };
 
     private async ValueTask<SessionSecrets> ResolveSecretsAsync(AgentDefinition agent, CancellationToken cancellationToken)
     {

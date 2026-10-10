@@ -38,6 +38,30 @@ public sealed partial class SecretRedactor
         return redacted;
     }
 
+    /// <summary>
+    /// High-precision check: a registered secret value, a private-key block, or a well-known token format (GitHub, AWS
+    /// access key, Slack, Google OAuth, <c>sk-</c> API keys, JWTs). Unlike <see cref="TryRedact"/> it ignores loose
+    /// shapes such as <c>apiKey = ...</c> or <c>Bearer ...</c>, which also match ordinary code and prose, so it is safe
+    /// to use for hard denials.
+    /// </summary>
+    public bool ContainsSecret(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return false;
+        }
+
+        foreach (var secret in _known.Keys)
+        {
+            if (text.Contains(secret, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return PrivateKeyBlock().IsMatch(text) || TokenPatterns().IsMatch(text);
+    }
+
     /// <summary>Returns <see langword="true"/> when anything was redacted.</summary>
     public bool TryRedact(string text, out string redacted)
     {

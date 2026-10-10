@@ -23,7 +23,8 @@ public static class CopilotClientOptionsFactory
             Mode = CopilotClientMode.Empty,
             BaseDirectory = options.AgentBaseDirectory(agent.Id),
             WorkingDirectory = options.AgentWorkingDirectory(agent.Id),
-            GitHubToken = options.GitHubToken,
+            // Session-scoped by default: a process-level token is put in the CLI's environment, which every child inherits.
+            GitHubToken = options.SessionScopedGitHubToken ? null : options.GitHubToken,
             UseLoggedInUser = false,
 
             // Mission Control access is opt-in per agent; the runtime only offers it inside a GitHub repo (FR-CLI-08).

@@ -24,6 +24,32 @@ public sealed class CopilotRuntimeOptions
     public string? GitHubToken { get; set; }
 
     /// <summary>
+    /// Supply <see cref="GitHubToken"/> to each session over RPC (<c>GitHubTokenProvider</c>) instead of to the CLI
+    /// process, where the SDK puts it in the environment that every child process (shell, stdio MCP servers) inherits
+    /// (FR-SAF-08). <see langword="false"/> is a rollback switch only, for a CLI that rejects client calls without a
+    /// process-level token.
+    /// </summary>
+    public bool SessionScopedGitHubToken { get; set; } = true;
+
+    /// <summary>
+    /// How stdio MCP servers are launched (FR-SAF-08). The SDK's per-server <c>Env</c> is merged into the CLI's
+    /// environment, so it cannot hide host variables; isolation therefore wraps the command in <c>env -i</c>.
+    /// Defaults to <see cref="StdioMcpIsolation.ClearEnvironment"/> on Unix and <see cref="StdioMcpIsolation.Refuse"/>
+    /// on Windows, which has no equivalent launcher.
+    /// </summary>
+    public StdioMcpIsolation StdioMcpIsolation { get; set; } =
+        OperatingSystem.IsWindows() ? StdioMcpIsolation.Refuse : StdioMcpIsolation.ClearEnvironment;
+
+    /// <summary>Absolute path of the <c>env</c> binary used for <see cref="StdioMcpIsolation.ClearEnvironment"/>.</summary>
+    public string EnvExecutable { get; set; } = "/usr/bin/env";
+
+    /// <summary>
+    /// Optional SHA-256 pin for <see cref="EnvExecutable"/>. Without it the launcher is still required to be an absolute,
+    /// existing file that is not group- or world-writable.
+    /// </summary>
+    public string? EnvExecutableSha256 { get; set; }
+
+    /// <summary>
     /// Built-in skill tier shipped with the binary (FR-SKL-01). The shared tier is <c>{ConfigRoot}/skills</c> and the
     /// per-agent tier <c>{ConfigRoot}/agents/{id}/skills</c>; both must match their lock-file pins (FR-SKL-04).
     /// </summary>

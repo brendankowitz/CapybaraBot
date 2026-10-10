@@ -257,7 +257,12 @@ public sealed partial class SessionHandlers(
         options.UntrustedInputTools.Contains(tool, StringComparer.Ordinal)
         || session.Agent.McpServers.Any(s => s.Untrusted && s.RuntimeToolNames().Contains(tool, StringComparer.Ordinal));
 
-    /// <summary>Fails closed: arguments that cannot be checked are treated as carrying a secret.</summary>
+    /// <summary>
+    /// Fails closed: arguments that cannot be checked are treated as carrying a secret. Only high-precision matches
+    /// count (<see cref="SecretRedactor.ContainsSecret"/>); loose shapes like <c>apiKey = ...</c> are ordinary code and
+    /// are left to the gate. Decoded string values and property names are checked, not raw JSON, so a secret whose
+    /// characters JSON escapes is still found.
+    /// </summary>
     private bool ContainsSecret(JsonElement? args)
     {
         if (args is not { } value)
@@ -267,7 +272,7 @@ public sealed partial class SessionHandlers(
 
         try
         {
-            return Redactor.TryRedact(value.GetRawText(), out _);
+            return AnyString(value, Redactor.ContainsSecret);
         }
 #pragma warning disable CA1031 // Fail closed.
         catch (Exception ex)
@@ -277,6 +282,14 @@ public sealed partial class SessionHandlers(
             return true;
         }
     }
+
+    private static bool AnyString(JsonElement element, Func<string, bool> predicate) => element.ValueKind switch
+    {
+        JsonValueKind.String => predicate(element.GetString()!),
+        JsonValueKind.Array => element.EnumerateArray().Any(e => AnyString(e, predicate)),
+        JsonValueKind.Object => element.EnumerateObject().Any(p => predicate(p.Name) || AnyString(p.Value, predicate)),
+        _ => false,
+    };
 
     /// <summary>Returns the redacted result, or <see langword="null"/> when nothing needed redacting.</summary>
     private JsonElement? Redact(JsonElement result)

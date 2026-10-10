@@ -217,6 +217,45 @@ public sealed class PostToolAndElicitationTests
         Assert.Contains("approval", clean.PermissionDecisionReason, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("""{"path":"Options.cs","content":"var apiKey = options.ProviderKey;"}""")]
+    [InlineData("""{"command":"set ClientSecret=placeholder"}""")]
+    [InlineData("""{"content":"client.DefaultRequestHeaders.Add(\"Authorization\", \"Bearer \" + token_from_vault_abc);"}""")]
+    [InlineData("""{"content":"default password: changeme123 (see README)"}""")]
+    public async Task Ordinary_code_that_only_looks_secret_reaches_the_gate(string args)
+    {
+        using var f = new RuntimeFixture([new Policy.Rules.PolicyRule { Effect = Policy.Rules.RuleEffect.Allow, Tool = "read_file" }]);
+
+        var output = await f.Handlers.OnPreToolUseAsync(f.Session(Agent), PreInput("read_file", args));
+
+        Assert.Equal("allow", output.PermissionDecision);
+    }
+
+    [Theory]
+    [InlineData("""{"content":"aws_access_key_id = AKIAABCDEFGHIJKLMNOP"}""")]
+    [InlineData("""{"content":"-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----"}""")]
+    [InlineData("""{"content":"xoxb-1234567890-abcdefghij"}""")]
+    [InlineData("""{"content":"gho_abcdefghijklmnopqrstuvwxyz0123"}""")]
+    public async Task High_precision_token_formats_are_denied(string args)
+    {
+        using var f = new RuntimeFixture([new Policy.Rules.PolicyRule { Effect = Policy.Rules.RuleEffect.Allow, Tool = "read_file" }]);
+
+        var output = await f.Handlers.OnPreToolUseAsync(f.Session(Agent), PreInput("read_file", args));
+
+        Assert.Equal("deny", output.PermissionDecision);
+    }
+
+    [Fact]
+    public async Task Known_secret_is_found_even_when_json_escapes_it()
+    {
+        using var f = new RuntimeFixture([new Policy.Rules.PolicyRule { Effect = Policy.Rules.RuleEffect.Allow, Tool = "read_file" }]);
+        f.Redactor.AddKnownSecret("pa\"ss/wo\\rd-123456");
+
+        var output = await f.Handlers.OnPreToolUseAsync(f.Session(Agent), PreInput("read_file", """{"content":"pa\"ss\/wo\\rd-123456"}"""));
+
+        Assert.Equal("deny", output.PermissionDecision);
+    }
+
     [Fact]
     public void Failure_hook_is_registered_on_create_and_resume()
     {

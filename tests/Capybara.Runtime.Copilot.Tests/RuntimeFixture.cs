@@ -34,7 +34,12 @@ internal sealed class RuntimeFixture : IDisposable
             StateRoot = Path.Combine(_dir.Path, "state"),
             ConfigRoot = Path.Combine(_dir.Path, "config"),
             BuiltInSkillDirectory = Path.Combine(_dir.Path, "builtin-skills"),
+
+            // Explicit, so Windows test runs exercise the Unix launch path against a stand-in launcher file.
+            StdioMcpIsolation = StdioMcpIsolation.ClearEnvironment,
+            EnvExecutable = Path.Combine(_dir.Path, "env"),
         };
+        File.WriteAllText(Options.EnvExecutable, "stand-in env launcher");
         Rules = new RulesEngine(rules ?? []);
         KillSwitch = new KillSwitch(Time);
         Approvals = new ApprovalService(Rules, new ApprovalOptions(), Time);

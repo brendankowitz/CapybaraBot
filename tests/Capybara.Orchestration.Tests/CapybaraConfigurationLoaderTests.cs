@@ -51,4 +51,38 @@ public sealed class CapybaraConfigurationLoaderTests
 
         Assert.True(ex.Errors.Count >= 3, string.Join('\n', ex.Errors));
     }
+
+    [Fact]
+    public void Stdio_mcp_servers_must_pin_their_script_or_declare_self_contained()
+    {
+        using var dir = new TempDirectory();
+        var command = Path.Combine(dir.Path, "server");
+        var hash = new string('a', 64);
+
+        string Agent(string extra) => $"""
+            id: ea
+            name: EA
+            job: assistant
+            tools: [list_agents]
+            mcpServers:
+              - name: local
+                type: stdio
+                command: '{command}'
+                args: ['{Path.Combine(dir.Path, "server.js")}']
+                tools: [search]
+                sha256: {hash}
+            {extra}
+            """;
+
+        var agentDir = Directory.CreateDirectory(Path.Combine(dir.Path, "agents", "ea")).FullName;
+        File.WriteAllText(Path.Combine(agentDir, "agent.yaml"), Agent(string.Empty));
+        var ex = Assert.Throws<CapybaraConfigurationException>(() => CapybaraConfigurationLoader.Load(dir.Path));
+        Assert.Contains(ex.Errors, e => e.Contains("selfContained", StringComparison.Ordinal));
+
+        File.WriteAllText(Path.Combine(agentDir, "agent.yaml"), Agent("    selfContained: true"));
+        Assert.True(CapybaraConfigurationLoader.Load(dir.Path).Agents.Single().McpServers.Single().SelfContained);
+
+        File.WriteAllText(Path.Combine(agentDir, "agent.yaml"), Agent($"    scriptSha256: {new string('B', 64)}"));
+        Assert.Equal(new string('b', 64), CapybaraConfigurationLoader.Load(dir.Path).Agents.Single().McpServers.Single().ScriptSha256);
+    }
 }
