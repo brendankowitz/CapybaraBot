@@ -36,10 +36,18 @@ public static class CliEnvironment
     public static IReadOnlyDictionary<string, string> Build(AgentId agent, CopilotRuntimeOptions options, Func<string, string?> host, bool windows)
     {
         ArgumentNullException.ThrowIfNull(options);
+        return Build(options.AgentWorkingDirectory(agent), options.AgentTempDirectory(agent), options, host, windows);
+    }
+
+    /// <summary>The same environment for a CLI that is not an agent's (the reviewer), with its own home and temp.</summary>
+    public static IReadOnlyDictionary<string, string> Build(string home, string temp, CopilotRuntimeOptions options) =>
+        Build(home, temp, options, Environment.GetEnvironmentVariable, OperatingSystem.IsWindows());
+
+    private static Dictionary<string, string> Build(string home, string temp, CopilotRuntimeOptions options, Func<string, string?> host, bool windows)
+    {
+        ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(host);
 
-        var home = options.AgentWorkingDirectory(agent);
-        var temp = options.AgentTempDirectory(agent);
         var env = new Dictionary<string, string>(windows ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
         {
             ["PATH"] = host("PATH") is { Length: > 0 } path ? path : "/usr/local/bin:/usr/bin:/bin",
