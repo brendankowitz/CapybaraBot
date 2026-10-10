@@ -9,15 +9,22 @@ namespace Capybara.Orchestration.Configuration;
 /// <list type="bullet">
 /// <item>C0/C1 controls (including ESC), lone CR, NEL, line and paragraph separators (YAML line breaks <c>LineDiff</c> would not split on);</item>
 /// <item>every format character (zero-width, bidi overrides, BOM, tag characters U+E0000–E007F) and unpaired surrogates;</item>
-/// <item>the remaining default-ignorable code points, which render as nothing: variation selectors (U+FE00–FE0F are
-/// allowed only singly, directly after a visible base character, as in emoji presentation; U+E0100–E01EF never),
+/// <item>the remaining default-ignorable code points, which render as nothing: variation selectors (U+FE00–FE0D and
+/// U+E0100–E01EF always; U+FE0E/FE0F unless directly after a symbol such as an emoji, or in a 0–9/#/* keycap before
+/// U+20E3),
 /// combining grapheme joiner, Hangul and Mongolian fillers and selectors, U+FFF0–FFF8 and the whole U+E0000–E0FFF block;</item>
-/// <item>the braille blank U+2800, and unassigned code points.</item>
+/// <item>the braille blank U+2800, unassigned code points, and more than <see cref="MaxCombiningMarks"/> combining marks in a row.</item>
 /// </list>
 /// Tab, LF and CRLF are allowed.
 /// </summary>
 internal static class ReviewableText
 {
+    /// <summary>
+    /// Longest run of combining marks (Mn/Me) on one base. Real text needs a few; hundreds paint over neighbouring
+    /// lines of a rendered diff.
+    /// </summary>
+    public const int MaxCombiningMarks = 8;
+
     /// <summary>Describes the first unsafe character, or returns null when <paramref name="text"/> is safe to review.</summary>
     public static string? FindUnsafe(string text)
     {
@@ -65,23 +72,31 @@ internal static class ReviewableText
     {
         var index = 0;
         Rune? previous = null;
+        var marks = 0;
         while (index < text.Length)
         {
             if (Rune.DecodeFromUtf16(text.AsSpan(index), out var rune, out var consumed) != OperationStatus.Done)
             {
                 yield return new Unit(index, 1, -1, false);
                 previous = null;
+                marks = 0;
                 index++;
                 continue;
             }
 
-            yield return new Unit(index, consumed, rune.Value, IsAllowed(rune, previous, text, index));
+            marks = Rune.GetUnicodeCategory(rune) is UnicodeCategory.NonSpacingMark or UnicodeCategory.EnclosingMark ? marks + 1 : 0;
+            yield return new Unit(index, consumed, rune.Value, IsAllowed(rune, previous, marks, text, index + consumed));
             previous = rune;
             index += consumed;
         }
     }
 
-    private static bool IsAllowed(Rune rune, Rune? previous, string text, int index)
+    /// <summary>
+    /// Whether <paramref name="rune"/> may appear here. <paramref name="marks"/> is the length of the run of combining
+    /// marks it ends (0 when it is not a mark); <paramref name="next"/> is the offset of the following code unit in
+    /// <paramref name="text"/>, for CRLF and keycap look-ahead; <paramref name="previous"/> is the preceding code point.
+    /// </summary>
+    private static bool IsAllowed(Rune rune, Rune? previous, int marks, string text, int next)
     {
         var value = rune.Value;
         switch (value)
@@ -89,21 +104,25 @@ internal static class ReviewableText
             case '\t' or '\n':
                 return true;
             case '\r':
-                return index + 1 < text.Length && text[index + 1] == '\n';
-            case >= 0xFE00 and <= 0xFE0F:
-                // Emoji/text presentation selector: one, directly after a visible base character.
-                return previous is { } baseRune && IsVisibleBase(baseRune);
+                return next < text.Length && text[next] == '\n';
+            case >= 0xFE00 and <= 0xFE0D:
+                // Only the emoji (FE0F) and text (FE0E) presentation selectors have a visible effect; the rest can
+                // carry a hidden payload after any letter.
+                return false;
+            case 0xFE0E or 0xFE0F:
+                return previous is { } baseRune && (Rune.GetUnicodeCategory(baseRune) == UnicodeCategory.OtherSymbol
+                    || (baseRune.Value is (>= '0' and <= '9') or '#' or '*' && next < text.Length && text[next] == '\u20E3'));
+        }
+
+        if (marks > MaxCombiningMarks)
+        {
+            return false;
         }
 
         return !IsInvisible(value) && Rune.GetUnicodeCategory(rune) is not (UnicodeCategory.Control or UnicodeCategory.Format
             or UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator or UnicodeCategory.Surrogate
             or UnicodeCategory.OtherNotAssigned);
     }
-
-    private static bool IsVisibleBase(Rune rune) =>
-        !IsInvisible(rune.Value) && rune.Value is not (>= 0xFE00 and <= 0xFE0F) && !Rune.IsWhiteSpace(rune)
-        && Rune.GetUnicodeCategory(rune) is not (UnicodeCategory.Control or UnicodeCategory.Format or UnicodeCategory.LineSeparator
-            or UnicodeCategory.ParagraphSeparator or UnicodeCategory.OtherNotAssigned or UnicodeCategory.NonSpacingMark);
 
     /// <summary>Default-ignorable (DerivedCoreProperties) code points that are not format characters, plus the braille blank.</summary>
     private static bool IsInvisible(int value) => value is 0x034F

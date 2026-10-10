@@ -289,28 +289,16 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
             throw new ProposalRejectedException($"Proposed content is larger than {SkillScanner.MaxFileBytes} bytes.");
         }
 
-        // FR-SAF-11: the human reviews a diff, so nothing in it may be invisible or act on the terminal.
-        foreach (var (what, text) in new[] { ("content", content), ("rationale", rationale), ("name", name ?? string.Empty) })
-        {
-            if (ReviewableText.FindUnsafe(text) is { } problem)
-            {
-                throw new ProposalRejectedException($"The {what} contains a character that cannot be reviewed: {problem}.");
-            }
-        }
-
-        var lineNumber = 0;
-        foreach (var line in content.Split('\n'))
-        {
-            lineNumber++;
-            if (line.TrimEnd('\r').Length > MaxLineLength)
-            {
-                throw new ProposalRejectedException(
-                    $"Line {lineNumber} is longer than {MaxLineLength} characters; long lines can hide content past the edge of the review pane.");
-            }
-        }
+        // FR-SAF-11: the human reviews a diff, so nothing in it may be invisible, act on the terminal, or hide past
+        // the edge of the pane. Checked on what was submitted, on what will be written (Resolve) and, for YAML, on
+        // every decoded scalar value, so escapes cannot decode into what the raw text check forbids.
+        CheckReviewable(content, "content");
+        CheckReviewable(rationale, "rationale");
+        CheckReviewable(name ?? string.Empty, "name");
 
         name = kind is ProposalKind.Routine or ProposalKind.Skill ? name?.Trim() : null;
         var (targetPath, proposed) = Resolve(agent, kind, name, content);
+        CheckReviewable(proposed, "resulting file");
 
         var pending = (await ListCoreAsync(ProposalStatus.Pending, cancellationToken)).Where(p => p.Agent == agent).ToList();
         if (pending.Any(p => p.Kind == kind && p.Name == name))
@@ -364,6 +352,56 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
         return errors.Count == 0 ? draft : throw new ProposalRejectedException("The change is not allowed: " + string.Join("; ", errors));
     }
 
+    private static void CheckReviewable(string text, string what)
+    {
+        if (ReviewableText.FindUnsafe(text) is { } problem)
+        {
+            throw new ProposalRejectedException($"The {what} contains a character that cannot be reviewed: {problem}.");
+        }
+
+        var lineNumber = 0;
+        foreach (var line in text.Split('\n'))
+        {
+            lineNumber++;
+            if (line.TrimEnd('\r').Length > MaxLineLength)
+            {
+                throw new ProposalRejectedException(
+                    $"Line {lineNumber} of the {what} is longer than {MaxLineLength} characters; long lines can hide content past the edge of the review pane.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Every decoded scalar (keys included) must be reviewable. Escapes in quoted scalars (<c>"\u200B"</c>, <c>"\e"</c>,
+    /// an escaped line break) are invisible in the diff, so tabs and line breaks are only allowed in literal or folded
+    /// block scalars (<c>|</c>, <c>&gt;</c>), where the reviewer sees them as they are; other scalars are single lines
+    /// of at most <see cref="MaxLineLength"/> characters.
+    /// </summary>
+    private static void CheckScalars(YamlNode root, string what)
+    {
+        foreach (var scalar in root.AllNodes.OfType<YamlScalarNode>())
+        {
+            var value = scalar.Value ?? string.Empty;
+            if (ReviewableText.FindUnsafe(value) is { } problem)
+            {
+                throw new ProposalRejectedException($"A value in the proposed {what} contains a character that cannot be reviewed: {problem}.");
+            }
+
+            if (scalar.Style is not (ScalarStyle.Literal or ScalarStyle.Folded))
+            {
+                if (value.AsSpan().IndexOfAny('\n', '\t') >= 0)
+                {
+                    throw new ProposalRejectedException($"A value in the proposed {what} has a line break or tab outside a block scalar; use '|' or '>' for multi-line text.");
+                }
+
+                if (value.Length > MaxLineLength)
+                {
+                    throw new ProposalRejectedException($"A value in the proposed {what} is longer than {MaxLineLength} characters on one line; use a block scalar.");
+                }
+            }
+        }
+    }
+
     /// <summary>Maps a proposal to its target path (relative to the config root) and the exact content that will be written.</summary>
     private static (string TargetPath, string Content) Resolve(AgentId agent, ProposalKind kind, string? name, string content)
     {
@@ -391,6 +429,7 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
     private static void CheckAgentConfig(AgentId agent, string content)
     {
         var proposed = ParsePlainMapping(content, "agent.yaml");
+        CheckScalars(proposed, "agent.yaml");
         if (YamlEditor.GetScalar(proposed, "id") != agent.Value)
         {
             throw new ProposalRejectedException($"agent.yaml must keep id '{agent}'; an agent can only propose changes to its own files.");
@@ -405,6 +444,7 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
         }
 
         var routine = ParsePlainMapping(content, "routine");
+        CheckScalars(routine, "routine");
         if (YamlEditor.GetScalar(routine, "id") != name)
         {
             throw new ProposalRejectedException($"The routine's id must be '{name}'.");
@@ -428,6 +468,12 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
         if (!SkillCardReader.TryReadFrontmatter(content, out var front) || front.Name != name)
         {
             throw new ProposalRejectedException($"The skill's frontmatter name must be '{name}', matching its folder.");
+        }
+
+        // The frontmatter feeds the agent card other agents read, so its decoded values get the same checks.
+        if (SkillCardReader.FrontmatterText(content) is { } frontmatter && YamlEditor.Parse(frontmatter) is { } node)
+        {
+            CheckScalars(node, "skill frontmatter");
         }
 
         var findings = SkillScanner.ScanSkill(content);

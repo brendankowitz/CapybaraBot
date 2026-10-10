@@ -44,26 +44,32 @@ internal static class SkillCardReader
     internal static bool TryReadFrontmatter(string text, out SkillFrontmatter frontmatter)
     {
         frontmatter = new SkillFrontmatter();
-        if (!text.StartsWith("---", StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        var end = text.IndexOf("\n---", 3, StringComparison.Ordinal);
-        if (end < 0)
+        if (FrontmatterText(text) is not { } yaml)
         {
             return false;
         }
 
         try
         {
-            frontmatter = Yaml.Deserialize<SkillFrontmatter?>(text[3..end]) ?? new SkillFrontmatter();
+            frontmatter = Yaml.Deserialize<SkillFrontmatter?>(yaml) ?? new SkillFrontmatter();
             return true;
         }
         catch (YamlDotNet.Core.YamlException)
         {
             return false;
         }
+    }
+
+    /// <summary>The YAML between the opening <c>---</c> and the next <c>---</c> line, or null when there is none.</summary>
+    internal static string? FrontmatterText(string text)
+    {
+        if (!text.StartsWith("---", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var end = text.IndexOf("\n---", 3, StringComparison.Ordinal);
+        return end < 0 ? null : text[3..end];
     }
 
 #pragma warning disable CA1812, CA2227, CA1002 // Populated by YamlDotNet.
