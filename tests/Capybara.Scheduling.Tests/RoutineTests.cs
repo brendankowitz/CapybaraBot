@@ -31,6 +31,17 @@ public sealed class RoutineTests
     }
 
     [Fact]
+    public void Intervals_above_the_maximum_are_rejected()
+    {
+        var known = new HashSet<AgentId> { Ea };
+
+        Assert.Empty(RoutineValidator.Validate([Heartbeat(RoutineLimits.MaximumInterval)], known));
+        Assert.NotEmpty(RoutineValidator.Validate([Heartbeat(RoutineLimits.MaximumInterval + TimeSpan.FromSeconds(1))], known));
+        Assert.NotEmpty(RoutineValidator.Validate([Heartbeat(TimeSpan.FromDays(4_000_000))], known));
+        Assert.NotEmpty(RoutineValidator.Validate([Heartbeat(TimeSpan.FromDays(10_675_199))], known));
+    }
+
+    [Fact]
     public void Unknown_owner_is_rejected() =>
         Assert.NotEmpty(RoutineValidator.Validate([Heartbeat(TimeSpan.FromHours(1))], new HashSet<AgentId>()));
 

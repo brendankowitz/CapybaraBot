@@ -420,10 +420,9 @@ public sealed class WikiStore : IMemoryStore, IDisposable
                 return PendingChangeResult.Stale;
             }
 
-            if (current is not null)
+            if (current is not null && FrontmatterSerializer.TryParse(current, out var previous))
             {
-                var (currentMetadata, currentBody) = FrontmatterSerializer.Parse(current);
-                await WriteHistoryAsync(path, new MemoryPage(path, currentMetadata, currentBody), _time.GetUtcNow(), cancellationToken);
+                await WriteHistoryAsync(path, new MemoryPage(path, previous.Metadata, previous.Body), _time.GetUtcNow(), cancellationToken);
             }
 
             switch (change.Kind)
@@ -431,8 +430,7 @@ public sealed class WikiStore : IMemoryStore, IDisposable
                 case PendingChangeKind.Write:
                     await WriteFileAsync(file, change.After, cancellationToken);
                     _pending.Remove(change.Id);
-                    var (metadata, body) = FrontmatterSerializer.Parse(change.After);
-                    if (InjectionScanner.LooksInjected(change.After))
+                    if (InjectionScanner.LooksInjected(change.After) || !FrontmatterSerializer.TryParse(change.After, out var written))
                     {
                         _quarantined.TryAdd(path.Value, 0);
                         await DeleteFromIndexAsync(path, cancellationToken);
@@ -440,7 +438,7 @@ public sealed class WikiStore : IMemoryStore, IDisposable
                     else
                     {
                         _quarantined.TryRemove(path.Value, out _);
-                        await SyncIndexAsync(new MemoryPage(path, metadata, body), cancellationToken);
+                        await SyncIndexAsync(new MemoryPage(path, written.Metadata, written.Body), cancellationToken);
                     }
 
                     break;
@@ -490,14 +488,15 @@ public sealed class WikiStore : IMemoryStore, IDisposable
             var file = ResolveFile(path);
             var now = _time.GetUtcNow();
             PageMetadata metadata;
-            if (File.Exists(file))
+            if (File.Exists(file) && FrontmatterSerializer.TryParse(await File.ReadAllTextAsync(file, cancellationToken), out var previous))
             {
-                var (existing, existingBody) = FrontmatterSerializer.Parse(await File.ReadAllTextAsync(file, cancellationToken));
+                var (existing, existingBody) = previous;
                 await WriteHistoryAsync(path, new MemoryPage(path, existing, existingBody), now, cancellationToken);
                 metadata = existing with { Description = description, Updated = now, LastValidated = now, Source = "user:pwa" };
             }
             else
             {
+                // New page, or an unparseable one a human is replacing: start from fresh provenance.
                 metadata = new PageMetadata { Description = description, Source = "user:pwa", Created = now, Updated = now, LastValidated = now, ValidFrom = now };
             }
 
@@ -534,8 +533,11 @@ public sealed class WikiStore : IMemoryStore, IDisposable
                 return false;
             }
 
-            var (metadata, body) = FrontmatterSerializer.Parse(await File.ReadAllTextAsync(file, cancellationToken));
-            await WriteHistoryAsync(path, new MemoryPage(path, metadata, body), _time.GetUtcNow(), cancellationToken);
+            if (FrontmatterSerializer.TryParse(await File.ReadAllTextAsync(file, cancellationToken), out var previous))
+            {
+                await WriteHistoryAsync(path, new MemoryPage(path, previous.Metadata, previous.Body), _time.GetUtcNow(), cancellationToken);
+            }
+
             File.Delete(file);
             _quarantined.TryRemove(path.Value, out _);
             await DeleteFromIndexAsync(path, cancellationToken);
@@ -587,7 +589,7 @@ public sealed class WikiStore : IMemoryStore, IDisposable
     private static bool SameBody(string? left, string? right) =>
         left is null || right is null
             ? left is null && right is null
-            : string.Equals(FrontmatterSerializer.Parse(left).Body, FrontmatterSerializer.Parse(right).Body, StringComparison.Ordinal);
+            : string.Equals(FrontmatterSerializer.BodyOrRaw(left), FrontmatterSerializer.BodyOrRaw(right), StringComparison.Ordinal);
 
     private async Task SyncIndexAsync(MemoryPage page, CancellationToken cancellationToken)
     {
@@ -701,8 +703,13 @@ public sealed class WikiStore : IMemoryStore, IDisposable
         }
 
         _quarantined.TryRemove(path.Value, out _);
-        var (metadata, body) = FrontmatterSerializer.Parse(content);
-        return new MemoryPage(path, metadata, body);
+        if (!FrontmatterSerializer.TryParse(content, out var parsed))
+        {
+            _quarantined.TryAdd(path.Value, 0);
+            return null;
+        }
+
+        return new MemoryPage(path, parsed.Metadata, parsed.Body);
     }
 
     private async Task<List<MemoryPage>> LoadReadableAsync(MemoryAccessContext context, CancellationToken cancellationToken)

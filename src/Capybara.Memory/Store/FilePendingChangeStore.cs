@@ -119,7 +119,7 @@ internal sealed partial class FilePendingChangeStore
         existing.Kind == candidate.Kind
         && string.Equals(existing.Path, candidate.Path, StringComparison.Ordinal)
         && (candidate.Kind == PendingChangeKind.Write
-            ? string.Equals(FrontmatterSerializer.Parse(existing.After).Body, FrontmatterSerializer.Parse(candidate.After).Body, StringComparison.Ordinal)
+            ? string.Equals(FrontmatterSerializer.BodyOrRaw(existing.After), FrontmatterSerializer.BodyOrRaw(candidate.After), StringComparison.Ordinal)
             : string.Equals(existing.After, candidate.After, StringComparison.Ordinal));
 
     private List<PendingUserChange> ListCore()

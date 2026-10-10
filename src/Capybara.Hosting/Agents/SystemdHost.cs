@@ -1,5 +1,3 @@
-using System.Globalization;
-
 namespace Capybara.Hosting.Agents;
 
 /// <summary>systemd-backed local host for per-agent services with resource and network hardening (FR-HST-01, FR-HST-02).</summary>
@@ -60,15 +58,18 @@ public sealed class SystemdHost(ICommandRunner runner, TimeProvider time) : IAge
     {
         ArgumentNullException.ThrowIfNull(spec);
         AgentIdValidator.Validate(spec.AgentId);
-        var memory = spec.MemoryMaxBytes?.ToString(CultureInfo.InvariantCulture) ?? "1G";
-        var cpu = string.IsNullOrWhiteSpace(spec.CpuQuota) ? "100%" : spec.CpuQuota;
-        // systemd IPAddressAllow takes addresses/CIDRs only; domain allowlists are enforced by the srt proxy (FR-SAF-07), not here.
-        var allows = string.Join(Environment.NewLine, spec.EgressDomains.Where(IsIpOrCidr).Select(a => $"IPAddressAllow={a}"));
+        var memory = spec.MemoryMaxBytes is { } bytes ? UnitFileValue.PositiveBytes(bytes) : "1G";
+        var cpu = string.IsNullOrWhiteSpace(spec.CpuQuota) ? "100%" : UnitFileValue.CpuQuota(spec.CpuQuota);
+        var workingDirectory = UnitFileValue.Text(spec.WorkingDirectory, nameof(spec.WorkingDirectory), allowWhitespace: false);
+        var baseDirectory = UnitFileValue.Text(spec.BaseDirectory, nameof(spec.BaseDirectory), allowWhitespace: false);
+        // systemd IPAddressAllow takes addresses/CIDRs only; domain allowlists (and "*") are enforced by the srt proxy
+        // (FR-SAF-07), not here. Each line is re-rendered from the parsed address, never copied from the input.
+        var allows = string.Join(Environment.NewLine, spec.EgressDomains.Select(UnitFileValue.IpOrCidr).OfType<string>().Select(a => $"IPAddressAllow={a}"));
         return $$"""
             [Service]
             Environment=CAPYBARA_AGENT_ID={{spec.AgentId}}
-            WorkingDirectory={{spec.WorkingDirectory}}
-            ReadWritePaths={{spec.BaseDirectory}} {{spec.WorkingDirectory}}
+            WorkingDirectory={{workingDirectory}}
+            ReadWritePaths={{baseDirectory}} {{workingDirectory}}
             MemoryMax={{memory}}
             CPUQuota={{cpu}}
             IPAddressDeny=any
@@ -83,9 +84,6 @@ public sealed class SystemdHost(ICommandRunner runner, TimeProvider time) : IAge
             LockPersonality=yes
             """;
     }
-
-    private static bool IsIpOrCidr(string value) =>
-        System.Net.IPAddress.TryParse(value, out _) || System.Net.IPNetwork.TryParse(value, out _);
 
     private static string UnitName(string agentId) => $"capybara-agent@{agentId}.service";
 }

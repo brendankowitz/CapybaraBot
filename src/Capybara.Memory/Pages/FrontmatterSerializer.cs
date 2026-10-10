@@ -1,4 +1,6 @@
 using System.Globalization;
+using YamlDotNet.Core;
+using YamlDotNet.Core.Events;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -19,6 +21,14 @@ internal static class FrontmatterSerializer
         .ConfigureDefaultValuesHandling(DefaultValuesHandling.OmitNull)
         .Build();
 
+    /// <summary>The deepest YAML nesting accepted in frontmatter. Real frontmatter is a flat map of scalars.</summary>
+    internal const int MaxDepth = 32;
+
+    /// <summary>
+    /// Reads the frontmatter and body of a page.
+    /// </summary>
+    /// <exception cref="InvalidFrontmatterException">The frontmatter is malformed or nested deeper than <see cref="MaxDepth"/>.
+    /// Callers reading files from disk should use <see cref="TryParse"/> and treat a failure as a quarantined page.</exception>
     public static (PageMetadata Metadata, string Body) Parse(string content)
     {
         var text = content.ReplaceLineEndings("\n");
@@ -36,8 +46,68 @@ internal static class FrontmatterSerializer
         var yaml = text[(Fence.Length + 1)..end];
         var bodyStart = text.IndexOf('\n', end + 1);
         var body = bodyStart < 0 ? string.Empty : text[(bodyStart + 1)..];
-        var dto = Deserializer.Deserialize<Dto?>(yaml) ?? new Dto();
-        return (dto.ToMetadata(), body);
+        EnsureShallow(yaml);
+        try
+        {
+            var dto = Deserializer.Deserialize<Dto?>(yaml) ?? new Dto();
+            return (dto.ToMetadata(), body);
+        }
+        catch (YamlException ex)
+        {
+            throw new InvalidFrontmatterException($"Frontmatter is not valid YAML: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>Like <see cref="Parse"/>, but returns false instead of throwing for frontmatter that must not be trusted.</summary>
+    public static bool TryParse(string content, out (PageMetadata Metadata, string Body) page)
+    {
+        try
+        {
+            page = Parse(content);
+            return true;
+        }
+        catch (InvalidFrontmatterException)
+        {
+            page = default;
+            return false;
+        }
+    }
+
+    /// <summary>The body of a page, or the whole text when the frontmatter cannot be trusted (so comparisons stay exact).</summary>
+    public static string BodyOrRaw(string content) => TryParse(content, out var page) ? page.Body : content;
+
+    /// <summary>
+    /// The deserializer recurses once per nesting level, so a hostile page of ten thousand <c>[</c> would overflow the stack
+    /// and take the process down — an uncatchable failure. The parser itself is a non-recursive state machine, so the
+    /// depth is measured on its event stream first and the page rejected before any recursion happens.
+    /// </summary>
+    private static void EnsureShallow(string yaml)
+    {
+        var depth = 0;
+        try
+        {
+            var parser = new Parser(new StringReader(yaml));
+            while (parser.MoveNext())
+            {
+                switch (parser.Current)
+                {
+                    case SequenceStart or MappingStart:
+                        if (++depth > MaxDepth)
+                        {
+                            throw new InvalidFrontmatterException($"Frontmatter is nested deeper than {MaxDepth} levels.");
+                        }
+
+                        break;
+                    case SequenceEnd or MappingEnd:
+                        depth--;
+                        break;
+                }
+            }
+        }
+        catch (YamlException ex)
+        {
+            throw new InvalidFrontmatterException($"Frontmatter is not valid YAML: {ex.Message}", ex);
+        }
     }
 
     public static string Write(PageMetadata metadata, string body) =>

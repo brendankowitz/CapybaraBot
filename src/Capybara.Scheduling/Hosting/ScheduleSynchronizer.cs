@@ -205,9 +205,24 @@ public sealed class ScheduleSynchronizer(
             throw new UnschedulableRoutineException("it has no interval and no cron expression");
         }
 
-        return interval < RoutineLimits.MinimumInterval
-            ? throw new UnschedulableRoutineException($"interval {interval} is below the {RoutineLimits.MinimumInterval.TotalMinutes}-minute minimum")
-            : RoutineJitter.NextFire(routine, after);
+        if (interval < RoutineLimits.MinimumInterval)
+        {
+            throw new UnschedulableRoutineException($"interval {interval} is below the {RoutineLimits.MinimumInterval.TotalMinutes}-minute minimum");
+        }
+
+        if (interval > RoutineLimits.MaximumInterval)
+        {
+            throw new UnschedulableRoutineException($"interval {interval} is above the {RoutineLimits.MaximumInterval.TotalDays}-day maximum");
+        }
+
+        try
+        {
+            return RoutineJitter.NextFire(routine, after);
+        }
+        catch (Exception ex) when (ex is ArgumentOutOfRangeException or OverflowException)
+        {
+            throw new UnschedulableRoutineException($"its next fire after {after:O} cannot be computed: {ex.Message}");
+        }
     }
 
     private void Attach()

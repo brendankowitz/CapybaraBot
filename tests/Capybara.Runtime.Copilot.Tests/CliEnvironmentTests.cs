@@ -85,6 +85,21 @@ public sealed class CliEnvironmentTests
         Assert.Equal("http://proxy.internal:3128", env["HTTPS_PROXY"]);
     }
 
+    [Theory]
+    [InlineData("user:pass@proxy.internal:3128")]
+    [InlineData("user@proxy.internal:3128")]
+    [InlineData("socks5://user:pass@proxy.internal:1080")]
+    [InlineData("http://proxy.internal:3128/path@x")]
+    public void Proxy_values_with_userinfo_are_dropped_with_or_without_a_scheme(string value)
+    {
+        var host = new Dictionary<string, string> { ["PATH"] = "/usr/bin", ["HTTP_PROXY"] = value, ["ALL_PROXY"] = value };
+
+        var env = CliEnvironment.Build(Ea, Options(), host.GetValueOrDefault, windows: false);
+
+        Assert.DoesNotContain(env.Values, v => v.Contains('@', StringComparison.Ordinal));
+        Assert.False(env.ContainsKey("HTTP_PROXY"));
+    }
+
     [Fact]
     public void Windows_adds_its_loader_variables_and_agent_scoped_profile_and_temp()
     {

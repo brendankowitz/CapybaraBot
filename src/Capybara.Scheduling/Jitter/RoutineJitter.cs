@@ -16,6 +16,11 @@ public static class RoutineJitter
             throw new ArgumentOutOfRangeException(nameof(interval), $"Interval must be at least {RoutineLimits.MinimumInterval}.");
         }
 
+        if (interval > RoutineLimits.MaximumInterval)
+        {
+            throw new ArgumentOutOfRangeException(nameof(interval), $"Interval must be at most {RoutineLimits.MaximumInterval}.");
+        }
+
         var fraction = Fraction(routineId, fire) * 2 - 1;
         return interval + (interval * (fraction * RoutineLimits.JitterFraction));
     }

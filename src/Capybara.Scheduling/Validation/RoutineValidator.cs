@@ -71,6 +71,9 @@ public static class RoutineValidator
             case TriggerKind.Heartbeat or TriggerKind.Cron when routine.Interval < RoutineLimits.MinimumInterval:
                 errors.Add($"{routine.Id}: interval {routine.Interval} is below the {RoutineLimits.MinimumInterval.TotalMinutes}-minute minimum.");
                 break;
+            case TriggerKind.Heartbeat or TriggerKind.Cron when routine.Interval > RoutineLimits.MaximumInterval:
+                errors.Add($"{routine.Id}: interval {routine.Interval} is above the {RoutineLimits.MaximumInterval.TotalDays}-day maximum.");
+                break;
             case TriggerKind.Event:
                 try
                 {

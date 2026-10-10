@@ -80,12 +80,12 @@ public sealed partial class ConsolidationJob(WikiStore store, MemoryOptions opti
             }
 
             var content = await File.ReadAllTextAsync(daily, cancellationToken);
-            if (LooksInjected(content))
+            if (LooksInjected(content) || !FrontmatterSerializer.TryParse(content, out var parsedDaily))
             {
                 continue;
             }
 
-            var (metadata, body) = FrontmatterSerializer.Parse(content);
+            var (metadata, body) = parsedDaily;
             var bullets = ExtractBullets(body);
             if (bullets.Count == 0)
             {
@@ -104,7 +104,7 @@ public sealed partial class ConsolidationJob(WikiStore store, MemoryOptions opti
             var notesPath = MemoryPath.Parse(notesRelative);
             var notesFile = Path.Combine(store.Root, notesPath.RelativeFileSystemPath);
             var before = File.Exists(notesFile) ? await File.ReadAllTextAsync(notesFile, cancellationToken) : null;
-            if (before is not null && (store.IsQuarantined(notesRelative) || LooksInjected(before)))
+            if (before is not null && (store.IsQuarantined(notesRelative) || LooksInjected(before) || !FrontmatterSerializer.TryParse(before, out _)))
             {
                 continue;
             }
@@ -148,7 +148,7 @@ public sealed partial class ConsolidationJob(WikiStore store, MemoryOptions opti
         foreach (var (path, file) in LivePages())
         {
             var content = await File.ReadAllTextAsync(file, cancellationToken);
-            var normalized = Normalize(FrontmatterSerializer.Parse(content).Body);
+            var normalized = Normalize(FrontmatterSerializer.BodyOrRaw(content));
             if (normalized.Length == 0)
             {
                 continue;
@@ -179,8 +179,12 @@ public sealed partial class ConsolidationJob(WikiStore store, MemoryOptions opti
             }
 
             var content = await File.ReadAllTextAsync(file, cancellationToken);
-            var (metadata, _) = FrontmatterSerializer.Parse(content);
-            var lastUsed = metadata.LastAccessed ?? metadata.Updated;
+            if (!FrontmatterSerializer.TryParse(content, out var page))
+            {
+                continue;
+            }
+
+            var lastUsed = page.Metadata.LastAccessed ?? page.Metadata.Updated;
             if (lastUsed == DateTimeOffset.MinValue || lastUsed >= cutoff)
             {
                 continue;

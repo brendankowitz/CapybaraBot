@@ -2,6 +2,7 @@ using Capybara.Contracts.Agents;
 using Capybara.Contracts.Messaging;
 using Capybara.Memory.Access;
 using Capybara.Memory.Paths;
+using Capybara.Memory.Pages;
 using Capybara.Memory.Store;
 using Capybara.Memory.Versioning;
 using Capybara.Testing;
@@ -114,6 +115,30 @@ public sealed class WikiStoreTests : IDisposable
 
         Assert.Null(await _store.ReadAsync(Context("ea"), "/agents/ea/evil", Ct));
         Assert.Contains("/agents/ea/evil.md", _store.Quarantined);
+    }
+
+    [Fact]
+    public async Task Pages_with_hostile_frontmatter_nesting_are_quarantined_without_crashing_the_process()
+    {
+        var file = Path.Combine(_dir.Path, "agents", "ea", "deep.md");
+        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+        await File.WriteAllTextAsync(file, $"---\ndescription: {new string('[', 10_000)}\n---\nbody\n", Ct);
+
+        Assert.Null(await _store.ReadAsync(Context("ea"), "/agents/ea/deep", Ct));
+        Assert.Contains("/agents/ea/deep.md", _store.Quarantined);
+        Assert.Empty(_store.List(Context("ea")));
+    }
+
+    [Fact]
+    public void Frontmatter_depth_is_capped_before_deserialization()
+    {
+        static string Nested(int depth) => $"---\ndescription: ok\nextra: {new string('[', depth)}{new string(']', depth)}\n---\nbody\n";
+
+        Assert.True(FrontmatterSerializer.TryParse(Nested(FrontmatterSerializer.MaxDepth - 1), out var ok));
+        Assert.Equal("body\n", ok.Body);
+        Assert.False(FrontmatterSerializer.TryParse(Nested(FrontmatterSerializer.MaxDepth), out _));
+        Assert.False(FrontmatterSerializer.TryParse($"---\ndescription: {new string('[', 10_000)}\n---\nbody\n", out _));
+        Assert.Throws<InvalidFrontmatterException>(() => FrontmatterSerializer.Parse(Nested(FrontmatterSerializer.MaxDepth + 1)));
     }
 
     [Fact]

@@ -1,5 +1,3 @@
-using System.Globalization;
-
 namespace Capybara.Hosting.Agents;
 
 /// <summary>Rootless Podman host that renders hardened Quadlet containers and executes through <c>podman exec</c> (FR-HST-01, FR-HST-03).</summary>
@@ -60,22 +58,26 @@ public sealed class PodmanHost(ICommandRunner runner, TimeProvider time) : IAgen
     {
         ArgumentNullException.ThrowIfNull(spec);
         AgentIdValidator.Validate(spec.AgentId);
-        var memory = spec.MemoryMaxBytes?.ToString(CultureInfo.InvariantCulture) ?? "1073741824";
-        var env = string.Join(Environment.NewLine, spec.Environment.Select(kvp => $"Environment={kvp.Key}={kvp.Value}"));
+        var memory = spec.MemoryMaxBytes is { } bytes ? UnitFileValue.PositiveBytes(bytes) : "1073741824";
+        var image = UnitFileValue.Text(spec.Image, nameof(spec.Image), allowWhitespace: false);
+        var workingDirectory = UnitFileValue.Text(spec.WorkingDirectory, nameof(spec.WorkingDirectory));
+        var baseDirectory = UnitFileValue.Text(spec.BaseDirectory, nameof(spec.BaseDirectory), allowWhitespace: false);
+        var env = string.Join(Environment.NewLine, spec.Environment.Select(kvp =>
+            $"Environment={UnitFileValue.EnvironmentName(kvp.Key)}={UnitFileValue.Text(kvp.Value, kvp.Key, allowEmpty: true)}"));
         return $$"""
             [Unit]
             Description=Capybara sandbox for {{spec.AgentId}}
 
             [Container]
             ContainerName={{ContainerName(spec.AgentId)}}
-            Image={{spec.Image}}
+            Image={{image}}
             ReadOnly=true
             NoNewPrivileges=true
             SecurityLabelDisable=false
             UserNS=keep-id
             PodmanArgs=--security-opt=no-new-privileges --security-opt=seccomp=/usr/share/containers/seccomp.json --cap-drop=all --network=none --memory={{memory}}
-            Volume={{spec.BaseDirectory}}:/home/capybara/.copilot:Z
-            WorkingDir={{spec.WorkingDirectory}}
+            Volume={{baseDirectory}}:/home/capybara/.copilot:Z
+            WorkingDir={{workingDirectory}}
             {{env}}
 
             [Service]

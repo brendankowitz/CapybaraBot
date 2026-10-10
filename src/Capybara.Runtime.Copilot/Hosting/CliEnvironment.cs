@@ -83,9 +83,8 @@ public static class CliEnvironment
             || CredentialMarkers.Any(m => name.Contains(m, StringComparison.OrdinalIgnoreCase));
     }
 
-    /// <summary><c>http://user:pass@proxy:3128</c> is a credential, not a setting.</summary>
-    private static bool HasUserInfo(string value) =>
-        Uri.TryCreate(value, UriKind.Absolute, out var uri) && !string.IsNullOrEmpty(uri.UserInfo);
+    /// <summary>A proxy value with userinfo is a credential, not a setting. Any '@' drops it, scheme-less forms included (<see cref="Uri"/> reads the user part of such a value as a scheme).</summary>
+    private static bool HasUserInfo(string value) => value.Contains('@');
 
     private static void CopyFromHost(Dictionary<string, string> env, Func<string, string?> host, string name)
     {

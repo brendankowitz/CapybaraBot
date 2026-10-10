@@ -163,6 +163,30 @@ public sealed class ScheduleRecoveryTests
     }
 
     [Fact]
+    public void Planning_fails_closed_instead_of_overflowing_for_an_enormous_interval_or_a_date_at_the_end_of_time()
+    {
+        using var harness = new Harness();
+        using var synchronizer = SynchronizerFor(harness);
+
+        var tooLong = Assert.ThrowsAny<InvalidOperationException>(() => synchronizer.NextPlannedFire(Kit.Heartbeat(interval: TimeSpan.FromDays(10_675_199)), DateTimeOffset.UtcNow));
+        Assert.Contains("maximum", tooLong.Message, StringComparison.Ordinal);
+
+        var overflow = Assert.ThrowsAny<InvalidOperationException>(() => synchronizer.NextPlannedFire(Kit.Heartbeat(interval: TimeSpan.FromDays(366)), DateTimeOffset.MaxValue.AddDays(-1)));
+        Assert.Contains("cannot be computed", overflow.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task The_registry_keeps_an_enormous_interval_out_so_the_scheduler_still_starts()
+    {
+        await using var harness = await QuartzHarness.StartAsync(Options);
+
+        Assert.Throws<Validation.RoutineValidationException>(() => harness.Inner.Registry.AddOrUpdate(Kit.Heartbeat(interval: TimeSpan.FromDays(4_000_000)), Kit.User));
+        await harness.Synchronizer.SynchronizeAsync(TestContext.Current.CancellationToken);
+
+        Assert.Empty(harness.Inner.Registry.Routines);
+    }
+
+    [Fact]
     public async Task The_registry_keeps_a_runaway_cron_out_so_the_scheduler_never_sees_it()
     {
         await using var harness = await QuartzHarness.StartAsync(Options);
