@@ -120,6 +120,18 @@ public sealed partial class RuntimeSupervisor : IDisposable
     }
 
     /// <summary>
+    /// Turns health checks off at once without waiting or stopping anything, so a check in progress restarts nothing
+    /// more. Call it synchronously when the kill switch engages; <see cref="SuspendAsync"/> then stops the runtimes.
+    /// </summary>
+    public void MarkSuspended()
+    {
+        lock (_gate)
+        {
+            _suspended = true;
+        }
+    }
+
+    /// <summary>
     /// Stops every runtime's process and turns health checks off, so nothing restarts them (FR-SAF-06 kill switch).
     /// Checks are turned off at once, so a check in progress restarts nothing more; that check is then waited for, and
     /// every runtime (including one it may just have restarted) is stopped. A runtime that fails to stop is logged and
@@ -127,10 +139,7 @@ public sealed partial class RuntimeSupervisor : IDisposable
     /// </summary>
     public async Task SuspendAsync(CancellationToken cancellationToken)
     {
-        lock (_gate)
-        {
-            _suspended = true;
-        }
+        MarkSuspended();
 
         await _checks.WaitAsync(cancellationToken);
         try
@@ -273,6 +282,12 @@ public sealed partial class RuntimeSupervisor : IDisposable
             }
 
             LogRestartFailed(_logger, ex, agent);
+            return;
+        }
+
+        // Suspended while it restarted: the suspension stops it again, so neither reconcile nor self-test it now.
+        if (IsSuspended)
+        {
             return;
         }
 

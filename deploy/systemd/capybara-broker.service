@@ -28,6 +28,8 @@ LoadCredentialEncrypted=oauth-google-client-secret:/etc/capybara/credentials/oau
 StateDirectory=capybara-broker
 StateDirectoryMode=0700
 ConfigurationDirectory=capybara
+# Same mode as capybarad.service declares, so whichever unit starts first leaves /etc/capybara group-readable, never 0755.
+ConfigurationDirectoryMode=0750
 ReadOnlyPaths=/etc/capybara
 ReadWritePaths=/var/lib/capybara-broker
 NoNewPrivileges=yes

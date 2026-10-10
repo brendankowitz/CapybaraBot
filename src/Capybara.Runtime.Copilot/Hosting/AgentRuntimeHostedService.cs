@@ -39,20 +39,15 @@ public sealed partial class AgentRuntimeHostedService(
             LogReconcilerMissing(logger);
         }
 
-        if (killSwitch?.IsEngaged == true || supervisor?.IsSuspended == true)
-        {
-            if (supervisor is not null)
-            {
-                // Idempotent: marks every runtime as deliberately stopped, so release restarts them without counting a crash.
-                await supervisor.SuspendAsync(cancellationToken);
-            }
-
-            LogStartDeferred(logger);
-            return;
-        }
-
         foreach (var runtime in pool.Supervised)
         {
+            // Checked before every runtime, not once: the switch can engage while earlier runtimes start.
+            if (Halted)
+            {
+                await DeferAsync(cancellationToken);
+                return;
+            }
+
             var agent = runtime.Agent.Value;
             try
             {
@@ -69,9 +64,28 @@ public sealed partial class AgentRuntimeHostedService(
                 continue;
             }
 
+            if (Halted)
+            {
+                await DeferAsync(cancellationToken);
+                return;
+            }
+
             await ReconcileAsync(runtime, cancellationToken);
             await selfTest.VerifyAsync(runtime, cancellationToken);
         }
+    }
+
+    private bool Halted => killSwitch?.IsEngaged == true || supervisor?.IsSuspended == true;
+
+    /// <summary>Stops whatever already started (idempotent) and marks every runtime as deliberately stopped, so release restarts them without counting a crash.</summary>
+    private async Task DeferAsync(CancellationToken cancellationToken)
+    {
+        if (supervisor is not null)
+        {
+            await supervisor.SuspendAsync(cancellationToken);
+        }
+
+        LogStartDeferred(logger);
     }
 
     public async Task StopAsync(CancellationToken cancellationToken) => await pool.DisposeAsync();

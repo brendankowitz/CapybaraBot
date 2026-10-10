@@ -145,8 +145,14 @@ public sealed class FakeSupervisedRuntime(Contracts.Agents.AgentId agent) : Runt
     {
         Interlocked.Increment(ref _restarts);
         _running = true;
-        return Task.CompletedTask;
+        RestartEntered.TrySetResult();
+        return RestartGate is { } gate ? gate.Task.WaitAsync(cancellationToken) : Task.CompletedTask;
     }
+
+    /// <summary>When set, restarts count and then wait for it, so a test can act in the middle of a restart pass.</summary>
+    public TaskCompletionSource? RestartGate { get; set; }
+
+    public TaskCompletionSource RestartEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public Task<bool> PingAsync(CancellationToken cancellationToken) => Task.FromResult(_running);
 

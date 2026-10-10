@@ -61,6 +61,70 @@ public sealed class KillSwitchAndBridgeTimingTests
     }
 
     [Fact]
+    public async Task Engaging_again_during_a_release_restart_pass_stops_it_at_once()
+    {
+        using var factory = new AutoStartFactory();
+        new KillSwitchJournal(Path.Combine(factory.StateRoot, "policy", "kill-switch.json")).SaveEngaged("before restart", DateTimeOffset.UnixEpoch);
+        var desktop = factory.CreateDeviceClient(factory.DesktopToken);
+        var supervisor = factory.Services.GetRequiredService<RuntimeSupervisor>();
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        foreach (var runtime in factory.Runtimes)
+        {
+            runtime.RestartGate = gate;
+        }
+
+        // The release must return while the restart pass is still running (it is no longer inside the queue).
+        var release = await desktop.DeleteAsync(new Uri("/api/killswitch", UriKind.Relative), Ct);
+        Assert.Equal(HttpStatusCode.NoContent, release.StatusCode);
+        await Task.WhenAny(factory.Runtimes.Select(r => r.RestartEntered.Task)).WaitAsync(TimeSpan.FromSeconds(10), Ct);
+
+        var stopsBefore = factory.Runtimes.ToDictionary(r => r.Agent, r => r.Stops);
+        factory.Services.GetRequiredService<KillSwitch>().Engage("again");
+
+        Assert.True(supervisor.IsSuspended);
+        gate.SetResult();
+        await Eventually.TrueAsync(() => factory.Runtimes.All(r => r.Stops > stopsBefore[r.Agent]), "the new engagement stops every runtime");
+        await Eventually.TrueAsync(() => factory.Events.Published.Count(p => p.Name == "KillSwitchChanged" && Equals(p.Payload, true)) >= 2, "the new engagement is broadcast");
+        Assert.Equal(1, factory.Runtimes.Sum(r => r.Restarts));
+        Assert.True(supervisor.IsSuspended);
+    }
+
+    [Fact]
+    public async Task An_unreadable_kill_switch_journal_boots_engaged_with_a_critical_alert()
+    {
+        using var factory = new GatewayFactory();
+        var path = Path.Combine(factory.StateRoot, "policy", "kill-switch.json");
+        new KillSwitchJournal(path).SaveEngaged("x", DateTimeOffset.UnixEpoch);
+
+        using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            _ = factory.CreateClient();
+
+            var killSwitch = factory.Services.GetRequiredService<KillSwitch>();
+            Assert.True(killSwitch.IsEngaged);
+            Assert.Contains("journal unreadable", killSwitch.Reason, StringComparison.Ordinal);
+            Assert.Contains(factory.Services.GetRequiredService<FileAlertSink>().Recent, a => a.Kind == KillSwitchCoordinator.JournalAlertKind && a.Severity == AlertSeverity.Critical);
+        }
+    }
+
+    [Fact]
+    public void Only_a_journal_that_provably_does_not_exist_reads_as_released()
+    {
+        using var dir = new Testing.TempDirectory();
+        var missingFile = new KillSwitchJournal(Path.Combine(dir.Path, "kill-switch.json"));
+        var missingDirectory = new KillSwitchJournal(Path.Combine(dir.Path, "nope", "kill-switch.json"));
+        var corruptPath = Path.Combine(dir.Path, "corrupt.json");
+        File.WriteAllText(corruptPath, "{ not json");
+        var corrupt = new KillSwitchJournal(corruptPath);
+
+        Assert.Null(missingFile.Load());
+        Assert.Null(missingDirectory.Load());
+        Assert.Null(missingFile.LoadFailure);
+        Assert.Contains("journal unreadable: JsonException", corrupt.Load(), StringComparison.Ordinal);
+        Assert.Equal("JsonException", corrupt.LoadFailure);
+    }
+
+    [Fact]
     public async Task A_hung_broker_never_delays_stopping_the_runtimes_and_is_given_up_on_with_a_critical_alert()
     {
         using var factory = new GatewayFactory();

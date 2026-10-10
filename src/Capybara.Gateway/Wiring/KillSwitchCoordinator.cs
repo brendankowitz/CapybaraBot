@@ -40,15 +40,23 @@ public sealed partial class KillSwitchCoordinator(
     public const string BrokerAlertKind = "killswitch.broker";
     public const string StepFailedAlertKind = "killswitch.step_failed";
     public const string EngagedAlertKind = "killswitch.engaged";
+    public const string JournalAlertKind = "killswitch.journal_unreadable";
 
     private readonly SemaphoreSlim _sequence = new(1, 1);
     private readonly Lock _gate = new();
     private Task _tail = Task.CompletedTask;
+    private Task _restart = Task.CompletedTask;
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         killSwitch.Engaged += OnEngaged;
         killSwitch.Released += OnReleased;
+
+        // The journal could not be read, so composition engaged the switch rather than risk running released.
+        if (journal.LoadFailure is { } failure)
+        {
+            await PublishAsync(new Alert(JournalAlertKind, AlertSeverity.Critical, $"The kill switch journal could not be read ({failure}); the kill switch is engaged until released from the desktop.", time.GetUtcNow()));
+        }
 
         // Composition re-engaged a switch that was on before the restart. This service starts before the runtimes, so
         // suspending the supervisor now means no CLI is ever started, resumed or self-tested while engaged; the rest of
@@ -65,17 +73,27 @@ public sealed partial class KillSwitchCoordinator(
         killSwitch.Engaged -= OnEngaged;
         killSwitch.Released -= OnReleased;
         Task tail;
+        Task restart;
         lock (_gate)
         {
             tail = _tail;
+            restart = _restart;
         }
 
-        await tail.WaitAsync(cancellationToken);
+        await Task.WhenAll(tail, restart).WaitAsync(cancellationToken);
     }
 
     public void Dispose() => _sequence.Dispose();
 
-    private void OnEngaged(object? sender, KillSwitchEventArgs e) => Enqueue(() => EngageAsync(e.Reason, restored: false));
+    /// <summary>
+    /// Health checks stop at once, on the engaging thread: a restart pass started by an earlier release must not keep
+    /// relaunching CLIs while this engagement waits its turn in the queue.
+    /// </summary>
+    private void OnEngaged(object? sender, KillSwitchEventArgs e)
+    {
+        supervisor.MarkSuspended();
+        Enqueue(() => EngageAsync(e.Reason, restored: false));
+    }
 
     private void OnReleased(object? sender, KillSwitchEventArgs e) => Enqueue(ReleaseAsync);
 
@@ -155,15 +173,28 @@ public sealed partial class KillSwitchCoordinator(
                 await alerts.PublishAsync(new Alert(BrokerAlertKind, AlertSeverity.Critical, $"The broker could not be unfrozen ({ex.Message}); connections stay disabled.", time.GetUtcNow()), CancellationToken.None);
             }
         });
-        await StepAsync("resume the runtimes", async () =>
+        await StepAsync("resume the runtimes", () =>
         {
             supervisor.Resume();
 
-            // Restart them now rather than at the next health check; only on a host that starts runtimes at all.
+            // An engagement in between Resume and this line must win: Engage sets IsEngaged before raising Engaged.
+            if (killSwitch.IsEngaged)
+            {
+                supervisor.MarkSuspended();
+                return Task.CompletedTask;
+            }
+
+            // Restart them now rather than at the next health check, outside the queue: a later engagement must not
+            // wait for every CLI to restart, reconcile and self-test first. Only on a host that starts runtimes at all.
             if (runtime.AutoStart)
             {
-                await supervisor.CheckOnceAsync(CancellationToken.None);
+                lock (_gate)
+                {
+                    _restart = RestartAsync();
+                }
             }
+
+            return Task.CompletedTask;
         });
         await StepAsync("clear the journal", () =>
         {
@@ -176,6 +207,21 @@ public sealed partial class KillSwitchCoordinator(
             return Task.CompletedTask;
         });
         await StepAsync("broadcast", () => events.PublishKillSwitchChangedAsync(engaged: false, CancellationToken.None));
+    }
+
+    /// <summary>The restart pass after a release; a failure is logged, the supervisor's next check tries again.</summary>
+    private async Task RestartAsync()
+    {
+        try
+        {
+            await Task.Run(() => supervisor.CheckOnceAsync(CancellationToken.None));
+        }
+#pragma warning disable CA1031 // Background pass; the periodic supervisor check is the fallback.
+        catch (Exception ex)
+#pragma warning restore CA1031
+        {
+            LogStepFailed(logger, ex, "restart the runtimes");
+        }
     }
 
     private async Task FreezeBrokerAsync(string reason)

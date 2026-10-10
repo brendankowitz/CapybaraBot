@@ -7,26 +7,35 @@ namespace Capybara.Gateway.Wiring;
 /// crash or reboot must never count as the desktop's release. Written first when the switch engages and removed only
 /// after a release, so composition can re-engage the switch before any runtime, pump or routine starts.
 /// </summary>
+/// <remarks>
+/// Fails closed: only a journal that provably does not exist (no file, no directory) reads as released. A journal that
+/// cannot be read or parsed reads as engaged, and the reason is kept in <see cref="LoadFailure"/> for a Critical alert.
+/// </remarks>
 public sealed class KillSwitchJournal(string path)
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
+    /// <summary>Why the last <see cref="Load"/> could not read the journal, or <see langword="null"/> when it could.</summary>
+    public string? LoadFailure { get; private set; }
+
     /// <summary>The reason recorded at engagement, or <see langword="null"/> when the switch was released.</summary>
-    /// <remarks>An unreadable journal counts as engaged: when in doubt, stay stopped.</remarks>
     public string? Load()
     {
-        if (!File.Exists(path))
+        LoadFailure = null;
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            return JsonSerializer.Deserialize<Entry>(stream, Json)?.Reason ?? "restored after restart";
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
         {
             return null;
         }
-
-        try
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
         {
-            return JsonSerializer.Deserialize<Entry>(File.ReadAllText(path), Json)?.Reason ?? "restored after restart";
-        }
-        catch (JsonException)
-        {
-            return "restored after restart (unreadable journal)";
+            // Never read as released: a corrupt, locked or unreadable journal keeps the fleet stopped.
+            LoadFailure = ex.GetType().Name;
+            return $"restored after restart (journal unreadable: {LoadFailure})";
         }
     }
 
