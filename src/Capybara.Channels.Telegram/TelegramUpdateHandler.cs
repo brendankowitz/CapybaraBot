@@ -5,9 +5,11 @@ namespace Capybara.Channels.Telegram;
 /// <summary>Accepts inbound Telegram text only from the single allowlisted chat or user id (FR-CLI-04).</summary>
 public sealed class TelegramUpdateHandler(ConversationalChannelGuard guard, IInboundMessageSink sink)
 {
-    public async ValueTask HandleAsync(JsonDocument update, CancellationToken cancellationToken = default)
+    public ValueTask HandleAsync(JsonDocument update, CancellationToken cancellationToken = default) =>
+        HandleAsync(update.RootElement, cancellationToken);
+
+    public async ValueTask HandleAsync(JsonElement root, CancellationToken cancellationToken = default)
     {
-        var root = update.RootElement;
         if (!root.TryGetProperty("message", out var message) || !message.TryGetProperty("text", out var textElement))
         {
             return;

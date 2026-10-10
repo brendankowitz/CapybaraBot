@@ -16,30 +16,57 @@ public sealed class ChannelsTests
     private static readonly AgentId Ea = AgentId.Parse("ea");
 
     [Fact]
-    public async Task Ntfy_sets_headers_actions_click_and_markdown_disabled()
+    public async Task Ntfy_publishes_json_with_unicode_title_absolute_actions_and_markdown_disabled()
     {
         var handler = new RecordingHandler();
-        var channel = new NtfyChannel(new HttpClient(handler), new NtfyOptions(new Uri("https://ntfy.tailnet/"), "capybara") { AccessToken = "runtime-token" });
+        var channel = new NtfyChannel(new HttpClient(handler), new NtfyOptions(new Uri("https://ntfy.tailnet/"), "capybara")
+        {
+            AccessToken = "runtime-token",
+            GatewayBaseUrl = new Uri("https://capybara.tailnet/"),
+        });
         var notification = new Notification(
             NotificationKind.Approval,
             Ea,
             "approval needed: ea → send email",
-            "Open the approval card.",
+            string.Empty,
             NotificationPriority.High,
-            "/approvals/abc",
-            [new NotificationAction("Allow once", "/api/approvals/abc?nonce=n&decision=allow-once")]);
+            "/approvals",
+            [new NotificationAction("Allow once", "/api/approvals/abc/act?nonce=n&decision=allow-once")]);
 
         await channel.SendAsync(notification, TestContext.Current.CancellationToken);
 
         var request = Assert.Single(handler.Requests);
-        Assert.Equal(new Uri("https://ntfy.tailnet/capybara"), request.RequestUri);
-        Assert.Equal("approval needed: ea → send email", Header(request, "Title"));
-        Assert.Equal("4", Header(request, "Priority"));
-        Assert.Equal("warning", Header(request, "Tags"));
-        Assert.Equal("/approvals/abc", Header(request, "Click"));
-        Assert.Equal("no", Header(request, "X-Markdown"));
-        Assert.Contains("http, Allow once, /api/approvals/abc?nonce=n&decision=allow-once, method=POST, clear=true", Header(request, "Actions"), StringComparison.Ordinal);
+        Assert.Equal(HttpMethod.Post, request.Method);
+        Assert.Equal(new Uri("https://ntfy.tailnet/"), request.RequestUri);
         Assert.Equal("Bearer", request.Headers.Authorization?.Scheme);
+        using var json = JsonDocument.Parse(handler.Bodies[0]);
+        var root = json.RootElement;
+        Assert.Equal("capybara", root.GetProperty("topic").GetString());
+        Assert.Equal("approval needed: ea → send email", root.GetProperty("title").GetString());
+        Assert.Equal(4, root.GetProperty("priority").GetInt32());
+        Assert.Equal("warning", root.GetProperty("tags")[0].GetString());
+        Assert.Equal("https://capybara.tailnet/approvals", root.GetProperty("click").GetString());
+        Assert.False(root.GetProperty("markdown").GetBoolean());
+        var action = Assert.Single(root.GetProperty("actions").EnumerateArray());
+        Assert.Equal("http", action.GetProperty("action").GetString());
+        Assert.Equal("Allow once", action.GetProperty("label").GetString());
+        Assert.Equal("https://capybara.tailnet/api/approvals/abc/act?nonce=n&decision=allow-once", action.GetProperty("url").GetString());
+        Assert.Equal("POST", action.GetProperty("method").GetString());
+    }
+
+    [Fact]
+    public async Task Ntfy_without_gateway_url_omits_click_and_actions_rather_than_sending_relative_urls()
+    {
+        var handler = new RecordingHandler();
+        var channel = new NtfyChannel(new HttpClient(handler), new NtfyOptions(new Uri("https://ntfy.tailnet/"), "capybara"));
+
+        await channel.SendAsync(
+            new Notification(NotificationKind.Approval, Ea, "t", "b", NotificationPriority.Normal, "/approvals", [new NotificationAction("Deny", "/api/x")]),
+            TestContext.Current.CancellationToken);
+
+        using var json = JsonDocument.Parse(handler.Bodies[0]);
+        Assert.False(json.RootElement.TryGetProperty("click", out _));
+        Assert.False(json.RootElement.TryGetProperty("actions", out _));
     }
 
     [Fact]

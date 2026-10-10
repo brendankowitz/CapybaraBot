@@ -40,6 +40,13 @@ public sealed partial class NotificationRouter(
 
     public async ValueTask FlushBatchesAsync(CancellationToken cancellationToken = default)
     {
+        // The batch timer is one-shot: release it so the next low-risk approval arms a fresh window.
+        lock (_batchGate)
+        {
+            _batchTimer?.Dispose();
+            _batchTimer = null;
+        }
+
         List<Notification> items = [];
         while (_batchedLowRiskApprovals.TryDequeue(out var item))
         {
@@ -101,10 +108,22 @@ public sealed partial class NotificationRouter(
         lock (_batchGate)
         {
             _batchTimer ??= timeProvider.CreateTimer(
-                static state => _ = ((NotificationRouter)state!).FlushBatchesAsync().AsTask(),
+                static state => _ = ((NotificationRouter)state!).FlushFromTimerAsync(),
                 this,
                 options.LowRiskBatchWindow,
                 Timeout.InfiniteTimeSpan);
+        }
+    }
+
+    private async Task FlushFromTimerAsync()
+    {
+        try
+        {
+            await FlushBatchesAsync();
+        }
+        catch (Exception ex)
+        {
+            LogBatchFlushFailed(_logger, ex.Message, ex);
         }
     }
 
@@ -164,10 +183,14 @@ public sealed partial class NotificationRouter(
 
     private static string RemoveUnsafeText(string value) => UrlRegex().Replace(ImageMarkdownRegex().Replace(value, "[image]"), "[link]");
 
-    private static bool IsRelativePath(string value) => value.Length > 0 && value[0] == '/' && !value.StartsWith("//", StringComparison.Ordinal);
+    private static bool IsRelativePath(string value) =>
+        value.Length > 0 && value[0] == '/' && !value.StartsWith("//", StringComparison.Ordinal) && !value.StartsWith("/\\", StringComparison.Ordinal);
 
     [LoggerMessage(1, LogLevel.Debug, "Notification channel {ChannelName} failed: {Reason}")]
     private static partial void LogChannelFailed(ILogger logger, string channelName, string reason, Exception exception);
+
+    [LoggerMessage(2, LogLevel.Error, "Flushing batched approval notifications failed: {Reason}")]
+    private static partial void LogBatchFlushFailed(ILogger logger, string reason, Exception exception);
 
     [GeneratedRegex("!\\[[^\\]]*\\]\\([^)]*\\)", RegexOptions.CultureInvariant)]
     private static partial Regex ImageMarkdownRegex();
