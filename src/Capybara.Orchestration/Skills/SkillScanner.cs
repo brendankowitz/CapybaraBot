@@ -74,7 +74,7 @@ public static partial class SkillScanner
         {
             findings.Add(new SkillFinding(SkillFindingSeverity.Block, "SKILL.md", "frontmatter must declare name and description"));
         }
-        else if (front.AllowedTools.Count > 0)
+        else if (front.DeclaresAllowedTools)
         {
             findings.Add(new SkillFinding(SkillFindingSeverity.Warning, "SKILL.md", "allowed-tools grants nothing; the agent's grants still apply"));
         }

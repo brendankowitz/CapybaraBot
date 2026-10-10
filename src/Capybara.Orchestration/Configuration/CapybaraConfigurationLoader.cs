@@ -165,7 +165,7 @@ public static class CapybaraConfigurationLoader
                     Operations = g.Operations,
                     Constraints = g.Constraints.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<string>)kv.Value, StringComparer.Ordinal),
                 })],
-                EgressDomains = yaml.Egress,
+                EgressDomains = EgressDomain.Normalize(id.Value, yaml.Egress, errors),
                 Hidden = yaml.Hidden,
                 Host = string.IsNullOrWhiteSpace(yaml.Host) ? "systemd" : yaml.Host,
                 Provider = ToProvider(id, yaml.Provider, errors),

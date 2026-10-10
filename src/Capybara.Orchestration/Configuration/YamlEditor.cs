@@ -27,7 +27,15 @@ internal static class YamlEditor
         }
 
         var text = builder.ToString();
-        return text.EndsWith("...\n", StringComparison.Ordinal) ? text[..^4] : text;
+        foreach (var marker in (ReadOnlySpan<string>)["...\r\n", "...\n"])
+        {
+            if (text.EndsWith(marker, StringComparison.Ordinal))
+            {
+                return text[..^marker.Length];
+            }
+        }
+
+        return text;
     }
 
     /// <summary>

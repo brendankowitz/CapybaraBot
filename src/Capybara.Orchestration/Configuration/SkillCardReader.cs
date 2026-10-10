@@ -75,7 +75,24 @@ internal static class SkillCardReader
 
         public List<string> Examples { get; set; } = [];
 
-        public List<string> AllowedTools { get; set; } = [];
+        /// <summary>
+        /// The Agent Skills standard spells this <c>allowed-tools</c> and allows a list or a comma/space-separated string;
+        /// <c>allowedTools</c> is accepted too. Read only to warn that it grants nothing (FR-SKL-03).
+        /// </summary>
+        [YamlMember(Alias = "allowed-tools", ApplyNamingConventions = false)]
+        public object? AllowedToolsKebab { get; set; }
+
+        public object? AllowedTools { get; set; }
+
+        public bool DeclaresAllowedTools => IsDeclared(AllowedToolsKebab) || IsDeclared(AllowedTools);
+
+        private static bool IsDeclared(object? value) => value switch
+        {
+            null => false,
+            string text => !string.IsNullOrWhiteSpace(text),
+            System.Collections.ICollection items => items.Count > 0,
+            _ => true,
+        };
     }
 #pragma warning restore CA1812, CA2227, CA1002
 }

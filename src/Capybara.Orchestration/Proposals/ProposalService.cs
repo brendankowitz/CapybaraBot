@@ -41,6 +41,9 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
 
     public const int MaxRationaleLength = 2000;
 
+    /// <summary>Longest line in proposed content; a longer line can push content past the edge of the review pane.</summary>
+    public const int MaxLineLength = 500;
+
     private const string AuditKind = "config_change";
 
     /// <summary>Longest agent-supplied value copied into an audit line.</summary>
@@ -159,8 +162,44 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
 
     public ValueTask<ChangeProposal?> GetAsync(string id, CancellationToken cancellationToken = default) => store.GetAsync(id, cancellationToken);
 
-    /// <summary>Proposals oldest first, optionally only those with <paramref name="status"/>.</summary>
+    /// <summary>
+    /// Proposals oldest first, optionally only those with <paramref name="status"/>. Runs <see cref="ReconcileAsync"/>
+    /// first, so the inbox never offers a proposal whose agent is gone.
+    /// </summary>
     public async ValueTask<IReadOnlyList<ChangeProposal>> ListAsync(ProposalStatus? status = null, CancellationToken cancellationToken = default)
+    {
+        await ReconcileAsync(cancellationToken);
+        return await ListCoreAsync(status, cancellationToken);
+    }
+
+    /// <summary>
+    /// Marks pending proposals whose agent is no longer declared as <see cref="ProposalStatus.Stale"/>. Call once at
+    /// startup: if the process stopped between an agent's removal and <see cref="OnAgentRemovedAsync"/>, this is what
+    /// keeps those proposals from applying to a later agent that reuses the id. Returns how many were marked.
+    /// </summary>
+    public async ValueTask<int> ReconcileAsync(CancellationToken cancellationToken = default)
+    {
+        IReadOnlyList<ChangeProposal> settled;
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            var declared = config.Current.Agents.Select(a => a.Id).ToHashSet();
+            settled = await StalePendingAsync(p => !declared.Contains(p.Agent), "system", p => $"agent {p.Agent} is no longer declared", cancellationToken);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+
+        foreach (var proposal in settled)
+        {
+            Decided?.Invoke(this, proposal);
+        }
+
+        return settled.Count;
+    }
+
+    private async ValueTask<IReadOnlyList<ChangeProposal>> ListCoreAsync(ProposalStatus? status, CancellationToken cancellationToken)
     {
         var all = new List<ChangeProposal>();
         await foreach (var proposal in store.ListAsync(cancellationToken))
@@ -181,30 +220,43 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
     public async ValueTask OnAgentRemovedAsync(AgentRemoval removal, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(removal);
-        var settled = new List<ChangeProposal>();
+        IReadOnlyList<ChangeProposal> settled;
         await _lock.WaitAsync(cancellationToken);
         try
         {
             var reason = $"agent {removal.Agent} was {removal.Kind.ToString().ToLowerInvariant()}";
-            foreach (var proposal in (await ListAsync(ProposalStatus.Pending, cancellationToken)).Where(p => p.Agent == removal.Agent))
-            {
-                if (proposal.Kind == ProposalKind.Skill)
-                {
-                    await config.WriteUnversionedAsync(root => RemovePendingSkill(root, proposal.Agent.Value, proposal.Name!), cancellationToken);
-                }
-
-                settled.Add(await SettleAsync(proposal, ProposalStatus.Stale, removal.RemovedBy, reason, cancellationToken));
-            }
+            settled = await StalePendingAsync(p => p.Agent == removal.Agent, removal.RemovedBy, _ => reason, cancellationToken);
         }
         finally
         {
             _lock.Release();
         }
 
-        settled.ForEach(p => Decided?.Invoke(this, p));
+        foreach (var proposal in settled)
+        {
+            Decided?.Invoke(this, proposal);
+        }
     }
 
     public void Dispose() => _lock.Dispose();
+
+    /// <summary>Settles matching pending proposals as stale and drops their staged skills. Caller holds the service lock.</summary>
+    private async ValueTask<IReadOnlyList<ChangeProposal>> StalePendingAsync(
+        Func<ChangeProposal, bool> match, string decidedBy, Func<ChangeProposal, string> reason, CancellationToken cancellationToken)
+    {
+        var settled = new List<ChangeProposal>();
+        foreach (var proposal in (await ListCoreAsync(ProposalStatus.Pending, cancellationToken)).Where(match))
+        {
+            if (proposal.Kind == ProposalKind.Skill)
+            {
+                await config.WriteUnversionedAsync(root => RemovePendingSkill(root, proposal.Agent.Value, proposal.Name!), cancellationToken);
+            }
+
+            settled.Add(await SettleAsync(proposal, ProposalStatus.Stale, decidedBy, reason(proposal), cancellationToken));
+        }
+
+        return settled;
+    }
 
     private async ValueTask<ChangeProposal> SettleAsync(ChangeProposal proposal, ProposalStatus status, string decidedBy, string? error, CancellationToken cancellationToken)
     {
@@ -246,10 +298,21 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
             }
         }
 
+        var lineNumber = 0;
+        foreach (var line in content.Split('\n'))
+        {
+            lineNumber++;
+            if (line.TrimEnd('\r').Length > MaxLineLength)
+            {
+                throw new ProposalRejectedException(
+                    $"Line {lineNumber} is longer than {MaxLineLength} characters; long lines can hide content past the edge of the review pane.");
+            }
+        }
+
         name = kind is ProposalKind.Routine or ProposalKind.Skill ? name?.Trim() : null;
         var (targetPath, proposed) = Resolve(agent, kind, name, content);
 
-        var pending = (await ListAsync(ProposalStatus.Pending, cancellationToken)).Where(p => p.Agent == agent).ToList();
+        var pending = (await ListCoreAsync(ProposalStatus.Pending, cancellationToken)).Where(p => p.Agent == agent).ToList();
         if (pending.Any(p => p.Kind == kind && p.Name == name))
         {
             throw new ProposalRejectedException($"A proposal for {targetPath}{(name is null ? string.Empty : " (" + name + ")")} is already pending.");

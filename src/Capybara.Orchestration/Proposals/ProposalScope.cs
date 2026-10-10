@@ -92,6 +92,10 @@ internal static class ProposalScope
             }
 
             var allowed = id == proposal.Agent ? AllowedFields(proposal.Kind) : [];
+            if (id == proposal.Agent && current.EgressDomains.Contains(EgressDomain.Unrestricted) && !old.EgressDomains.Contains(EgressDomain.Unrestricted))
+            {
+                errors.Add($"{id}: unrestricted egress ('*') can only be granted by the user.");
+            }
             var oldFields = ToNode(old).AsObject();
             var newFields = ToNode(current).AsObject();
             foreach (var field in oldFields.Select(f => f.Key).Union(newFields.Select(f => f.Key)).Except(allowed, StringComparer.Ordinal))
