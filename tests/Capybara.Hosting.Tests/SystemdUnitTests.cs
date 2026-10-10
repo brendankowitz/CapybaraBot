@@ -7,6 +7,8 @@ public sealed class SystemdUnitTests
 {
     private static readonly string[] AllUnits = ["capybarad.service", "capybara-broker.service", "capybara-agent@.service", "capybara-backup.service"];
 
+    private static readonly string[] RequiredNamespaces = ["user", "mnt", "pid"];
+
     private static readonly string[] ProducedExecutables = ["/opt/capybara/capybarad", "/opt/capybara/capybara-broker"];
 
     private static string[] Unit(string name) => File.ReadAllLines(Path.Combine(RepositoryPaths.Root, "deploy", "systemd", name));
@@ -35,12 +37,43 @@ public sealed class SystemdUnitTests
         Assert.Contains("LoadCredentialEncrypted=github-token:/etc/capybara/credentials/github-token.cred", directives);
     }
 
+    /// <summary>Units whose process tree launches srt, i.e. bubblewrap (FR-HST-03).</summary>
+    [Theory]
+    [InlineData("capybarad.service")]
+    [InlineData("capybara-agent@.service")]
+    public void Units_that_launch_srt_allow_the_namespaces_and_syscalls_bubblewrap_needs(string unit)
+    {
+        var directives = Directives(unit).ToList();
+
+        var namespaces = Assert.Single(directives, l => l.StartsWith("RestrictNamespaces=", StringComparison.Ordinal));
+        Assert.NotEqual("RestrictNamespaces=yes", namespaces);
+        var allowed = namespaces["RestrictNamespaces=".Length..].Split(' ');
+        Assert.All(RequiredNamespaces, ns => Assert.Contains(ns, allowed));
+        Assert.DoesNotContain(directives, l => l.StartsWith("RestrictNamespaces=~", StringComparison.Ordinal));
+        Assert.Contains(directives, l => l.StartsWith("SystemCallFilter=", StringComparison.Ordinal) && l.Split(' ').Contains("@mount"));
+        Assert.Contains(directives, l => l.StartsWith("SystemCallFilter=", StringComparison.Ordinal) && l.Split(' ').Contains("pivot_root"));
+        Assert.DoesNotContain(directives, l => l.StartsWith("ProcSubset=", StringComparison.Ordinal) || l.StartsWith("ProtectProc=", StringComparison.Ordinal) || l.StartsWith("ProtectKernelTunables=", StringComparison.Ordinal));
+        Assert.Contains("NoNewPrivileges=yes", directives);
+        Assert.Contains("ProtectSystem=strict", directives);
+        Assert.Contains("CapabilityBoundingSet=", directives);
+    }
+
+    [Fact]
+    public void Broker_unit_keeps_strict_namespace_and_proc_hardening()
+    {
+        var directives = Directives("capybara-broker.service").ToList();
+
+        Assert.Contains("RestrictNamespaces=yes", directives);
+        Assert.Contains("ProtectProc=invisible", directives);
+    }
+
     [Fact]
     public void Backup_unit_runs_capybarad_backup()
     {
         var directives = Directives("capybara-backup.service").ToList();
 
         Assert.Contains("ExecStart=/opt/capybara/capybarad backup", directives);
+        Assert.Contains(directives, l => l.StartsWith("ReadWritePaths=", StringComparison.Ordinal) && l.Split(' ').Contains("/var/backups/capybara"));
     }
 
     [Fact]

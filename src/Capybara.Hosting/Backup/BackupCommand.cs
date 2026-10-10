@@ -9,10 +9,10 @@ namespace Capybara.Hosting.Backup;
 /// <c>capybara-backup.service</c>. capybarad dispatches here before building its web host:
 /// <code>
 /// if (BackupCommand.IsBackupCommand(args))
-///     return await BackupCommand.RunAsync(args, configuration, hostingOptions, Console.Out, Console.Error, cancellationToken: lifetimeToken);
+///     return await BackupCommand.RunAsync(args, configuration, HostingOptions.FromConfiguration(configuration), Console.Out, Console.Error, cancellationToken: lifetimeToken);
 /// </code>
 /// Settings come from the <c>Capybara:Backup</c> section (<see cref="BackupConfiguration"/>); archives live in the blob store rooted at
-/// <see cref="HostingOptions.BlobRoot"/>, which is never itself archived.
+/// <see cref="HostingOptions.BlobRoot"/> (<c>Capybara:Hosting:BlobRoot</c>), which is never itself archived.
 /// </summary>
 public static class BackupCommand
 {
@@ -52,7 +52,7 @@ public static class BackupCommand
                 _ => await UsageErrorAsync(error, Usage),
             };
         }
-        catch (Exception ex) when (ex is IOException or InvalidDataException or InvalidOperationException or UnauthorizedAccessException or ArgumentException)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             await error.WriteLineAsync($"capybarad {args[0]} failed: {ex.Message}");
             return ExitFailed;

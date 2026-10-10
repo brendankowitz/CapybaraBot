@@ -140,6 +140,58 @@ public sealed class BackupCommandTests
         Assert.Contains(options.Sources, s => s.Name == "memory-repo");
         Assert.Contains(options.Sources, s => s.Kind == BackupSourceKind.SqliteDatabase);
         Assert.Contains(options.Sources, s => s.Path.EndsWith("/credentials", StringComparison.Ordinal));
+
+        // The backup unit can only write /var/lib/capybara and /var/backups/capybara (capybara-backup.service).
+        var hosting = HostingOptions.FromConfiguration(configuration);
+        Assert.Equal("/var/backups/capybara/blobs", hosting.BlobRoot);
+        Assert.Equal("/var/lib/capybara/capybara-state.db", hosting.StateDatabasePath);
+        Assert.All(options.Sources, s => Assert.False(s.Path.StartsWith(hosting.BlobRoot, StringComparison.Ordinal), $"{s.Name} sits inside the blob root."));
+    }
+
+    [Fact]
+    public void Hosting_defaults_are_absolute_and_follow_the_state_root()
+    {
+        var defaults = new HostingOptions();
+        var moved = new HostingOptions { StateRoot = "/srv/capybara" };
+
+        Assert.True(Path.IsPathRooted(defaults.BlobRoot));
+        Assert.True(Path.IsPathRooted(defaults.StateDatabasePath));
+        Assert.Equal(Path.Combine("/srv/capybara", "blobs"), moved.BlobRoot);
+        Assert.Equal(Path.Combine("/srv/capybara", "capybara-state.db"), moved.StateDatabasePath);
+        Assert.Equal("/elsewhere", new HostingOptions { StateRoot = "/srv/capybara", BlobRoot = "/elsewhere" }.BlobRoot);
+    }
+
+    [Fact]
+    public void FromConfiguration_uses_the_gateway_state_root_when_hosting_does_not_set_one()
+    {
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Capybara:StateRoot"] = "/srv/capybara" }).Build();
+
+        var hosting = HostingOptions.FromConfiguration(configuration);
+
+        Assert.Equal("/srv/capybara", hosting.StateRoot);
+        Assert.Equal(Path.Combine("/srv/capybara", "blobs"), hosting.BlobRoot);
+    }
+
+    [Fact]
+    public async Task Cancellation_is_not_reported_as_a_command_failure()
+    {
+        using var env = new Env();
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            BackupCommand.RunAsync(["backup"], env.Configuration, env.Hosting, env.Out, env.Err, cancellationToken: cts.Token));
+    }
+
+    [Fact]
+    public async Task Unexpected_exceptions_become_exit_code_1_with_a_message()
+    {
+        using var env = new Env();
+
+        var exit = await env.RunAsync("restore", "../escape.tar.gz", env.Restore);
+
+        Assert.Equal(BackupCommand.ExitFailed, exit);
+        Assert.Contains("failed", env.Err.ToString(), StringComparison.Ordinal);
     }
 
     private static IEnumerable<KeyValuePair<string, string?>> Flatten(System.Text.Json.JsonElement element, string prefix) =>

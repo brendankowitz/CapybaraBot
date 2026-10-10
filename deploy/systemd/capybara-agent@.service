@@ -33,15 +33,11 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
-ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
-ProtectProc=invisible
-ProcSubset=pid
-RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
@@ -49,10 +45,16 @@ RemoveIPC=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 SystemCallArchitectures=native
-SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 UMask=0077
+
+# This unit also launches the agent's Copilot CLI under srt (bubblewrap), so it needs the same relaxations as capybarad.service:
+# user/mount/pid/net/ipc/uts namespaces, the @mount syscalls plus the few privileged calls bwrap makes, and an unmasked /proc
+# (ProtectProc/ProcSubset/ProtectKernelTunables would make bwrap's /proc mount fail). Verify on a real host.
+RestrictNamespaces=user mnt pid net ipc uts
+SystemCallFilter=@system-service @mount
+SystemCallFilter=~@privileged @resources
+SystemCallFilter=capset pivot_root sethostname setgroups setuid setgid setresuid setresgid
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target

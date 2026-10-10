@@ -1,5 +1,10 @@
 {
   "Capybara": {
+    "Hosting": {
+      "StateRoot": "/var/lib/capybara",
+      "StateDatabasePath": "/var/lib/capybara/capybara-state.db",
+      "BlobRoot": "/var/backups/capybara/blobs"
+    },
     "Backup": {
       "Prefix": "backups",
       "RetainCount": 14,

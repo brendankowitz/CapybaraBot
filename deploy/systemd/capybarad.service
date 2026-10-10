@@ -6,7 +6,8 @@ After=network-online.target tailscaled.service
 Wants=network-online.target
 
 [Service]
-# Generic Host with AddSystemd() reports readiness/stopping over sd_notify (FR-HST-02).
+# Type=notify requires the capybarad composition to call AddSystemd(); that, the `backup` dispatch and the `agent <id>` mode are
+# wired in capybarad's Program.cs (WP10). Until then the notify handshake never completes and `systemctl start` times out.
 Type=notify
 NotifyAccess=main
 User=capybara
@@ -39,21 +40,19 @@ StateDirectoryMode=0700
 ConfigurationDirectory=capybara
 ReadOnlyPaths=/etc/capybara
 ReadWritePaths=/var/lib/capybara
+# Only needed when the in-process nightly backup writes archives here (see deploy/README.md); "-" ignores a missing directory.
+ReadWritePaths=-/var/backups/capybara
 
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
-ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
-ProtectProc=invisible
-ProcSubset=pid
-RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
@@ -61,10 +60,18 @@ RemoveIPC=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 SystemCallArchitectures=native
-SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 UMask=0077
+
+# capybarad launches each agent's Copilot CLI under srt, which sandboxes with bubblewrap (FR-HST-03). bwrap builds its sandbox from
+# unprivileged user/mount/pid/net/ipc/uts namespaces, mounts a fresh /proc, and calls mount, pivot_root, capset and friends. So, unlike
+# the broker and the backup job, this unit must not use RestrictNamespaces=yes, must allow @mount (not in @system-service), and must
+# leave /proc unmasked (ProtectProc/ProcSubset/ProtectKernelTunables overmount /proc and make bwrap's own proc mount fail). The srt
+# sandbox then provides the per-agent isolation. Verify on a real host: `sudo -u capybara srt --settings <file> -- true`.
+RestrictNamespaces=user mnt pid net ipc uts
+SystemCallFilter=@system-service @mount
+SystemCallFilter=~@privileged @resources
+SystemCallFilter=capset pivot_root sethostname setgroups setuid setgid setresuid setresgid
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target
