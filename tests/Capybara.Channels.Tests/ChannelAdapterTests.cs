@@ -207,7 +207,70 @@ public sealed class ChannelAdapterTests
     }
 
     [Fact]
-    public async Task Polling_network_outage_between_failures_restarts_the_poison_window()
+    public async Task Polling_skips_poison_from_a_slow_failing_sink_once_attempts_and_window_are_reached()
+    {
+        var body = """{"ok":true,"result":[{"update_id":5,"message":{"from":{"id":123},"text":"boom"}}]}""";
+        var handler = new QueueHandler(Enumerable.Repeat<object>(body, TelegramPollingService.MaxDeliveryAttempts).ToArray());
+        var alerts = new InMemoryAlertSink();
+        var time = new FakeTimeProvider(Noon);
+        var sink = new RecordingInboundSink { ThrowOn = "boom", BeforeThrow = () => time.Advance(TimeSpan.FromSeconds(90)) };
+        var service = NewPoller(handler, sink, time, alerts);
+        var ct = TestContext.Current.CancellationToken;
+
+        // Each attempt takes 90 s to fail, then the poller backs off its 60 s cap: attempts start 150 s apart.
+        for (var attempt = 1; attempt < TelegramPollingService.MaxDeliveryAttempts; attempt++)
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => service.PollOnceAsync(ct));
+            time.Advance(TimeSpan.FromSeconds(60));
+        }
+
+        Assert.Equal(0, service.Offset);
+        Assert.Empty(alerts.Recent);
+
+        // The fifth attempt starts 600 s after the first: enough attempts over the full window, so it is poison.
+        Assert.Equal(1, await service.PollOnceAsync(ct));
+        Assert.Equal(6, service.Offset);
+        Assert.Equal("telegram.inbound_skipped", Assert.Single(alerts.Recent).Kind);
+    }
+
+    [Fact]
+    public async Task Polling_intermittent_getUpdates_failures_delay_but_never_prevent_skipping_poison()
+    {
+        var failing = """{"ok":true,"result":[{"update_id":5,"message":{"from":{"id":123},"text":"boom"}}]}""";
+        var responses = new List<object>();
+        for (var i = 0; i < 10; i++)
+        {
+            responses.Add(failing);
+            responses.Add(HttpStatusCode.BadGateway);
+        }
+
+        responses.Add(failing);
+        var alerts = new InMemoryAlertSink();
+        var time = new FakeTimeProvider(Noon);
+        var service = NewPoller(new QueueHandler([.. responses]), new RecordingInboundSink { ThrowOn = "boom" }, time, alerts);
+        var ct = TestContext.Current.CancellationToken;
+
+        // Every other poll fails. Only the 60 s from each attempt to the next poll counts as failing time; the 60 s outage
+        // after it does not. So at attempt 6 (ten minutes of wall clock) the update is not skipped yet.
+        for (var attempt = 1; attempt <= 10; attempt++)
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => service.PollOnceAsync(ct));
+            time.Advance(TimeSpan.FromSeconds(60));
+            await Assert.ThrowsAsync<HttpRequestException>(() => service.PollOnceAsync(ct));
+            time.Advance(TimeSpan.FromSeconds(60));
+        }
+
+        Assert.Equal(0, service.Offset);
+        Assert.Empty(alerts.Recent);
+
+        // Ten 60 s failing intervals add up to the window: the outages delayed the skip but did not wedge the poller.
+        Assert.Equal(1, await service.PollOnceAsync(ct));
+        Assert.Equal(6, service.Offset);
+        Assert.Single(alerts.Recent);
+    }
+
+    [Fact]
+    public async Task Polling_getUpdates_outage_between_failures_does_not_count_toward_the_poison_window()
     {
         var failing = """{"ok":true,"result":[{"update_id":5,"message":{"from":{"id":123},"text":"boom"}}]}""";
         var handler = new QueueHandler(failing, HttpStatusCode.BadGateway, failing, failing, failing, failing, failing);
@@ -245,9 +308,26 @@ public sealed class ChannelAdapterTests
     }
 
     [Fact]
-    public async Task Polling_fails_loudly_instead_of_hot_looping_when_only_unidentifiable_updates_arrive()
+    public async Task Polling_skips_non_object_updates_and_delivers_the_valid_one_after_them()
     {
-        var service = NewPoller(new QueueHandler("""{"ok":true,"result":[{"update_id":"x","message":{"text":"bad"}}]}"""), new RecordingInboundSink());
+        var handler = new QueueHandler("""{"ok":true,"result":[null,42,"x",[],{"update_id":8,"message":{"from":{"id":123},"text":"ok"}}]}""");
+        var sink = new RecordingInboundSink();
+        var service = NewPoller(handler, sink);
+
+        Assert.Equal(1, await service.PollOnceAsync(TestContext.Current.CancellationToken));
+
+        Assert.Equal(9, service.Offset);
+        Assert.Equal(("123", "ok", "telegram:8"), Assert.Single(sink.Messages));
+    }
+
+    [Theory]
+    [InlineData("""{"update_id":"x","message":{"text":"bad"}}""")]
+    [InlineData("""{"update_id":1.5,"message":{"text":"bad"}}""")]
+    [InlineData("null")]
+    [InlineData("7")]
+    public async Task Polling_fails_loudly_instead_of_hot_looping_when_only_unidentifiable_updates_arrive(string update)
+    {
+        var service = NewPoller(new QueueHandler($$"""{"ok":true,"result":[{{update}}]}"""), new RecordingInboundSink());
 
         await Assert.ThrowsAsync<InvalidDataException>(() => service.PollOnceAsync(TestContext.Current.CancellationToken));
         Assert.Equal(0, service.Offset);
@@ -323,10 +403,14 @@ public sealed class ChannelAdapterTests
         Assert.True(service.ExecuteTask!.IsCompletedSuccessfully);
     }
 
-    [Fact]
-    public async Task Polling_rejects_a_response_without_a_result_array_and_keeps_the_offset()
+    [Theory]
+    [InlineData("""{"ok":false,"description":"Unauthorized"}""")]
+    [InlineData("""{"ok":true,"result":null}""")]
+    [InlineData("[]")]
+    [InlineData("null")]
+    public async Task Polling_rejects_a_response_without_a_result_array_and_keeps_the_offset(string response)
     {
-        var service = NewPoller(new QueueHandler("""{"ok":false,"description":"Unauthorized"}"""), new RecordingInboundSink());
+        var service = NewPoller(new QueueHandler(response), new RecordingInboundSink());
 
         await Assert.ThrowsAsync<InvalidDataException>(() => service.PollOnceAsync(TestContext.Current.CancellationToken));
         Assert.Equal(0, service.Offset);
@@ -945,10 +1029,14 @@ public sealed class ChannelAdapterTests
 
         public int ThrowCount { get; set; } = int.MaxValue;
 
+        /// <summary>Runs just before the sink throws, e.g. to advance a fake clock for a slow failure.</summary>
+        public Action? BeforeThrow { get; init; }
+
         public ValueTask ReceiveAsync(string channel, string userId, string text, string messageId, CancellationToken cancellationToken = default)
         {
             if (text == ThrowOn && ThrowCount-- > 0)
             {
+                BeforeThrow?.Invoke();
                 throw new InvalidOperationException("sink failed");
             }
 

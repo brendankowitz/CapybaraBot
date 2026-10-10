@@ -21,12 +21,26 @@ public sealed class TelegramUpdateHandler(ConversationalChannelGuard guard, IInb
             return;
         }
 
-        if (!root.TryGetProperty("update_id", out var updateId) || updateId.ValueKind != JsonValueKind.Number || !updateId.TryGetInt64(out var id))
+        if (!TryGetUpdateId(root, out var id))
         {
             throw new InvalidDataException("Telegram update has no numeric update_id.");
         }
 
         await sink.ReceiveAsync("telegram", userId, textElement.GetString() ?? string.Empty, $"telegram:{id}", cancellationToken);
+    }
+
+    /// <summary>Reads the update's <c>update_id</c>; false when the update is not an object or the id is not an int64.</summary>
+    /// <remarks>
+    /// Both kind checks are load-bearing: <see cref="JsonElement.TryGetProperty(string, out JsonElement)"/> throws unless the
+    /// element is an object, and <see cref="JsonElement.TryGetInt64"/> throws unless it is a number.
+    /// </remarks>
+    internal static bool TryGetUpdateId(JsonElement update, out long updateId)
+    {
+        updateId = 0;
+        return update.ValueKind == JsonValueKind.Object
+            && update.TryGetProperty("update_id", out var idElement)
+            && idElement.ValueKind == JsonValueKind.Number
+            && idElement.TryGetInt64(out updateId);
     }
 
     private static string? ExtractUserId(JsonElement message)

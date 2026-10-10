@@ -16,9 +16,9 @@ public sealed record TelegramOptions(string BotToken, string ChatId)
     public TimeSpan MaxRetryDelay { get; init; } = TimeSpan.FromSeconds(60);
 
     /// <summary>
-    /// How long one update must have been failing continuously before it is skipped as poison. Keeps a short inbox outage
-    /// from dropping the user's command; the update must also have failed at least
-    /// <see cref="TelegramPollingService.MaxDeliveryAttempts"/> times.
+    /// How long one update's delivery must have been failing before it is skipped as poison. Keeps a short inbox outage
+    /// from dropping the user's command; time during which <c>getUpdates</c> itself was failing does not count, and the
+    /// update must also have failed at least <see cref="TelegramPollingService.MaxDeliveryAttempts"/> handler attempts.
     /// </summary>
     public TimeSpan PoisonMessageWindow { get; init; } = TimeSpan.FromMinutes(10);
 
