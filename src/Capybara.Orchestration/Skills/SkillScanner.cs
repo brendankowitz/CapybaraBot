@@ -102,9 +102,9 @@ public static partial class SkillScanner
             }
         }
 
-        if (HiddenCharacters().IsMatch(content))
+        if (ReviewableText.FindUnsafe(content) is { } hidden)
         {
-            yield return new SkillFinding(SkillFindingSeverity.Block, file, "invisible or bidirectional-control characters");
+            yield return new SkillFinding(SkillFindingSeverity.Block, file, $"invisible, control or bidirectional characters ({hidden})");
         }
 
         if (RawIpUrl().IsMatch(content))
@@ -127,9 +127,6 @@ public static partial class SkillScanner
 
     [GeneratedRegex(@"base64\s+(-d|--decode)[^\n]*\|\s*(sh|bash|python3?)|FromBase64String[^\n]*(Invoke-Expression|iex)", RegexOptions.IgnoreCase)]
     private static partial Regex EncodedExec();
-
-    [GeneratedRegex(@"[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]|\uDB40[\uDC00-\uDC7F]")]
-    private static partial Regex HiddenCharacters();
 
     [GeneratedRegex(@"https?://\d{1,3}(\.\d{1,3}){3}")]
     private static partial Regex RawIpUrl();

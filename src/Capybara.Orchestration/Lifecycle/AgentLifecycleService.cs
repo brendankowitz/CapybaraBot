@@ -21,7 +21,8 @@ namespace Capybara.Orchestration.Lifecycle;
 /// and a new id is refused while <c>{state}/agents/{id}</c> still exists so it cannot inherit a previous agent's state.
 /// </para>
 /// <para>
-/// Archive and delete also drop the agent's routines and remove it from other agents' peer lists, then await every
+/// Archive and delete also drop the agent's routines and its <c>rules.yaml</c> entries, remove it from other agents'
+/// peer lists, then await every
 /// <see cref="IAgentLifecycleObserver"/> (grant revoke, unschedule, runtime stop). Delete finally removes
 /// <c>{state}/agents/{id}</c>. Memory is owned by the memory store; a memory observer is expected to clear
 /// <c>/agents/{id}</c>.
@@ -131,8 +132,8 @@ public sealed partial class AgentLifecycleService(
     }
 
     /// <summary>
-    /// Moves the agent's config to <c>agents/_archive/</c> together with its routines, so it stops running but can be
-    /// restored by hand. Runtime state is kept.
+    /// Moves the agent's config to <c>agents/_archive/</c> together with its routines and agent-scoped rules, so it
+    /// stops running but can be restored by hand. Staged skill proposals are dropped. Runtime state is kept.
     /// </summary>
     /// <exception cref="UnauthorizedAccessException"><paramref name="by"/> is not a human.</exception>
     /// <exception cref="KeyNotFoundException"><paramref name="agent"/> is not a declared agent.</exception>
@@ -145,26 +146,40 @@ public sealed partial class AgentLifecycleService(
             ? $"{agent}-{time.GetUtcNow().ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture)}"
             : agent.Value;
 
-        List<string> routines = [];
+        var removed = FleetRemoval.None;
         var result = await config.ApplyAsync(
             root =>
             {
                 var archive = Path.Combine(ConfigTree.AgentsDirectory(root), ArchiveFolder, archiveName);
                 Directory.CreateDirectory(Path.GetDirectoryName(archive)!);
                 Directory.Move(RequireFolder(root, agent), archive);
-                var removed = RemoveFromFleet(root, agent);
-                ConfigTree.WriteAtomic(Path.Combine(archive, ConfigTree.RoutinesFile), YamlEditor.Serialize(new YamlSequenceNode(removed)));
-                routines = [.. removed.Select(r => YamlEditor.GetScalar(r, "id")).OfType<string>()];
+                var pending = Path.Combine(archive, "skills", ConfigTree.PendingSkillsFolder);
+                if (Directory.Exists(pending))
+                {
+                    Directory.Delete(pending, recursive: true);
+                }
+
+                removed = RemoveFromFleet(root, agent);
+                ConfigTree.WriteAtomic(Path.Combine(archive, ConfigTree.RoutinesFile), YamlEditor.Serialize(new YamlSequenceNode(removed.Routines)));
+                if (removed.Rules.Count > 0)
+                {
+                    ConfigTree.WriteAtomic(Path.Combine(archive, ConfigTree.RulesFile), YamlEditor.Serialize(new YamlSequenceNode(removed.Rules)));
+                }
             },
             $"Archive agent {agent} ({by.Name})",
             cancellationToken);
 
-        return await CompleteRemovalAsync(result, new AgentRemoval(agent, AgentRemovalKind.Archived, definition.Grants, routines, by.Name), by, $"to {ArchiveFolder}/{archiveName}");
+        return await CompleteRemovalAsync(
+            result,
+            new AgentRemoval(agent, AgentRemovalKind.Archived, definition.Grants, removed.RoutineIds, by.Name),
+            by,
+            $"to {ArchiveFolder}/{archiveName}, {removed.Rules.Count} agent rule(s) archived");
     }
 
     /// <summary>
-    /// Deletes the agent: removes its config and routines, drops it from peer lists, awaits observers (grant revoke,
-    /// unschedule, runtime stop), then deletes <c>{state}/agents/{id}</c>.
+    /// Deletes the agent: removes its config, routines and the <c>rules.yaml</c> entries scoped exactly to it (so a
+    /// later agent with the same id inherits none of them), drops it from peer lists, awaits observers (grant revoke,
+    /// unschedule, runtime stop, stale proposals), then deletes <c>{state}/agents/{id}</c>.
     /// </summary>
     /// <exception cref="UnauthorizedAccessException"><paramref name="by"/> is not a human.</exception>
     /// <exception cref="KeyNotFoundException"><paramref name="agent"/> is not a declared agent.</exception>
@@ -173,17 +188,21 @@ public sealed partial class AgentLifecycleService(
     {
         await EnsureHumanAsync(by, "delete an agent", agent, cancellationToken);
         var definition = Require(agent);
-        List<string> routines = [];
+        var removed = FleetRemoval.None;
         var result = await config.ApplyAsync(
             root =>
             {
                 Directory.Delete(RequireFolder(root, agent), recursive: true);
-                routines = [.. RemoveFromFleet(root, agent).Select(r => YamlEditor.GetScalar(r, "id")).OfType<string>()];
+                removed = RemoveFromFleet(root, agent);
             },
             $"Delete agent {agent} ({by.Name})",
             cancellationToken);
 
-        return await CompleteRemovalAsync(result, new AgentRemoval(agent, AgentRemovalKind.Deleted, definition.Grants, routines, by.Name), by, null);
+        return await CompleteRemovalAsync(
+            result,
+            new AgentRemoval(agent, AgentRemovalKind.Deleted, definition.Grants, removed.RoutineIds, by.Name),
+            by,
+            $"{removed.Rules.Count} agent rule(s) removed");
     }
 
     /// <summary>
@@ -239,8 +258,8 @@ public sealed partial class AgentLifecycleService(
             : throw new AggregateException($"Agent {removal.Agent} was {decision} from the config, but cleanup failed.", failures);
     }
 
-    /// <summary>Removes the agent's routines and its entries in other agents' peer lists; returns the removed routines.</summary>
-    private static List<YamlMappingNode> RemoveFromFleet(string root, AgentId agent)
+    /// <summary>Removes the agent's routines, its agent-scoped rules and its entries in other agents' peer lists.</summary>
+    private static FleetRemoval RemoveFromFleet(string root, AgentId agent)
     {
         var (original, routines) = ConfigTree.ReadRoutines(root);
         var owned = ConfigTree.RoutinesOwnedBy(routines, agent.Value).ToList();
@@ -259,7 +278,7 @@ public sealed partial class AgentLifecycleService(
             }
         }
 
-        return owned;
+        return new FleetRemoval(owned, ConfigTree.RemoveRulesFor(root, agent.Value));
     }
 
     /// <summary>Returns whether a peer entry was removed; the file is only rewritten when it was.</summary>
@@ -388,4 +407,12 @@ public sealed partial class AgentLifecycleService(
 
     [GeneratedRegex("^[a-z0-9][a-z0-9-]{0,63}$", RegexOptions.CultureInvariant)]
     private static partial Regex TemplateName();
+
+    /// <summary>What <see cref="RemoveFromFleet"/> took out of <c>routines.yaml</c> and <c>rules.yaml</c>.</summary>
+    private sealed record FleetRemoval(IReadOnlyList<YamlMappingNode> Routines, IReadOnlyList<YamlMappingNode> Rules)
+    {
+        public static readonly FleetRemoval None = new([], []);
+
+        public IReadOnlyList<string> RoutineIds => [.. Routines.Select(r => YamlEditor.GetScalar(r, "id")).OfType<string>()];
+    }
 }

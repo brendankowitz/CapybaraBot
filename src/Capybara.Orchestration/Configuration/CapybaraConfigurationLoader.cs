@@ -25,6 +25,7 @@ public static class CapybaraConfigurationLoader
 {
     private static readonly IDeserializer Yaml = new DeserializerBuilder()
         .WithNamingConvention(CamelCaseNamingConvention.Instance)
+        .WithDuplicateKeyChecking()
         .Build();
 
     public static CapybaraConfiguration Load(string root)

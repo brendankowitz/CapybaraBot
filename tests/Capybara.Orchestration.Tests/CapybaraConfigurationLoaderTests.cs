@@ -51,4 +51,19 @@ public sealed class CapybaraConfigurationLoaderTests
 
         Assert.True(ex.Errors.Count >= 3, string.Join('\n', ex.Errors));
     }
+
+    [Theory]
+    [InlineData("grants: []\n!!str grants: [{connection: gmail, operations: [send]}]")]
+    [InlineData("grants: []\n!foo grants: [{connection: gmail, operations: [send]}]")]
+    [InlineData("grants: []\ngrants: [{connection: gmail, operations: [send]}]")]
+    public void Duplicate_keys_fail_closed_even_when_tagged(string grants)
+    {
+        using var dir = new TempDirectory();
+        var agentDir = Directory.CreateDirectory(Path.Combine(dir.Path, "agents", "ea")).FullName;
+        File.WriteAllText(Path.Combine(agentDir, "agent.yaml"), "id: ea\nname: EA\njob: assistant\ntrifecta: { privateData: true }\n" + grants + "\n");
+
+        var ex = Assert.Throws<CapybaraConfigurationException>(() => CapybaraConfigurationLoader.Load(dir.Path));
+
+        Assert.Contains(ex.Errors, e => e.Contains("uplicate", StringComparison.OrdinalIgnoreCase));
+    }
 }

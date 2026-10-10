@@ -1,5 +1,6 @@
 using System.Text;
 using YamlDotNet.Core;
+using YamlDotNet.Core.Events;
 using YamlDotNet.RepresentationModel;
 
 namespace Capybara.Orchestration.Configuration;
@@ -61,17 +62,84 @@ internal static class YamlEditor
     public static bool NodesEqual(YamlNode? a, YamlNode? b) =>
         (a is null && b is null) || (a is not null && b is not null && Serialize(a) == Serialize(b));
 
-    /// <summary>Like <see cref="NodesEqual"/>, but an absent key, an empty scalar and an empty collection are all equal.</summary>
-    public static bool EquivalentOrEmpty(YamlNode? a, YamlNode? b) => (IsEmpty(a) && IsEmpty(b)) || NodesEqual(a, b);
-
-    private static bool IsEmpty(YamlNode? node) => node switch
+    /// <summary>
+    /// Agent-authored YAML must be plain so that what the reviewer reads is what the loader sees: one document, no
+    /// directives, no tags, anchors or aliases, and every mapping key a plain scalar. Tagged or quoted keys
+    /// (<c>!!str grants:</c>) compare unequal to plain ones in the node model but bind to the same property in the
+    /// deserializer. Returns the first problem, or null.
+    /// </summary>
+    public static string? FindUnsafeSyntax(string text)
     {
-        null => true,
-        YamlScalarNode scalar => string.IsNullOrEmpty(scalar.Value) || scalar.Value is "~" or "null",
-        YamlSequenceNode sequence => sequence.Children.Count == 0,
-        YamlMappingNode mapping => mapping.Children.Count == 0,
-        _ => false,
-    };
+        var parser = new Parser(new StringReader(text));
+        var documents = 0;
+
+        // One entry per open collection: null for a sequence, otherwise whether a mapping expects a key next.
+        var open = new Stack<bool?>();
+        try
+        {
+            while (parser.MoveNext())
+            {
+                switch (parser.Current)
+                {
+                    case DocumentStart start:
+                        if (++documents > 1)
+                        {
+                            return "only one YAML document is allowed";
+                        }
+
+                        if (start.Version is not null)
+                        {
+                            return "YAML directives are not allowed";
+                        }
+
+                        break;
+                    case AnchorAlias:
+                        return "YAML aliases are not allowed";
+                    case NodeEvent node:
+                        if (!node.Anchor.IsEmpty)
+                        {
+                            return "YAML anchors are not allowed";
+                        }
+
+                        if (!node.Tag.IsEmpty)
+                        {
+                            return $"YAML tags are not allowed ('{node.Tag}')";
+                        }
+
+                        if (open.TryPeek(out var expectsKey) && expectsKey is { } isKey)
+                        {
+                            if (isKey && node is not Scalar { Style: ScalarStyle.Plain })
+                            {
+                                return "mapping keys must be plain, unquoted scalars";
+                            }
+
+                            open.Pop();
+                            open.Push(!isKey);
+                        }
+
+                        if (node is MappingStart)
+                        {
+                            open.Push(true);
+                        }
+                        else if (node is SequenceStart)
+                        {
+                            open.Push(null);
+                        }
+
+                        break;
+                    case MappingEnd or SequenceEnd:
+                        open.Pop();
+                        break;
+                }
+            }
+        }
+        catch (YamlException ex)
+        {
+            return ex.Message;
+        }
+
+        return null;
+    }
 
     /// <summary>Parses a routines.yaml sequence; an empty file is an empty sequence.</summary>
     public static YamlSequenceNode ParseSequence(string text) =>

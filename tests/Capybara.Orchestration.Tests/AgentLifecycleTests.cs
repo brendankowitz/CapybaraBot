@@ -1,6 +1,8 @@
 using Capybara.Contracts.Agents;
+using Capybara.Contracts.Proposals;
 using Capybara.Orchestration.Configuration;
 using Capybara.Orchestration.Lifecycle;
+using Capybara.Orchestration.Proposals;
 using Capybara.Orchestration.Skills;
 
 namespace Capybara.Orchestration.Tests;
@@ -69,6 +71,56 @@ public sealed class AgentLifecycleTests : IDisposable
 
         Assert.Equal(1, outcomes.Count(applied => applied));
         Assert.Single(_fixture.Host.Current.Routines, r => r.Owner == gamma);
+    }
+
+    [Fact]
+    public async Task Delete_removes_rules_scoped_to_the_agent()
+    {
+        var service = NewService();
+
+        await service.DeleteAsync(Alpha, User, Ct);
+
+        var rules = _fixture.Host.Current.Rules;
+        Assert.DoesNotContain(rules, r => r.Agent == "alpha");
+        Assert.Contains(rules, r => r.Agent == "beta");
+        Assert.Contains(rules, r => r.Agent == "*");
+        Assert.StartsWith("# Rules header.", _fixture.Read("rules.yaml"), StringComparison.Ordinal);
+        Assert.Contains(_fixture.Audit.Entries, e => e.Decision == "deleted" && e.Detail!.Contains("1 agent rule(s) removed", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Archive_moves_rules_aside_and_drops_staged_skills()
+    {
+        _fixture.Write("agents/alpha/skills/pending/draft/SKILL.md", ConfigFixture.ValidSkill);
+        var service = NewService();
+
+        await service.ArchiveAsync(Alpha, User, Ct);
+
+        Assert.DoesNotContain(_fixture.Host.Current.Rules, r => r.Agent == "alpha");
+        Assert.Contains("email_read", _fixture.Read("agents/_archive/alpha/rules.yaml"), StringComparison.Ordinal);
+        Assert.False(Directory.Exists(_fixture.PathOf("agents/_archive/alpha/skills/pending")));
+    }
+
+    [Fact]
+    public async Task Removing_an_agent_makes_its_pending_proposals_stale_for_a_successor_with_the_same_id()
+    {
+        using var proposals = new ProposalService(new FileProposalStore(Path.Combine(_fixture.StateRoot, "proposals")), _fixture.Host, _fixture.Audit, _fixture.Time);
+        var soul = await proposals.ProposeAsync(Alpha, ProposalKind.Soul, null, "Old alpha's wish.\n", "x", Ct);
+        var skill = await proposals.ProposeAsync(Alpha, ProposalKind.Skill, "triage", ConfigFixture.ValidSkill, "x", Ct);
+        var other = await proposals.ProposeAsync(Beta, ProposalKind.Soul, null, "Beta.\n", "x", Ct);
+        var service = new AgentLifecycleService(_fixture.Host, _fixture.StateRoot, [_observer, proposals], _fixture.Audit, _fixture.Time);
+
+        await service.DeleteAsync(Alpha, User, Ct);
+
+        Assert.Equal(ProposalStatus.Stale, (await proposals.GetAsync(soul.Id, Ct))!.Status);
+        Assert.Equal(ProposalStatus.Stale, (await proposals.GetAsync(skill.Id, Ct))!.Status);
+        Assert.Equal(ProposalStatus.Pending, (await proposals.GetAsync(other.Id, Ct))!.Status);
+
+        // A new agent reusing the id cannot be handed the old agent's proposals.
+        _fixture.Write("templates/helper/agent.yaml", "id: template\nname: Template\njob: Helps.\n");
+        Assert.True((await service.CreateFromTemplateAsync("helper", Alpha, "New Alpha", User, Ct)).Applied);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => proposals.DecideAsync(soul.Id, approve: true, User, Ct).AsTask());
+        Assert.False(File.Exists(_fixture.PathOf("agents/alpha/SOUL.md")));
     }
 
     [Fact]

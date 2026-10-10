@@ -14,12 +14,16 @@ namespace Capybara.Orchestration.Tests;
 /// </summary>
 internal sealed class ConfigFixture : IDisposable
 {
+    /// <summary><see cref="AlphaYaml"/> with LF line endings, for string surgery in tests.</summary>
+    public static string Alpha => AlphaYaml.ReplaceLineEndings("\n");
+
     public const string AlphaYaml = """
         # Alpha header comment.
         id: alpha
         name: Alpha
         job: Reads mail.
         tools: [list_agents, email_read]
+        approvalRequiredTools: [email_read]
         trifecta:
           untrustedInput: true
           privateData: true
@@ -56,6 +60,18 @@ internal sealed class ConfigFixture : IDisposable
           prompt: Digest.
         """;
 
+    public const string RulesYaml = """
+        # Rules header.
+        - effect: allow
+          agent: alpha
+          tool: email_read
+        - effect: deny
+          agent: beta
+          tool: shell
+        - effect: ask
+          tool: email_*
+        """;
+
     public const string ValidSkill = """
         ---
         name: triage
@@ -86,6 +102,7 @@ internal sealed class ConfigFixture : IDisposable
         Write("agents/alpha/AGENTS.md", "Never send mail.\n");
         Write("agents/beta/agent.yaml", BetaYaml);
         Write("routines.yaml", RoutinesYaml);
+        Write("rules.yaml", RulesYaml);
 
         var initial = CapybaraConfigurationLoader.Load(ConfigRoot);
         KillSwitch = new KillSwitch(Time);

@@ -112,6 +112,24 @@ public sealed class CapybaraConfigurationHost(
 
     public void Dispose() => _writeLock.Dispose();
 
+    /// <summary>
+    /// Runs <paramref name="write"/> on the live tree under the write lock without validating, reloading or
+    /// committing. Only for files the loader ignores and git excludes, such as staged skills under
+    /// <c>skills/pending/</c>, so no validation can observe a half-written file.
+    /// </summary>
+    internal async ValueTask WriteUnversionedAsync(Action<string> write, CancellationToken cancellationToken)
+    {
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            write(Root);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
     private IReadOnlyList<string> ValidateCore(Action<string> edit)
     {
         var scratch = Path.Combine(Path.GetTempPath(), "capybara-config-" + Guid.NewGuid().ToString("N"));

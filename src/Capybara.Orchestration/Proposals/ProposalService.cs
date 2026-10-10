@@ -5,6 +5,7 @@ using Capybara.Contracts.Agents;
 using Capybara.Contracts.Diagnostics;
 using Capybara.Contracts.Proposals;
 using Capybara.Orchestration.Configuration;
+using Capybara.Orchestration.Lifecycle;
 using Capybara.Orchestration.Skills;
 using Capybara.Policy.Audit;
 using YamlDotNet.Core;
@@ -19,31 +20,38 @@ namespace Capybara.Orchestration.Proposals;
 /// applies it through <see cref="CapybaraConfigurationHost.ApplyAsync"/> (atomic writes, reload, git commit).
 /// </summary>
 /// <remarks>
-/// Grants, connections and channels are never proposable (FR-CON-07). An agent can only target its own files: the
-/// target is derived from the proposing agent's id, never from a path it supplies. Thread-safe: proposals and
-/// decisions are serialized.
+/// <para>
+/// Two independent guards keep a proposal inside its scope. Agent-authored YAML must be plain (no tags, anchors,
+/// aliases or quoted keys) and all text must be free of invisible or control characters, so the reviewed diff is what
+/// gets parsed. And every apply, on the scratch copy and on the live tree, compares the configuration the loader
+/// produces before and after (<see cref="ProposalScope"/>): grants, connections, channels and every other protected
+/// field are judged on loaded values, not on text (FR-CON-07).
+/// </para>
+/// <para>
+/// Register this as an <see cref="IAgentLifecycleObserver"/> so an archived or deleted agent's pending proposals go
+/// stale and cannot apply to a later agent with the same id. Thread-safe: proposals and decisions are serialized; the
+/// service lock is always taken before the host's write lock.
+/// </para>
 /// </remarks>
-public sealed partial class ProposalService(IProposalStore store, CapybaraConfigurationHost config, IAuditLog audit, TimeProvider time) : IDisposable
+public sealed partial class ProposalService(IProposalStore store, CapybaraConfigurationHost config, IAuditLog audit, TimeProvider time)
+    : IAgentLifecycleObserver, IDisposable
 {
     /// <summary>Caps how many undecided proposals one agent can put in the human's inbox.</summary>
     public const int MaxPendingPerAgent = 20;
 
     public const int MaxRationaleLength = 2000;
 
-    /// <summary><c>agent.yaml</c> keys a proposal may not change: grants and anything that is a connection or channel.</summary>
-    private static readonly string[] ProtectedAgentKeys = ["grants", "connections", "channels", "mcpServers", "provider"];
-
     private const string AuditKind = "config_change";
 
-    /// <summary>Staging folder for skill proposals inside an agent's skill tier (FR-SKL-03).</summary>
-    private const string PendingFolder = "pending";
+    /// <summary>Longest agent-supplied value copied into an audit line.</summary>
+    private const int MaxAuditValue = 64;
 
     private readonly SemaphoreSlim _lock = new(1, 1);
 
     /// <summary>Raised after a proposal is recorded, so it can be pushed to the approval inbox.</summary>
     public event EventHandler<ChangeProposal>? Proposed;
 
-    /// <summary>Raised after a human settles a proposal (any terminal status).</summary>
+    /// <summary>Raised after a proposal reaches a terminal status (decided by a human, or stale because its agent was removed).</summary>
     public event EventHandler<ChangeProposal>? Decided;
 
     /// <summary>
@@ -76,13 +84,18 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
             }
             catch (ProposalRejectedException ex)
             {
-                await audit.AppendAsync(new AuditRecord(AuditKind, "proposal_rejected", agent.Value, Detail: $"{kind} {name}: {ex.Message}"), cancellationToken);
+                await audit.AppendAsync(
+                    new AuditRecord(AuditKind, "proposal_rejected", agent.Value, Detail: $"{kind} {Clip(name)}: {Clip(ex.Message, 512)}"),
+                    cancellationToken);
                 throw;
             }
 
             if (kind == ProposalKind.Skill)
             {
-                ConfigTree.WriteAtomic(Path.Combine(PendingSkillDirectory(config.Root, agent.Value, proposal.Name!), "SKILL.md"), proposal.ProposedContent);
+                // Under the host's write lock, so a concurrent validation copy never sees a half-written file.
+                await config.WriteUnversionedAsync(
+                    root => ConfigTree.WriteAtomic(Path.Combine(PendingSkillDirectory(root, agent.Value, proposal.Name!), "SKILL.md"), proposal.ProposedContent),
+                    cancellationToken);
             }
 
             await store.SaveAsync(proposal, cancellationToken);
@@ -98,9 +111,10 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
     }
 
     /// <summary>
-    /// Settles a pending proposal. Only a human may decide. On approval the base hash is re-checked
-    /// (<see cref="ProposalStatus.Stale"/>), the resulting config is validated (<see cref="ProposalStatus.Invalid"/>,
-    /// nothing written), then the change is written, reloaded, committed and audited (<see cref="ProposalStatus.Applied"/>).
+    /// Settles a pending proposal. Only a human may decide. On approval the proposing agent must still be declared and
+    /// the base hash must match (<see cref="ProposalStatus.Stale"/>), the resulting config must validate and stay in
+    /// scope (<see cref="ProposalStatus.Invalid"/>, nothing written); then the change is written, reloaded, committed
+    /// and audited (<see cref="ProposalStatus.Applied"/>).
     /// </summary>
     /// <exception cref="UnauthorizedAccessException"><paramref name="decidedBy"/> is not a human.</exception>
     /// <exception cref="KeyNotFoundException">No proposal has this id.</exception>
@@ -111,7 +125,7 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
         using var activity = CapybaraTelemetry.Orchestration.StartActivity("proposal.decide");
         if (!decidedBy.IsHuman)
         {
-            await audit.AppendAsync(new AuditRecord(AuditKind, "denied", decidedBy.Name, Detail: $"proposal {id}: decision by a non-human principal"), cancellationToken);
+            await audit.AppendAsync(new AuditRecord(AuditKind, "denied", decidedBy.Name, Detail: $"proposal {Clip(id)}: decision by a non-human principal"), cancellationToken);
             decidedBy.EnsureHuman("decide a proposal");
         }
 
@@ -128,14 +142,10 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
             var (status, error) = approve ? await ApproveAsync(proposal, decidedBy, cancellationToken) : (ProposalStatus.Rejected, null);
             if (proposal.Kind == ProposalKind.Skill && status != ProposalStatus.Applied)
             {
-                RemovePendingSkill(config.Root, proposal.Agent.Value, proposal.Name!);
+                await config.WriteUnversionedAsync(root => RemovePendingSkill(root, proposal.Agent.Value, proposal.Name!), cancellationToken);
             }
 
-            decided = proposal with { Status = status, DecidedBy = decidedBy.Name, DecidedAt = time.GetUtcNow(), Error = error };
-            await store.SaveAsync(decided, cancellationToken);
-            await audit.AppendAsync(
-                new AuditRecord(AuditKind, status.ToString().ToLowerInvariant(), proposal.Agent.Value, Detail: $"proposal {id}: {proposal.Kind} {proposal.TargetPath} by {decidedBy.Name}{(error is null ? string.Empty : ": " + error)}"),
-                cancellationToken);
+            decided = await SettleAsync(proposal, status, decidedBy.Name, error, cancellationToken);
             activity?.SetTag("capybara.proposal.status", status.ToString());
         }
         finally
@@ -164,7 +174,51 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
         return [.. all.OrderBy(p => p.CreatedAt).ThenBy(p => p.Id, StringComparer.Ordinal)];
     }
 
+    /// <summary>
+    /// FR-AGT-07: an archived or deleted agent's pending proposals become <see cref="ProposalStatus.Stale"/>, so they can
+    /// never apply to a later agent that reuses the id. Idempotent.
+    /// </summary>
+    public async ValueTask OnAgentRemovedAsync(AgentRemoval removal, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(removal);
+        var settled = new List<ChangeProposal>();
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            var reason = $"agent {removal.Agent} was {removal.Kind.ToString().ToLowerInvariant()}";
+            foreach (var proposal in (await ListAsync(ProposalStatus.Pending, cancellationToken)).Where(p => p.Agent == removal.Agent))
+            {
+                if (proposal.Kind == ProposalKind.Skill)
+                {
+                    await config.WriteUnversionedAsync(root => RemovePendingSkill(root, proposal.Agent.Value, proposal.Name!), cancellationToken);
+                }
+
+                settled.Add(await SettleAsync(proposal, ProposalStatus.Stale, removal.RemovedBy, reason, cancellationToken));
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+
+        settled.ForEach(p => Decided?.Invoke(this, p));
+    }
+
     public void Dispose() => _lock.Dispose();
+
+    private async ValueTask<ChangeProposal> SettleAsync(ChangeProposal proposal, ProposalStatus status, string decidedBy, string? error, CancellationToken cancellationToken)
+    {
+        var decided = proposal with { Status = status, DecidedBy = decidedBy, DecidedAt = time.GetUtcNow(), Error = error };
+        await store.SaveAsync(decided, cancellationToken);
+        await audit.AppendAsync(
+            new AuditRecord(
+                AuditKind,
+                status.ToString().ToLowerInvariant(),
+                proposal.Agent.Value,
+                Detail: $"proposal {proposal.Id}: {proposal.Kind} {proposal.TargetPath} by {decidedBy}{(error is null ? string.Empty : ": " + Clip(error, 1024))}"),
+            cancellationToken);
+        return decided;
+    }
 
     private async ValueTask<ChangeProposal> CreateAsync(AgentId agent, ProposalKind kind, string? name, string content, string rationale, CancellationToken cancellationToken)
     {
@@ -181,6 +235,15 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
         if (Encoding.UTF8.GetByteCount(content) > SkillScanner.MaxFileBytes)
         {
             throw new ProposalRejectedException($"Proposed content is larger than {SkillScanner.MaxFileBytes} bytes.");
+        }
+
+        // FR-SAF-11: the human reviews a diff, so nothing in it may be invisible or act on the terminal.
+        foreach (var (what, text) in new[] { ("content", content), ("rationale", rationale), ("name", name ?? string.Empty) })
+        {
+            if (ReviewableText.FindUnsafe(text) is { } problem)
+            {
+                throw new ProposalRejectedException($"The {what} contains a character that cannot be reviewed: {problem}.");
+            }
         }
 
         name = kind is ProposalKind.Routine or ProposalKind.Skill ? name?.Trim() : null;
@@ -235,11 +298,11 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
             throw new ProposalRejectedException("The target changed while the proposal was being made; retry.", ex);
         }
 
-        return errors.Count == 0 ? draft : throw new ProposalRejectedException("The change would not validate: " + string.Join("; ", errors));
+        return errors.Count == 0 ? draft : throw new ProposalRejectedException("The change is not allowed: " + string.Join("; ", errors));
     }
 
     /// <summary>Maps a proposal to its target path (relative to the config root) and the exact content that will be written.</summary>
-    private (string TargetPath, string Content) Resolve(AgentId agent, ProposalKind kind, string? name, string content)
+    private static (string TargetPath, string Content) Resolve(AgentId agent, ProposalKind kind, string? name, string content)
     {
         var dir = $"agents/{agent.Value}";
         switch (kind)
@@ -261,32 +324,24 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
         }
     }
 
-    private void CheckAgentConfig(AgentId agent, string content)
+    /// <summary>Early, readable rejections; the authoritative scope check is <see cref="ProposalScope"/> at apply time.</summary>
+    private static void CheckAgentConfig(AgentId agent, string content)
     {
-        var proposed = ParseMapping(content, "agent.yaml");
+        var proposed = ParsePlainMapping(content, "agent.yaml");
         if (YamlEditor.GetScalar(proposed, "id") != agent.Value)
         {
             throw new ProposalRejectedException($"agent.yaml must keep id '{agent}'; an agent can only propose changes to its own files.");
         }
-
-        var current = YamlEditor.ParseMapping(File.ReadAllText(ConfigTree.AgentYaml(config.Root, agent.Value)));
-        foreach (var key in ProtectedAgentKeys)
-        {
-            if (!YamlEditor.EquivalentOrEmpty(YamlEditor.Get(current, key), YamlEditor.Get(proposed, key)))
-            {
-                throw new ProposalRejectedException($"'{key}' cannot be changed by a proposal; connections, grants and channels are changed only by the user.");
-            }
-        }
     }
 
-    private YamlMappingNode CheckRoutine(AgentId agent, string? name, string content)
+    private static YamlMappingNode CheckRoutine(AgentId agent, string? name, string content)
     {
         if (string.IsNullOrEmpty(name))
         {
             throw new ProposalRejectedException("A routine proposal needs the routine id as its name.");
         }
 
-        var routine = ParseMapping(content, "routine");
+        var routine = ParsePlainMapping(content, "routine");
         if (YamlEditor.GetScalar(routine, "id") != name)
         {
             throw new ProposalRejectedException($"The routine's id must be '{name}'.");
@@ -297,20 +352,19 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
             throw new ProposalRejectedException($"The routine's owner must be '{agent}'; an agent can only propose its own routines.");
         }
 
-        var existing = ConfigTree.FindRoutine(ConfigTree.ReadRoutines(config.Root).Routines, name);
-        if (existing is not null && YamlEditor.GetScalar(existing, "owner") != agent.Value)
-        {
-            throw new ProposalRejectedException($"Routine '{name}' belongs to another agent.");
-        }
-
         return routine;
     }
 
     private static void CheckSkill(string? name, string content)
     {
-        if (name is null || name == PendingFolder || !SkillName().IsMatch(name))
+        if (name is null || name == ConfigTree.PendingSkillsFolder || !SkillName().IsMatch(name))
         {
             throw new ProposalRejectedException("A skill proposal needs a name of lower-case letters, digits and dashes.");
+        }
+
+        if (!SkillCardReader.TryReadFrontmatter(content, out var front) || front.Name != name)
+        {
+            throw new ProposalRejectedException($"The skill's frontmatter name must be '{name}', matching its folder.");
         }
 
         var findings = SkillScanner.ScanSkill(content);
@@ -322,6 +376,11 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
 
     private async ValueTask<(ProposalStatus Status, string? Error)> ApproveAsync(ChangeProposal proposal, ConfigPrincipal decidedBy, CancellationToken cancellationToken)
     {
+        if (config.Current.Agents.All(a => a.Id != proposal.Agent))
+        {
+            return (ProposalStatus.Stale, $"agent {proposal.Agent} is no longer declared.");
+        }
+
         try
         {
             var result = await config.ApplyAsync(
@@ -343,8 +402,10 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
 
     /// <summary>
     /// Writes <paramref name="proposal"/> into the config tree at <paramref name="root"/> (a scratch copy or the live
-    /// tree). Throws <see cref="StaleProposalException"/> when the target no longer matches the base hash, unless it
-    /// already holds the proposed content (re-applying after a crash is a no-op).
+    /// tree), then checks on the loaded configuration that nothing outside the proposal's scope changed. Throws
+    /// <see cref="StaleProposalException"/> when the target no longer matches the base hash (unless it already holds
+    /// the proposed content, so re-applying after a crash is a no-op) and <see cref="CapybaraConfigurationException"/>
+    /// when the result is invalid or out of scope.
     /// </summary>
     private static void ApplyTo(string root, ChangeProposal proposal)
     {
@@ -354,6 +415,7 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
             throw new StaleProposalException($"{proposal.TargetPath} changed since the proposal was made.");
         }
 
+        var before = CapybaraConfigurationLoader.Load(root);
         switch (proposal.Kind)
         {
             case ProposalKind.Routine:
@@ -377,6 +439,12 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
             default:
                 ConfigTree.WriteAtomic(Path.Combine(root, proposal.TargetPath), proposal.ProposedContent);
                 break;
+        }
+
+        var violations = ProposalScope.Violations(before, CapybaraConfigurationLoader.Load(root), proposal);
+        if (violations.Count > 0)
+        {
+            throw new CapybaraConfigurationException(violations);
         }
     }
 
@@ -406,8 +474,13 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
         ? ConfigTree.FindRoutine(ConfigTree.ReadRoutines(root).Routines, proposal.Name!) is { } routine ? YamlEditor.Serialize(routine) : null
         : ConfigTree.ReadOptional(Path.Combine(root, proposal.TargetPath));
 
-    private static YamlMappingNode ParseMapping(string content, string what)
+    private static YamlMappingNode ParsePlainMapping(string content, string what)
     {
+        if (YamlEditor.FindUnsafeSyntax(content) is { } problem)
+        {
+            throw new ProposalRejectedException($"The proposed {what} must be plain YAML: {problem}.");
+        }
+
         try
         {
             return YamlEditor.ParseMapping(content);
@@ -421,8 +494,15 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
     private static string Hash(string? content) =>
         content is null ? string.Empty : Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(content)));
 
+    /// <summary>Agent-supplied text in audit lines: escaped and bounded, so it cannot forge or flood entries.</summary>
+    private static string Clip(string? value, int max = MaxAuditValue)
+    {
+        var escaped = ReviewableText.Escape(value ?? string.Empty);
+        return escaped.Length <= max ? escaped : escaped[..max] + "...";
+    }
+
     private static string PendingSkillDirectory(string root, string agent, string name) =>
-        Path.Combine(ConfigTree.SkillsDirectory(root, agent), PendingFolder, name);
+        Path.Combine(ConfigTree.SkillsDirectory(root, agent), ConfigTree.PendingSkillsFolder, name);
 
     private static void RemovePendingSkill(string root, string agent, string name)
     {
