@@ -45,6 +45,9 @@ public sealed record AgentDefinition
 
     public AgentBudget Budget { get; init; } = new();
 
+    /// <summary>Whether the agent may read <c>/user/</c> memory. The research agent may not (no private-data leg).</summary>
+    public bool ReadsUserMemory { get; init; }
+
     public bool AcceptsConsults { get; init; }
 
     public bool AcceptsMessages { get; init; }

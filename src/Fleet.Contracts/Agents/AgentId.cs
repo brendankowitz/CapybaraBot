@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
 namespace Fleet.Contracts.Agents;
@@ -6,6 +7,7 @@ namespace Fleet.Contracts.Agents;
 /// <summary>
 /// A stable logical agent identifier (FR-AGT-01). Lower-case, 2–32 characters, never PII or a conversation id.
 /// </summary>
+[JsonConverter(typeof(AgentIdJsonConverter))]
 public readonly partial record struct AgentId
 {
     private AgentId(string value) => Value = value;

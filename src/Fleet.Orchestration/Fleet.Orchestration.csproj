@@ -5,6 +5,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Fleet.Contracts\Fleet.Contracts.csproj" />
     <ProjectReference Include="..\Fleet.Policy\Fleet.Policy.csproj" />
+    <ProjectReference Include="..\Fleet.Scheduling\Fleet.Scheduling.csproj" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="YamlDotNet" />

@@ -4,5 +4,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Fleet.Contracts\Fleet.Contracts.csproj" />
+    <ProjectReference Include="..\Fleet.Observability\Fleet.Observability.csproj" />
   </ItemGroup>
 </Project>
