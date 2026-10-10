@@ -1,5 +1,53 @@
 @page "/proposals"
-@inject CapybaraApiClient Api
+@inherits CapybaraPage
+
 <h1>Proposals</h1>
-@if (_items is null) { <p>Loading…</p> } else { @foreach (var p in _items) { <article class="card"><h2>@p.Title</h2><pre class="diff">@p.Diff</pre><button @onclick="() => DecideAsync(p.Id, true)">Approve</button><button @onclick="() => DecideAsync(p.Id, false)">Reject</button></article> } }
-@code { private IReadOnlyList<ProposalDto>? _items; protected override async Task OnInitializedAsync() => _items = await Api.GetProposalsAsync(); private async Task DecideAsync(string id, bool approve) { await Api.DecideProposalAsync(id, approve); _items = await Api.GetProposalsAsync(); } }
+<p class="muted">Changes an agent asks a human to review. Diffs are shown as plain text; nothing here is rendered as HTML or markdown.</p>
+<ErrorBanner Message="@Error" />
+@if (_items is null)
+{
+    <p>Loading…</p>
+}
+else if (_items.Count == 0)
+{
+    <p>No proposals.</p>
+}
+else
+{
+    @foreach (var p in _items)
+    {
+        <article class="card" @key="p.Id">
+            <h2>@p.Agent · @p.Kind@(p.Name is null ? string.Empty : " · " + p.Name)</h2>
+            <p class="muted">@p.TargetPath · @p.Status · @p.CreatedAt.ToLocalTime().ToString("g")</p>
+            <p>Rationale: @p.Rationale</p>
+            <DiffView Text="@p.Diff" />
+            @if (!string.IsNullOrEmpty(p.Error)) { <p class="error">@p.Error</p> }
+            @if (p.Status == "Pending")
+            {
+                <button type="button" @onclick="() => DecideAsync(p, approve: true)">Approve</button>
+                <button type="button" class="danger" @onclick="() => DecideAsync(p, approve: false)">Reject</button>
+            }
+            else if (p.DecidedBy is not null)
+            {
+                <p class="muted">Decided by @p.DecidedBy</p>
+            }
+        </article>
+    }
+}
+
+@code {
+    private IReadOnlyList<ProposalDto>? _items;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync() => _items = await TryAsync(() => Api.GetProposalsAsync()) ?? _items;
+
+    private async Task DecideAsync(ProposalDto proposal, bool approve)
+    {
+        ClearError();
+        await TryAsync(() => Api.DecideProposalAsync(proposal.Id, approve));
+
+        // The reload shows the outcome: Applied, Rejected, or Stale/Invalid with its reason.
+        await LoadAsync();
+    }
+}

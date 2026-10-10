@@ -1,4 +1,38 @@
 @page "/audit"
-@inject CapybaraApiClient Api
-<h1>Audit</h1><button @onclick="VerifyAsync">Verify</button><p>@_status</p>
-@code { private string _status = string.Empty; protected override async Task OnInitializedAsync() => await VerifyAsync(); private async Task VerifyAsync() { var v = await Api.VerifyAuditAsync(); _status = v is null ? "Audit endpoint unavailable." : v.Valid ? "Valid" : "Invalid"; } }
+@inherits CapybaraPage
+
+<h1>Audit</h1>
+<ErrorBanner Message="@Error" />
+<button type="button" @onclick="VerifyAsync">Verify hash chain</button>
+<p class="@(_valid == false ? "error" : string.Empty)">@_status</p>
+@if (_entries.Count > 0)
+{
+    <table class="audit">
+        <thead><tr><th>#</th><th>When</th><th>Kind</th><th>Decision</th><th>Agent</th><th>Tool</th><th>Detail</th></tr></thead>
+        <tbody>
+        @foreach (var e in _entries)
+        {
+            <tr><td>@e.Sequence</td><td>@e.At.ToLocalTime().ToString("g")</td><td>@e.Kind</td><td>@e.Decision</td><td>@e.Agent</td><td>@e.Tool</td><td>@e.Detail</td></tr>
+        }
+        </tbody>
+    </table>
+}
+
+@code {
+    private string _status = string.Empty;
+    private bool? _valid;
+    private IReadOnlyList<AuditEntryDto> _entries = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        _entries = await TryAsync(() => Api.GetAuditAsync()) ?? _entries;
+        await VerifyAsync();
+    }
+
+    private async Task VerifyAsync()
+    {
+        var result = await TryAsync(() => Api.VerifyAuditAsync());
+        _valid = result?.Valid;
+        _status = result is null ? "Verification unavailable." : result.Valid ? "Audit chain valid." : "Audit chain INVALID: entries were altered or removed.";
+    }
+}

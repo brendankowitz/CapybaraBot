@@ -1,0 +1,77 @@
+@* Rich approval preview (FR-CLI-02, FR-SAF-04, FR-SAF-07). Every value comes from an agent and is bound as a text node:
+   no MarkupString, no <img>, no <a>, so nothing remote can load or unfurl. *@
+@{
+    var preview = ApprovalPreview.Parse(Approval);
+}
+<article class="card approval @RiskClass">
+    <h2>@Approval.Agent · @Approval.Tool</h2>
+    <p>
+        <span class="badge risk">Risk: @Approval.Risk</span>
+        <span class="muted">expires @Approval.ExpiresAt.ToLocalTime().ToString("t")</span>
+    </p>
+    @if (!string.IsNullOrEmpty(Approval.ReviewerVerdict))
+    {
+        <p class="reviewer">Reviewer: <b>@Approval.ReviewerVerdict</b>@(string.IsNullOrEmpty(Approval.ReviewerRationale) ? string.Empty : " - " + Approval.ReviewerRationale)</p>
+    }
+
+    @switch (preview.Kind)
+    {
+        case "email" when preview.Email is { } email:
+            <section class="email-preview" aria-label="Email preview">
+                <dl>
+                    <dt>To</dt><dd>@email.To</dd>
+                    @if (!string.IsNullOrEmpty(email.Cc)) { <dt>Cc</dt><dd>@email.Cc</dd> }
+                    <dt>Subject</dt><dd>@email.Subject</dd>
+                </dl>
+                <pre class="email-body">@email.BodyText</pre>
+                @if (email.RemoteImagesBlocked > 0 || email.LinksStripped > 0)
+                {
+                    <p class="muted">Not rendered: @email.RemoteImagesBlocked remote image(s), @email.LinksStripped link(s) shown as plain text.</p>
+                }
+            </section>
+            break;
+        case "diff" when preview.Diff is not null:
+            <DiffView Text="@preview.Diff" />
+            break;
+    }
+
+    @if (preview.Truncated)
+    {
+        <p class="warning">Preview was truncated; review carefully.</p>
+        <pre>@preview.Raw</pre>
+    }
+    else if (preview.Args.Count > 0)
+    {
+        <table class="args">
+            <thead><tr><th>Argument</th><th>Value</th></tr></thead>
+            <tbody>
+            @foreach (var arg in preview.Args)
+            {
+                <tr><th scope="row">@arg.Key</th><td><code>@arg.Value</code></td></tr>
+            }
+            </tbody>
+        </table>
+    }
+    else if (preview.Kind == "args")
+    {
+        <pre>@preview.Raw</pre>
+    }
+
+    <div class="actions">
+        <button type="button" @onclick="() => OnDecide.InvokeAsync(ApprovalDecisions.AllowOnce)">Allow once</button>
+        @if (Approval.OffersAlwaysAllow)
+        {
+            <button type="button" @onclick="() => OnDecide.InvokeAsync(ApprovalDecisions.AlwaysAllow)">Always</button>
+        }
+        <button type="button" class="danger" @onclick="() => OnDecide.InvokeAsync(ApprovalDecisions.Deny)">Deny</button>
+    </div>
+</article>
+
+@code {
+    [Parameter, EditorRequired] public ApprovalDto Approval { get; set; } = default!;
+
+    /// <summary>Raised with one of <see cref="ApprovalDecisions"/>.</summary>
+    [Parameter] public EventCallback<string> OnDecide { get; set; }
+
+    private string RiskClass => Approval.Risk.Equals("High", StringComparison.OrdinalIgnoreCase) ? "risk-high" : string.Empty;
+}
