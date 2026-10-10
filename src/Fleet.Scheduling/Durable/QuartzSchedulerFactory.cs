@@ -10,6 +10,10 @@ public sealed class QuartzSchedulerFactory(Fleet.Scheduling.Dispatch.SchedulingO
 {
     public const string TablePrefix = "QRTZ_";
 
+    // Pooling is disabled so that closing a connection (and therefore scheduler shutdown) releases the file handle immediately
+    // instead of leaving it open in the Microsoft.Data.Sqlite pool; scheduling volume is low enough that pooling has no benefit.
+    private string ConnectionString => new SqliteConnectionStringBuilder { DataSource = options.SQLitePath, Pooling = false }.ToString();
+
     public async Task<IScheduler> CreateSchedulerAsync(CancellationToken cancellationToken = default)
     {
         EnsureDatabase();
@@ -25,7 +29,7 @@ public sealed class QuartzSchedulerFactory(Fleet.Scheduling.Dispatch.SchedulingO
             ["quartz.jobStore.useProperties"] = "true",
             ["quartz.jobStore.misfireThreshold"] = "1000",
             ["quartz.dataSource.default.provider"] = "SQLite-Microsoft",
-            ["quartz.dataSource.default.connectionString"] = $"Data Source={options.SQLitePath}",
+            ["quartz.dataSource.default.connectionString"] = ConnectionString,
             ["quartz.threadPool.threadCount"] = Math.Max(2, options.ConcurrencyCap + 1).ToString(System.Globalization.CultureInfo.InvariantCulture),
         };
 
@@ -40,7 +44,7 @@ public sealed class QuartzSchedulerFactory(Fleet.Scheduling.Dispatch.SchedulingO
             Directory.CreateDirectory(directory);
         }
 
-        using var connection = new SqliteConnection($"Data Source={options.SQLitePath}");
+        using var connection = new SqliteConnection(ConnectionString);
         connection.Open();
         var schema = LoadSchema().Replace("\r\n", "\n", StringComparison.Ordinal);
         foreach (var statement in System.Text.RegularExpressions.Regex.Split(schema, @"^--;;$", System.Text.RegularExpressions.RegexOptions.Multiline).Select(x => x.Trim()))

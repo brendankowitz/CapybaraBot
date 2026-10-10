@@ -22,6 +22,7 @@ public sealed class TuiTests : IDisposable
     [Fact]
     public void Token_file_refuses_world_readable_permissions()
     {
+        Assert.SkipUnless(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS(), "Unix file modes are not available on this platform; runs on the Linux target host (FR-CLI-05).");
         var path = Path.Combine(_directory, "token");
         File.WriteAllText(path, "not-a-real-token");
 #pragma warning disable CA1416 // Tests run on the Linux target host used by the TUI.
@@ -34,6 +35,7 @@ public sealed class TuiTests : IDisposable
     [Fact]
     public void Token_file_accepts_0600_permissions()
     {
+        Assert.SkipUnless(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS(), "Unix file modes are not available on this platform; runs on the Linux target host (FR-CLI-05).");
         var path = Path.Combine(_directory, "token");
         File.WriteAllText(path, "not-a-real-token");
 #pragma warning disable CA1416 // Tests run on the Linux target host used by the TUI.

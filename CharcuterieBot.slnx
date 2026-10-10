@@ -1,22 +1,38 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/Fleet.AppHost/Fleet.AppHost.csproj" />
+    <Project Path="src/Fleet.Broker/Fleet.Broker.csproj" />
+    <Project Path="src/Fleet.Channels/Fleet.Channels.csproj" />
+    <Project Path="src/Fleet.Channels.Ntfy/Fleet.Channels.Ntfy.csproj" />
+    <Project Path="src/Fleet.Channels.Telegram/Fleet.Channels.Telegram.csproj" />
+    <Project Path="src/Fleet.Client/Fleet.Client.csproj" />
+    <Project Path="src/Fleet.Connections/Fleet.Connections.csproj" />
     <Project Path="src/Fleet.Contracts/Fleet.Contracts.csproj" />
     <Project Path="src/Fleet.Gateway/Fleet.Gateway.csproj" />
+    <Project Path="src/Fleet.Hosting/Fleet.Hosting.csproj" />
     <Project Path="src/Fleet.Memory/Fleet.Memory.csproj" />
     <Project Path="src/Fleet.Observability/Fleet.Observability.csproj" />
     <Project Path="src/Fleet.Orchestration/Fleet.Orchestration.csproj" />
     <Project Path="src/Fleet.Policy/Fleet.Policy.csproj" />
+    <Project Path="src/Fleet.Pwa/Fleet.Pwa.csproj" />
     <Project Path="src/Fleet.Runtime.Copilot/Fleet.Runtime.Copilot.csproj" />
     <Project Path="src/Fleet.Scheduling/Fleet.Scheduling.csproj" />
+    <Project Path="src/Fleet.Tui/Fleet.Tui.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Fleet.Broker.Tests/Fleet.Broker.Tests.csproj" />
+    <Project Path="tests/Fleet.Channels.Tests/Fleet.Channels.Tests.csproj" />
+    <Project Path="tests/Fleet.Client.Tests/Fleet.Client.Tests.csproj" />
+    <Project Path="tests/Fleet.Connections.Tests/Fleet.Connections.Tests.csproj" />
     <Project Path="tests/Fleet.Contracts.Tests/Fleet.Contracts.Tests.csproj" />
     <Project Path="tests/Fleet.Gateway.Tests/Fleet.Gateway.Tests.csproj" />
+    <Project Path="tests/Fleet.Hosting.Tests/Fleet.Hosting.Tests.csproj" />
     <Project Path="tests/Fleet.Memory.Tests/Fleet.Memory.Tests.csproj" />
     <Project Path="tests/Fleet.Observability.Tests/Fleet.Observability.Tests.csproj" />
     <Project Path="tests/Fleet.Orchestration.Tests/Fleet.Orchestration.Tests.csproj" />
     <Project Path="tests/Fleet.Policy.Tests/Fleet.Policy.Tests.csproj" />
     <Project Path="tests/Fleet.Runtime.Copilot.Tests/Fleet.Runtime.Copilot.Tests.csproj" />
     <Project Path="tests/Fleet.Scheduling.Tests/Fleet.Scheduling.Tests.csproj" />
+    <Project Path="tests/Fleet.Tui.Tests/Fleet.Tui.Tests.csproj" />
   </Folder>
 </Solution>
