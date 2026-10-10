@@ -12,8 +12,6 @@ public sealed class CompositeMemoryStore(WikiStore wiki, IEnumerable<IMemoryProv
 {
     private readonly IReadOnlyList<IMemoryProvider> _providers = [.. providers];
 
-    public IReadOnlyList<PendingUserChange> PendingUserChanges => wiki.PendingUserChanges;
-
     public Task<MemoryPage?> ReadAsync(MemoryAccessContext context, string rawPath, CancellationToken cancellationToken = default) =>
         context.Incognito ? Task.FromResult<MemoryPage?>(null) : wiki.ReadAsync(context, rawPath, cancellationToken);
 
@@ -75,9 +73,6 @@ public sealed class CompositeMemoryStore(WikiStore wiki, IEnumerable<IMemoryProv
 
     public Task<MemoryOperation> MarkValidatedAsync(MemoryAccessContext context, string rawPath, CancellationToken cancellationToken = default) =>
         context.Incognito ? Task.FromResult(MemoryOperation.NoOp) : wiki.MarkValidatedAsync(context, rawPath, cancellationToken);
-
-    public Task<bool> ResolveUserChangeAsync(string changeId, bool apply, CancellationToken cancellationToken = default) =>
-        wiki.ResolveUserChangeAsync(changeId, apply, cancellationToken);
 
     /// <summary>Offer a turn to providers while preventing sensitive or tainted content from bypassing policy (FR-SAF-03/08).</summary>
     public async ValueTask IngestAsync(MemoryIngestItem item, CancellationToken cancellationToken = default)

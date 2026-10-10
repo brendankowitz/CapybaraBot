@@ -1,10 +1,10 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
-using Capybara.Contracts.Agents;
-using Capybara.Memory.Access;
+using Capybara.Contracts.Messaging;
 using Capybara.Memory.Pages;
 using Capybara.Memory.Paths;
+using Capybara.Memory.Safety;
 using Capybara.Memory.Store;
 
 namespace Capybara.Memory.Consolidation;
@@ -12,80 +12,103 @@ namespace Capybara.Memory.Consolidation;
 /// <summary>
 /// Nightly low-privilege memory steward (FR-MEM-08): proposes promoting daily logs into durable notes, deleting duplicate
 /// pages and archiving stale ones, then stages a review digest. It never mutates a page: every change is a
-/// <see cref="PendingUserChange"/> a human approves through <see cref="WikiStore.ResolveUserChangeAsync"/>. Re-running
-/// while proposals are still pending does not stage them again.
+/// <see cref="PendingUserChange"/> a human approves through <see cref="Admin.MemoryAdmin.ResolveChangeAsync"/>. Re-running
+/// while proposals are still pending does not stage them again, and the steward is capped at
+/// <see cref="MemoryOptions.MaxPendingPerProposer"/> waiting proposals (the digest has its own slot).
 /// </summary>
+/// <remarks>
+/// Promotion never launders content: daily logs that are quarantined, oversized or look injected are skipped, and a
+/// promoted page is tainted when the existing notes page or any source log is tainted (a log with no taint frontmatter
+/// counts as tainted).
+/// </remarks>
 public sealed partial class ConsolidationJob(WikiStore store, MemoryOptions options, TimeProvider time, IConsolidationSummarizer? summarizer = null)
 {
     private const string StewardName = "steward";
+    private const string DigestProposer = "steward:digest";
+    private const string TruncationMarker = "\n…[digest truncated]\n";
 
-    private static readonly MemoryAccessContext StewardContext = new()
+    private static readonly EnumerationOptions Walk = new()
     {
-        Agent = AgentId.Parse(StewardName),
-        SessionId = "steward:consolidation",
-        CanReadUser = true,
+        RecurseSubdirectories = true,
+        AttributesToSkip = FileAttributes.Hidden | FileAttributes.ReparsePoint,
     };
 
     public async Task<ConsolidationReport> RunAsync(CancellationToken cancellationToken = default)
     {
+        var run = new RunState();
         var digest = new StringBuilder();
         digest.AppendLine($"Consolidation run {time.GetUtcNow():yyyy-MM-dd}");
         digest.AppendLine();
         digest.AppendLine("Facts proposed for promotion:");
-        var promotions = await ProposePromotionsAsync(digest, cancellationToken);
-        var (duplicates, deleted) = await ProposeDuplicateDeletionsAsync(cancellationToken);
-        var archives = await ProposeArchivesAsync(deleted, cancellationToken);
-        var report = new ConsolidationReport(promotions, duplicates, archives);
+        var promotions = await ProposePromotionsAsync(digest, run, cancellationToken);
+        var (duplicates, deleted) = await ProposeDuplicateDeletionsAsync(run, cancellationToken);
+        var archives = await ProposeArchivesAsync(deleted, run, cancellationToken);
+        var report = new ConsolidationReport(promotions, duplicates, archives, run.QueueFull);
 
         digest.AppendLine($"- promotions proposed: {report.PromotionsProposed}");
         digest.AppendLine($"- duplicates proposed for deletion: {report.DuplicatesProposed}");
         digest.AppendLine($"- stale pages proposed for archive: {report.ArchivesProposed}");
+        if (report.QueueFullSkipped > 0)
+        {
+            digest.AppendLine($"- skipped because the review queue is full: {report.QueueFullSkipped}");
+        }
+
         if (summarizer is not null)
         {
             digest.AppendLine(await summarizer.SummarizeAsync(digest.ToString(), cancellationToken));
         }
 
-        var digestPath = $"/user/digests/consolidation-{time.GetUtcNow():yyyy-MM-dd}.md";
-        if (store.PendingUserChanges.All(c => c.Path != digestPath))
+        var digestPath = MemoryPath.Parse($"/user/digests/consolidation-{time.GetUtcNow():yyyy-MM-dd}.md");
+        if (store.PendingUserChanges.All(c => c.Path != digestPath.Value))
         {
-            await store.RememberAsync(StewardContext, digestPath, digest.ToString(), "Consolidation review digest", cancellationToken);
+            var file = Path.Combine(store.Root, digestPath.RelativeFileSystemPath);
+            var before = File.Exists(file) ? await File.ReadAllTextAsync(file, cancellationToken) : null;
+            store.TryStage(PendingChangeKind.Write, digestPath, DigestProposer, before, BuildDigestPage(digest.ToString()), "nightly consolidation review digest");
         }
 
         return report;
     }
 
-    private async Task<int> ProposePromotionsAsync(StringBuilder digest, CancellationToken cancellationToken)
+    private async Task<int> ProposePromotionsAsync(StringBuilder digest, RunState run, CancellationToken cancellationToken)
     {
-        var additionsByNotes = new SortedDictionary<string, List<string>>(StringComparer.Ordinal);
-        foreach (var daily in Directory.EnumerateFiles(store.Root, "*.md", SearchOption.AllDirectories).Order(StringComparer.Ordinal))
+        var byNotes = new SortedDictionary<string, (List<string> Lines, bool Tainted)>(StringComparer.Ordinal);
+        foreach (var (dailyPath, daily) in LivePages().Where(p => DailyPathPattern().IsMatch(p.Path.Value)))
         {
-            var relative = RelativePath(daily);
-            if (!DailyPathPattern().IsMatch(relative) || !MemoryPath.TryParse(relative, out var dailyPath, out _))
+            if (new FileInfo(daily).Length > options.MaxPageBytes || store.IsQuarantined(dailyPath.Value))
             {
                 continue;
             }
 
-            var notesPath = $"/agents/{dailyPath.Owner}/notes.md";
-            var bullets = ExtractBullets(await File.ReadAllTextAsync(daily, cancellationToken));
+            var content = await File.ReadAllTextAsync(daily, cancellationToken);
+            if (InjectionScanner.LooksInjected(content))
+            {
+                continue;
+            }
+
+            var (metadata, body) = FrontmatterSerializer.Parse(content);
+            var bullets = ExtractBullets(body);
             if (bullets.Count == 0)
             {
                 continue;
             }
 
-            if (!additionsByNotes.TryGetValue(notesPath, out var list))
-            {
-                additionsByNotes[notesPath] = list = [];
-            }
-
-            list.AddRange(bullets.Select(b => $"- {b} _(from {relative})_"));
+            var notesPath = $"/agents/{dailyPath.Owner}/notes.md";
+            var (lines, tainted) = byNotes.TryGetValue(notesPath, out var entry) ? entry : ([], false);
+            lines.AddRange(bullets.Select(b => $"- {b} _(from {dailyPath.Value})_"));
+            byNotes[notesPath] = (lines, tainted || metadata.Taint == Taint.Tainted);
         }
 
         var proposed = 0;
-        foreach (var (notesRelative, candidates) in additionsByNotes)
+        foreach (var (notesRelative, (candidates, sourcesTainted)) in byNotes)
         {
             var notesPath = MemoryPath.Parse(notesRelative);
             var notesFile = Path.Combine(store.Root, notesPath.RelativeFileSystemPath);
             var before = File.Exists(notesFile) ? await File.ReadAllTextAsync(notesFile, cancellationToken) : null;
+            if (before is not null && (store.IsQuarantined(notesRelative) || InjectionScanner.LooksInjected(before)))
+            {
+                continue;
+            }
+
             var (existingMetadata, body) = FrontmatterSerializer.Parse(before ?? string.Empty);
             var known = new HashSet<string>(ExtractBullets(body).Select(StripSource), StringComparer.OrdinalIgnoreCase);
             var additions = candidates.Where(c => known.Add(StripSource(c[2..]))).ToList();
@@ -95,11 +118,17 @@ public sealed partial class ConsolidationJob(WikiStore store, MemoryOptions opti
             }
 
             var now = time.GetUtcNow();
+            var taint = sourcesTainted || (before is not null && existingMetadata.Taint == Taint.Tainted) ? Taint.Tainted : Taint.Clean;
             var metadata = before is null
-                ? new PageMetadata { Description = "Durable agent notes", Source = "steward:consolidation", Created = now, Updated = now, ValidFrom = now }
-                : existingMetadata with { Updated = now, Source = "steward:consolidation" };
+                ? new PageMetadata { Description = "Durable agent notes", Source = "steward:consolidation", Created = now, Updated = now, ValidFrom = now, Taint = taint }
+                : existingMetadata with { Updated = now, Source = "steward:consolidation", Taint = taint };
             var after = FrontmatterSerializer.Write(metadata, body.TrimEnd() + "\n" + string.Join('\n', additions) + "\n");
-            if (store.TryStage(PendingChangeKind.Write, notesPath, StewardName, before, after, "promote daily-log facts into durable notes"))
+            if (Encoding.UTF8.GetByteCount(after) > options.MaxPageBytes)
+            {
+                continue;
+            }
+
+            if (Stage(run, PendingChangeKind.Write, notesRelative, before, after, "promote daily-log facts into durable notes"))
             {
                 proposed++;
                 foreach (var addition in additions)
@@ -112,7 +141,7 @@ public sealed partial class ConsolidationJob(WikiStore store, MemoryOptions opti
         return proposed;
     }
 
-    private async Task<(int Proposed, HashSet<string> Paths)> ProposeDuplicateDeletionsAsync(CancellationToken cancellationToken)
+    private async Task<(int Proposed, HashSet<string> Paths)> ProposeDuplicateDeletionsAsync(RunState run, CancellationToken cancellationToken)
     {
         var firstSeen = new Dictionary<string, string>(StringComparer.Ordinal);
         var proposedPaths = new HashSet<string>(StringComparer.Ordinal);
@@ -127,25 +156,24 @@ public sealed partial class ConsolidationJob(WikiStore store, MemoryOptions opti
 
             // Duplicates are only compared inside one scope owner so one agent's page never deletes another's.
             var key = $"{path.Scope}:{path.Owner}:{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)))}";
-            if (!firstSeen.TryAdd(key, path.Value))
+            if (!firstSeen.TryAdd(key, path.Value)
+                && Stage(run, PendingChangeKind.Delete, path.Value, content, string.Empty, $"duplicate of {firstSeen[key]}"))
             {
-                if (store.TryStage(PendingChangeKind.Delete, path, StewardName, content, string.Empty, $"duplicate of {firstSeen[key]}"))
-                {
-                    proposedPaths.Add(path.Value);
-                }
+                proposedPaths.Add(path.Value);
             }
         }
 
         return (proposedPaths.Count, proposedPaths);
     }
 
-    private async Task<int> ProposeArchivesAsync(HashSet<string> alreadyProposedForDeletion, CancellationToken cancellationToken)
+    private async Task<int> ProposeArchivesAsync(HashSet<string> alreadyProposedForDeletion, RunState run, CancellationToken cancellationToken)
     {
         var cutoff = time.GetUtcNow().AddDays(-options.ArchiveAfterDays);
         var proposed = 0;
         foreach (var (path, file) in LivePages())
         {
-            if (alreadyProposedForDeletion.Contains(path.Value))
+            // The profile is injected into every turn, so "unused" never applies to it.
+            if (alreadyProposedForDeletion.Contains(path.Value) || path.Value == ProfilePath)
             {
                 continue;
             }
@@ -158,7 +186,7 @@ public sealed partial class ConsolidationJob(WikiStore store, MemoryOptions opti
                 continue;
             }
 
-            if (store.TryStage(PendingChangeKind.Archive, path, StewardName, content, string.Empty, $"unused since {lastUsed:yyyy-MM-dd}"))
+            if (Stage(run, PendingChangeKind.Archive, path.Value, content, string.Empty, $"unused since {lastUsed:yyyy-MM-dd}"))
             {
                 proposed++;
             }
@@ -167,19 +195,69 @@ public sealed partial class ConsolidationJob(WikiStore store, MemoryOptions opti
         return proposed;
     }
 
-    /// <summary>Pages in the live wiki, in a stable order. History and archive are not live.</summary>
+    private const string ProfilePath = "/user/profile.md";
+
+    /// <summary>Stages a steward proposal; counts it as skipped when the queue is full. Returns whether it was newly staged.</summary>
+    private bool Stage(RunState run, PendingChangeKind kind, string path, string? before, string after, string reason)
+    {
+        switch (store.TryStage(kind, MemoryPath.Parse(path), StewardName, before, after, reason))
+        {
+            case PendingAddResult.Added:
+                return true;
+            case PendingAddResult.QueueFull:
+                run.QueueFull++;
+                return false;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>The digest page, truncated with a marker so it always fits the page size cap. Tainted: it quotes agent-written logs.</summary>
+    private string BuildDigestPage(string text)
+    {
+        var now = time.GetUtcNow();
+        var metadata = new PageMetadata
+        {
+            Description = "Consolidation review digest",
+            Source = "steward:consolidation",
+            Created = now,
+            Updated = now,
+            ValidFrom = now,
+            Taint = Taint.Tainted,
+        };
+        var page = FrontmatterSerializer.Write(metadata, text);
+        if (Encoding.UTF8.GetByteCount(page) <= options.MaxPageBytes)
+        {
+            return page;
+        }
+
+        var budget = options.MaxPageBytes - Encoding.UTF8.GetByteCount(FrontmatterSerializer.Write(metadata, TruncationMarker));
+        var keep = Math.Min(text.Length, Math.Max(budget, 0));
+        while (keep > 0 && Encoding.UTF8.GetByteCount(text.AsSpan(0, keep)) > budget)
+        {
+            keep -= Math.Max(1, keep / 10);
+        }
+
+        if (keep > 0 && char.IsHighSurrogate(text[keep - 1]))
+        {
+            keep--;
+        }
+
+        return FrontmatterSerializer.Write(metadata, text[..Math.Max(keep, 0)] + TruncationMarker);
+    }
+
+    /// <summary>Pages in the live wiki, in a stable order. History, archive and the pending area are not live.</summary>
     private IEnumerable<(MemoryPath Path, string File)> LivePages()
     {
-        foreach (var file in Directory.EnumerateFiles(store.Root, "*.md", SearchOption.AllDirectories).Order(StringComparer.Ordinal))
+        foreach (var file in Directory.EnumerateFiles(store.Root, "*.md", Walk).Order(StringComparer.Ordinal))
         {
-            if (MemoryPath.TryParse(RelativePath(file), out var path, out _))
+            var relative = "/" + Path.GetRelativePath(store.Root, file).Replace(Path.DirectorySeparatorChar, '/');
+            if (MemoryPath.TryParse(relative, out var path, out _))
             {
                 yield return (path, file);
             }
         }
     }
-
-    private string RelativePath(string file) => "/" + Path.GetRelativePath(store.Root, file).Replace(Path.DirectorySeparatorChar, '/');
 
     private static List<string> ExtractBullets(string text) =>
         [.. text.ReplaceLineEndings("\n").Split('\n').Select(line => line.Trim()).Where(line => line.StartsWith("- ", StringComparison.Ordinal)).Select(line => line[2..].Trim())];
@@ -196,4 +274,9 @@ public sealed partial class ConsolidationJob(WikiStore store, MemoryOptions opti
 
     [GeneratedRegex(@"\s*_\(from [^)]*\)_\s*$", RegexOptions.CultureInvariant)]
     private static partial Regex SourceSuffixPattern();
+
+    private sealed class RunState
+    {
+        public int QueueFull { get; set; }
+    }
 }

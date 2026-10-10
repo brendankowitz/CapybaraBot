@@ -41,7 +41,7 @@ public sealed class MemoryCompletionTests : IDisposable
         Assert.Equal("/user/coffee.md", change.Path);
         Assert.Equal(PendingChangeKind.Write, change.Kind);
 
-        Assert.True(await second.ResolveUserChangeAsync(change.Id, apply: true, Ct));
+        Assert.Equal(PendingChangeResult.Applied, await second.ResolveUserChangeAsync(change.Id, apply: true, Ct));
         Assert.Empty(NewStore().PendingUserChanges);
         Assert.Contains("Oat flat white", (await second.ReadAsync(Context(), "/user/coffee", Ct))!.Body, StringComparison.Ordinal);
     }
@@ -51,7 +51,7 @@ public sealed class MemoryCompletionTests : IDisposable
     [InlineData("not-a-valid-id")]
     [InlineData("")]
     public async Task Resolving_an_unsafe_or_unknown_change_id_is_rejected(string id) =>
-        Assert.False(await NewStore().ResolveUserChangeAsync(id, apply: true, Ct));
+        Assert.Equal(PendingChangeResult.NotFound, await NewStore().ResolveUserChangeAsync(id, apply: true, Ct));
 
     [Fact]
     public async Task Discarding_a_pending_change_removes_it_without_writing()
@@ -60,7 +60,7 @@ public sealed class MemoryCompletionTests : IDisposable
         await store.RememberAsync(Context(), "/user/coffee", "Oat flat white", "Coffee", Ct);
         var change = Assert.Single(store.PendingUserChanges);
 
-        Assert.True(await store.ResolveUserChangeAsync(change.Id, apply: false, Ct));
+        Assert.Equal(PendingChangeResult.Discarded, await store.ResolveUserChangeAsync(change.Id, apply: false, Ct));
 
         Assert.Empty(store.PendingUserChanges);
         Assert.False(File.Exists(Path.Combine(_dir.Path, "user", "coffee.md")));
@@ -237,8 +237,6 @@ public sealed class MemoryCompletionTests : IDisposable
         Assert.Null(await nullStore.ReadAsync(Context(), "/agents/ea/notes", Ct));
         Assert.Empty(nullStore.List(Context()));
         Assert.Empty(await nullStore.SearchAsync(Context(), "x", 5, Ct));
-        Assert.Empty(nullStore.PendingUserChanges);
-        Assert.False(await nullStore.ResolveUserChangeAsync("0123456789abcdef0123456789abcdef", true, Ct));
         Assert.True(Context().AsIncognito().Incognito);
 
         var composite = new CompositeMemoryStore(NewStore(), [], _time);

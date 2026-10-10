@@ -18,8 +18,6 @@ public sealed class NullMemoryStore : IMemoryStore
     {
     }
 
-    public IReadOnlyList<PendingUserChange> PendingUserChanges => [];
-
     public Task<MemoryPage?> ReadAsync(MemoryAccessContext context, string rawPath, CancellationToken cancellationToken = default) =>
         Task.FromResult<MemoryPage?>(null);
 
@@ -42,7 +40,4 @@ public sealed class NullMemoryStore : IMemoryStore
 
     public Task<MemoryOperation> MarkValidatedAsync(MemoryAccessContext context, string rawPath, CancellationToken cancellationToken = default) =>
         Task.FromResult(MemoryOperation.NoOp);
-
-    public Task<bool> ResolveUserChangeAsync(string changeId, bool apply, CancellationToken cancellationToken = default) =>
-        Task.FromResult(false);
 }

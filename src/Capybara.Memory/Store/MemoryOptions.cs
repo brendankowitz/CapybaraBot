@@ -19,6 +19,9 @@ public sealed class MemoryOptions
     /// <summary>Archive pages not accessed for this many days during consolidation (FR-MEM-08).</summary>
     public int ArchiveAfterDays { get; init; } = 28;
 
+    /// <summary>Most changes one proposer (an agent or the steward) may have waiting for human review at once (FR-MEM-05).</summary>
+    public int MaxPendingPerProposer { get; init; } = 50;
+
     /// <summary>A read refreshes a page's <c>lastAccessed</c> only when the stored value is older than this (FR-MEM-04).</summary>
     public TimeSpan LastAccessedDebounce { get; init; } = TimeSpan.FromHours(1);
 }

@@ -127,7 +127,7 @@ public sealed class MemoryFeatureTests : IDisposable
 
         foreach (var change in store.PendingUserChanges.Where(c => c.Path.StartsWith("/agents/", StringComparison.Ordinal)).ToList())
         {
-            Assert.True(await store.ResolveUserChangeAsync(change.Id, apply: true, Ct));
+            Assert.Equal(PendingChangeResult.Applied, await store.ResolveUserChangeAsync(change.Id, apply: true, Ct));
         }
 
         var notes = await store.ReadAsync(Context(), "/agents/ea/notes", Ct);
@@ -147,7 +147,7 @@ public sealed class MemoryFeatureTests : IDisposable
 
         Assert.True(File.Exists(Path.Combine(_dir.Path, "agents", "ea", "old.md")));
         var change = Assert.Single(store.PendingUserChanges, c => c.Kind == PendingChangeKind.Archive);
-        Assert.True(await store.ResolveUserChangeAsync(change.Id, apply: true, Ct));
+        Assert.Equal(PendingChangeResult.Applied, await store.ResolveUserChangeAsync(change.Id, apply: true, Ct));
         Assert.False(File.Exists(Path.Combine(_dir.Path, "agents", "ea", "old.md")));
         Assert.True(File.Exists(Path.Combine(_dir.Path, "archive", "agents", "ea", "old.md")));
     }
@@ -163,7 +163,7 @@ public sealed class MemoryFeatureTests : IDisposable
         var change = Assert.Single(store.PendingUserChanges, c => c.Kind == PendingChangeKind.Delete);
         await WriteAsync("agents/ea/dup2.md", "---\ndescription: a\ntaint: clean\n---\nEdited since\n", Ct);
 
-        Assert.False(await store.ResolveUserChangeAsync(change.Id, apply: true, Ct));
+        Assert.Equal(PendingChangeResult.Stale, await store.ResolveUserChangeAsync(change.Id, apply: true, Ct));
         Assert.True(File.Exists(Path.Combine(_dir.Path, "agents", "ea", "dup2.md")));
         Assert.DoesNotContain(store.PendingUserChanges, c => c.Id == change.Id);
     }

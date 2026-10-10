@@ -7,6 +7,7 @@ using Capybara.Memory.Store;
 using Capybara.Memory.Versioning;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 
 namespace Capybara.Memory.DependencyInjection;
 
@@ -36,7 +37,8 @@ public static class MemoryServiceCollectionExtensions
             sp.GetRequiredService<MemoryOptions>(),
             sp.GetRequiredService<IMemoryVersioning>(),
             sp.GetRequiredService<TimeProvider>(),
-            sp.GetRequiredService<FtsMemoryIndex>()));
+            sp.GetRequiredService<FtsMemoryIndex>(),
+            sp.GetService<ILogger<WikiStore>>()));
         services.AddSingleton<CompositeMemoryStore>();
         services.AddSingleton<IMemoryStore>(sp => sp.GetRequiredService<CompositeMemoryStore>());
         services.AddSingleton(sp => new MemoryAdmin(sp.GetRequiredService<WikiStore>(), sp.GetRequiredService<IMemoryVersioning>()));

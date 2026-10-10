@@ -69,7 +69,7 @@ public sealed class WikiStoreTests : IDisposable
         Assert.Null(await _store.ReadAsync(ea, "/user/coffee", Ct));
 
         var change = Assert.Single(_store.PendingUserChanges);
-        Assert.True(await _store.ResolveUserChangeAsync(change.Id, apply: true, Ct));
+        Assert.Equal(PendingChangeResult.Applied, await _store.ResolveUserChangeAsync(change.Id, apply: true, Ct));
         Assert.NotNull(await _store.ReadAsync(ea, "/user/coffee", Ct));
     }
 

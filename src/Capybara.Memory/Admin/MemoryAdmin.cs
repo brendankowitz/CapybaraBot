@@ -49,7 +49,9 @@ public sealed class MemoryAdmin
     {
         EnsureHuman(principal);
         var path = MemoryPath.Parse(rawPath);
-        var file = ResolveFile(path);
+
+        // The store's resolver rejects traversal and symlinks and creates nothing on disk.
+        var file = _store.ResolveFile(path);
         if (!File.Exists(file))
         {
             return false;
@@ -73,20 +75,25 @@ public sealed class MemoryAdmin
         return !_store.Quarantined.Contains(path.Value, StringComparer.Ordinal);
     }
 
-    private static MemoryPath ParsePath(string rawPath) => MemoryPath.Parse(rawPath);
-
-    private string ResolveFile(MemoryPath path)
+    /// <summary>Staged changes awaiting review, oldest first, with full before/after content so a UI can render the diff.</summary>
+    /// <exception cref="MemoryAccessDeniedException">The principal is not human.</exception>
+    public Task<IReadOnlyList<PendingUserChange>> ListPendingAsync(MemoryAdminPrincipal principal)
     {
-        var root = _store.Root;
-        var full = Path.GetFullPath(Path.Combine(root, path.RelativeFileSystemPath));
-        if (!full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal))
-        {
-            throw new MemoryAccessDeniedException("Path escapes the memory root.");
-        }
-
-        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-        return full;
+        EnsureHuman(principal);
+        return Task.FromResult(_store.PendingUserChanges);
     }
+
+    /// <summary>
+    /// Approves (<paramref name="apply"/>) or discards a staged change. Agents can stage changes but never resolve them.
+    /// </summary>
+    /// <exception cref="MemoryAccessDeniedException">The principal is not human.</exception>
+    public async Task<PendingChangeResult> ResolveChangeAsync(MemoryAdminPrincipal principal, string changeId, bool apply, CancellationToken cancellationToken = default)
+    {
+        EnsureHuman(principal);
+        return await _store.ResolveUserChangeAsync(changeId, apply, cancellationToken);
+    }
+
+    private static MemoryPath ParsePath(string rawPath) => MemoryPath.Parse(rawPath);
 
     private static void EnsureHuman(MemoryAdminPrincipal principal)
     {

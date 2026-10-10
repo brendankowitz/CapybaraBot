@@ -1,4 +1,5 @@
 using Capybara.Gateway.Configuration;
+using Capybara.Memory.Admin;
 using Capybara.Memory.Store;
 using Capybara.Memory.Versioning;
 using Capybara.Observability.Alerts;
@@ -72,6 +73,7 @@ public static class CapybaraServiceCollectionExtensions
             new MemoryOptions { Root = Path.Combine(host.StateRoot, "memory") },
             sp.GetRequiredService<IMemoryVersioning>(),
             sp.GetRequiredService<TimeProvider>()));
+        services.AddSingleton(sp => new MemoryAdmin(sp.GetRequiredService<WikiStore>(), sp.GetRequiredService<IMemoryVersioning>()));
 
         // Orchestration
         services.AddSingleton(sp => new AgentRegistry(fleet.Agents, sp.GetRequiredService<KillSwitch>()));
