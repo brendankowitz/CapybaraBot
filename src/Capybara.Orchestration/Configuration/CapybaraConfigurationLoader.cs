@@ -351,6 +351,24 @@ public static class CapybaraConfigurationLoader
                     return null;
                 }
 
+                if (yaml.ScriptSha256 is not null && (yaml.ScriptSha256.Length != 64 || !yaml.ScriptSha256.All(Uri.IsHexDigit)))
+                {
+                    errors.Add($"{prefix} scriptSha256 must be a sha256 hex digest.");
+                    return null;
+                }
+
+                if (yaml.ScriptSha256 is null && !yaml.SelfContained)
+                {
+                    errors.Add($"{prefix} must pin the script it runs (scriptSha256) or declare selfContained: true.");
+                    return null;
+                }
+
+                if (yaml.ScriptSha256 is not null && yaml.SelfContained)
+                {
+                    errors.Add($"{prefix} cannot both pin a script (scriptSha256) and declare selfContained: true.");
+                    return null;
+                }
+
                 break;
             case "http":
                 if (!Uri.TryCreate(yaml.Url, UriKind.Absolute, out var url) || (url.Scheme != Uri.UriSchemeHttps && !url.IsLoopback))
@@ -380,6 +398,8 @@ public static class CapybaraConfigurationLoader
             Url = yaml.Url,
             Tools = yaml.Tools,
             Sha256 = yaml.Sha256?.ToLowerInvariant(),
+            ScriptSha256 = yaml.ScriptSha256?.ToLowerInvariant(),
+            SelfContained = yaml.SelfContained,
             Untrusted = yaml.Untrusted ?? true,
             TokenSecret = yaml.TokenSecret,
             TimeoutSeconds = yaml.Timeout,

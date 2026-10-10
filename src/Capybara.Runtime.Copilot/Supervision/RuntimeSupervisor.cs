@@ -5,15 +5,51 @@ namespace Capybara.Runtime.Copilot.Supervision;
 
 /// <summary>
 /// Health-checks every runtime with <c>PingAsync</c>, restarts failures with exponential backoff, and quarantines a
-/// runtime that keeps crashing, raising an alert instead of looping (FR-AGT-01, FR-OBS-05).
+/// runtime that keeps crashing, raising an alert instead of looping (FR-AGT-01, FR-AGT-04, FR-OBS-05). After a successful
+/// restart it reconciles the interrupted turn from the event log and reruns the tool self-test, which pauses the agent
+/// on failure (FR-AGT-09).
 /// </summary>
-public sealed partial class RuntimeSupervisor(
-    IEnumerable<ISupervisedRuntime> runtimes,
-    IAlertSink alerts,
-    SupervisorOptions options,
-    TimeProvider time,
-    ILogger<RuntimeSupervisor> logger)
+/// <remarks>
+/// The self-test guard and reconciler are optional only so composition that predates them keeps compiling. Running
+/// without either is a degraded, not fail-closed, configuration, so it is logged as Critical at construction.
+/// </remarks>
+public sealed partial class RuntimeSupervisor
 {
+    private readonly IEnumerable<ISupervisedRuntime> _runtimes;
+    private readonly IAlertSink _alerts;
+    private readonly SupervisorOptions _options;
+    private readonly TimeProvider _time;
+    private readonly ILogger<RuntimeSupervisor> _logger;
+    private readonly SelfTestGuard? _selfTest;
+    private readonly ISessionReconciler? _reconciler;
+
+    public RuntimeSupervisor(
+        IEnumerable<ISupervisedRuntime> runtimes,
+        IAlertSink alerts,
+        SupervisorOptions options,
+        TimeProvider time,
+        ILogger<RuntimeSupervisor> logger,
+        SelfTestGuard? selfTest = null,
+        ISessionReconciler? reconciler = null)
+    {
+        _runtimes = runtimes;
+        _alerts = alerts;
+        _options = options;
+        _time = time;
+        _logger = logger;
+        _selfTest = selfTest;
+        _reconciler = reconciler;
+
+        if (selfTest is null)
+        {
+            LogDegraded(logger, "self-test rerun after restart is disabled; a restarted runtime with the wrong tools keeps running");
+        }
+
+        if (reconciler is null)
+        {
+            LogDegraded(logger, "reconciliation after restart is disabled; turns interrupted by a crash go unreported");
+        }
+    }
     private readonly Dictionary<string, State> _states = [];
     private readonly Lock _gate = new();
 
@@ -23,7 +59,7 @@ public sealed partial class RuntimeSupervisor(
         {
             lock (_gate)
             {
-                return [.. runtimes.Select(r => Snapshot(r.Agent.Value, StateFor(r.Agent.Value)))];
+                return [.. _runtimes.Select(r => Snapshot(r.Agent.Value, StateFor(r.Agent.Value)))];
             }
         }
     }
@@ -39,7 +75,7 @@ public sealed partial class RuntimeSupervisor(
 
     public async Task CheckOnceAsync(CancellationToken cancellationToken)
     {
-        foreach (var runtime in runtimes)
+        foreach (var runtime in _runtimes)
         {
             await CheckAsync(runtime, cancellationToken);
         }
@@ -48,7 +84,7 @@ public sealed partial class RuntimeSupervisor(
     private async Task CheckAsync(ISupervisedRuntime runtime, CancellationToken cancellationToken)
     {
         var agent = runtime.Agent.Value;
-        var now = time.GetUtcNow();
+        var now = _time.GetUtcNow();
         State state;
         lock (_gate)
         {
@@ -87,13 +123,13 @@ public sealed partial class RuntimeSupervisor(
         lock (_gate)
         {
             state.Crashes.Enqueue(now);
-            while (state.Crashes.TryPeek(out var oldest) && now - oldest > options.CrashWindow)
+            while (state.Crashes.TryPeek(out var oldest) && now - oldest > _options.CrashWindow)
             {
                 state.Crashes.Dequeue();
             }
 
             crashes = state.Crashes.Count;
-            if (crashes >= options.MaxCrashes)
+            if (crashes >= _options.MaxCrashes)
             {
                 state.Quarantined = true;
             }
@@ -103,14 +139,14 @@ public sealed partial class RuntimeSupervisor(
 
         if (quarantined)
         {
-            LogQuarantined(logger, agent, crashes);
-            await alerts.PublishAsync(
+            LogQuarantined(_logger, agent, crashes);
+            await _alerts.PublishAsync(
                 new Alert("runtime.quarantined", AlertSeverity.Critical, $"Runtime for {agent} crashed {crashes} times and was quarantined.", now, agent),
                 cancellationToken);
             return;
         }
 
-        LogRestarting(logger, agent, crashes);
+        LogRestarting(_logger, agent, crashes);
         try
         {
             await runtime.RestartAsync(cancellationToken);
@@ -130,14 +166,40 @@ public sealed partial class RuntimeSupervisor(
                 state.NextAttemptAt = now + Backoff(state.ConsecutiveFailures);
             }
 
-            LogRestartFailed(logger, ex, agent);
+            LogRestartFailed(_logger, ex, agent);
+            return;
+        }
+
+        await AfterRestartAsync(runtime, cancellationToken);
+    }
+
+    /// <summary>Reconcile first, so the user learns what the crash interrupted even if the self-test then pauses the agent.</summary>
+    private async Task AfterRestartAsync(ISupervisedRuntime runtime, CancellationToken cancellationToken)
+    {
+        if (_reconciler is not null)
+        {
+            try
+            {
+                await _reconciler.ReconcileAsync(runtime, cancellationToken);
+            }
+#pragma warning disable CA1031 // Reconciliation is best effort; the restarted runtime stays supervised either way.
+            catch (Exception ex) when (ex is not OperationCanceledException)
+#pragma warning restore CA1031
+            {
+                LogReconcileFailed(_logger, ex, runtime.Agent.Value);
+            }
+        }
+
+        if (_selfTest is not null)
+        {
+            await _selfTest.VerifyAsync(runtime, cancellationToken);
         }
     }
 
     public TimeSpan Backoff(int consecutiveFailures)
     {
         var factor = Math.Pow(2, Math.Clamp(consecutiveFailures - 1, 0, 20));
-        var delay = TimeSpan.FromTicks((long)Math.Min(options.InitialBackoff.Ticks * factor, options.MaxBackoff.Ticks));
+        var delay = TimeSpan.FromTicks((long)Math.Min(_options.InitialBackoff.Ticks * factor, _options.MaxBackoff.Ticks));
         return delay;
     }
 
@@ -166,6 +228,12 @@ public sealed partial class RuntimeSupervisor(
 
     [LoggerMessage(Level = LogLevel.Critical, Message = "Runtime {Agent} quarantined after {Crashes} crashes")]
     private static partial void LogQuarantined(ILogger logger, string agent, int crashes);
+
+    [LoggerMessage(Level = LogLevel.Critical, Message = "Runtime supervisor is degraded: {Problem}")]
+    private static partial void LogDegraded(ILogger logger, string problem);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Reconciling runtime {Agent} after restart failed")]
+    private static partial void LogReconcileFailed(ILogger logger, Exception exception, string agent);
 
     private sealed class State
     {

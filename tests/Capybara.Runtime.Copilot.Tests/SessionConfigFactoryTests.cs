@@ -31,7 +31,7 @@ public sealed class SessionConfigFactoryTests
             Assert.NotNull(config.OnUserInputRequest);
             Assert.NotNull(config.Hooks?.OnPreToolUse);
             Assert.NotNull(config.OnEvent);
-            Assert.Equal(Ea.Tools, config.AvailableTools);
+            Assert.Equal([.. Ea.Tools, .. SessionConfigFactory.InfrastructureTools], config.AvailableTools);
             Assert.False(config.EnableSessionStore);
             Assert.Equal(3d, config.SessionLimits?.MaxAiCredits);
         }

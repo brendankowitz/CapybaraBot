@@ -25,6 +25,20 @@ public sealed record McpServerSpec
     /// <summary>Lower-case hex SHA-256 of <see cref="Command"/>. Required for stdio servers.</summary>
     public string? Sha256 { get; init; }
 
+    /// <summary>
+    /// Lower-case hex SHA-256 of the script the command runs, i.e. its first positional argument (after options and a
+    /// leading <c>run</c>/<c>exec</c>). Required for every stdio server that is not <see cref="SelfContained"/> (FR-SKL-04).
+    /// </summary>
+    public string? ScriptSha256 { get; init; }
+
+    /// <summary>
+    /// Declares <see cref="Command"/> a self-contained binary whose own pin covers all the code it runs. Without it a
+    /// stdio server must also pin its script, so an unlisted interpreter or launcher (<c>bash</c>, <c>npx</c>,
+    /// <c>nodejs</c>) can never run unpinned code. Mutually exclusive with <see cref="ScriptSha256"/> in config; if both
+    /// are set anyway, the script pin is still enforced.
+    /// </summary>
+    public bool SelfContained { get; init; }
+
     /// <summary>Results from this server are untrusted input and taint the session (FR-SAF-03).</summary>
     public bool Untrusted { get; init; } = true;
 
