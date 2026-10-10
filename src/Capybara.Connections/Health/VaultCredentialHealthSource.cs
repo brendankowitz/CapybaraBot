@@ -8,8 +8,9 @@ namespace Capybara.Connections.Health;
 /// <summary>
 /// Derives credential health from vault metadata for every configured connection (FR-CON-05): Google "Testing"
 /// refresh tokens (7 days from consent), Google's 6-month unused window, Microsoft's 90-day inactivity window
-/// (from the last refresh), and PAT expiry. A configured connection with no credential is reported as already
-/// expired so it alerts instead of failing silently at first use.
+/// (from the last refresh), and PAT expiry. A configured connection with no credential, or whose refresh token was
+/// rejected (consent required), is reported as already expired; a PAT without a recorded expiry is reported with an
+/// unknown expiry. Neither fails silently at first use.
 /// </summary>
 public sealed class VaultCredentialHealthSource(
     TokenVault vault,
@@ -48,7 +49,9 @@ public sealed class VaultCredentialHealthSource(
         var lastUse = credential.RefreshedAt ?? credential.ConsentedAt ?? now;
         return connection.Provider switch
         {
-            CredentialProvider.GitHub => credential.ExpiresAt is { } expires ? new CredentialHealth(connection.Id, CredentialKind.GitHubFineGrainedPat, expires) : null,
+            _ when credential.ConsentRequiredSince is { } since => new CredentialHealth(connection.Id, KindOf(connection.Provider, inProduction), since, inProduction, "consent required: the provider rejected the refresh token; re-authorize the connection from the desktop."),
+            CredentialProvider.GitHub when credential.ExpiresAt is { } expires => new CredentialHealth(connection.Id, CredentialKind.GitHubFineGrainedPat, expires),
+            CredentialProvider.GitHub => new CredentialHealth(connection.Id, CredentialKind.GitHubFineGrainedPat, null, Detail: """PAT expiry unknown; store it as JSON {"accessToken":"github_pat_...","expiresAt":"<ISO 8601>"} to get expiry alerts."""),
             _ when credential.RefreshToken is null => new CredentialHealth(connection.Id, KindOf(connection.Provider, inProduction), credential.AccessTokenExpiresAt ?? now, inProduction, "no refresh token stored; re-authorize the connection."),
             CredentialProvider.Google when !inProduction => new CredentialHealth(connection.Id, CredentialKind.GoogleRefreshTokenTesting, (credential.ConsentedAt ?? now) + GoogleTestingLifetime, GoogleAppInProduction: false),
             CredentialProvider.Google => new CredentialHealth(connection.Id, CredentialKind.GoogleRefreshToken, lastUse + GoogleUnusedLifetime),

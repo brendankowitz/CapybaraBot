@@ -53,14 +53,14 @@ public static class ConnectionsServiceCollectionExtensions
         services.AddSingleton<GrantEnforcer>();
         services.AddSingleton<BrokerToolCatalog>();
 
-        services.AddSingleton<ISecretStore>(_ =>
+        services.AddSingleton(_ =>
         {
-            var credentials = options.ResolveCredentialsDirectory();
-            var key = EncryptedFileSecretStore.LoadKey(Path.Combine(credentials, options.VaultKeyCredential));
-            return new LayeredSecretStore(
-                new EncryptedFileSecretStore(Path.Combine(options.ResolveStateDirectory(), "vault"), key),
-                new CredentialsDirectorySecretStore(credentials));
+            var key = EncryptedFileSecretStore.LoadKey(Path.Combine(options.ResolveCredentialsDirectory(), options.VaultKeyCredential));
+            return new EncryptedFileSecretStore(Path.Combine(options.ResolveStateDirectory(), "vault"), key);
         });
+        services.AddSingleton<ISecretStore>(sp => new LayeredSecretStore(
+            sp.GetRequiredService<EncryptedFileSecretStore>(),
+            new CredentialsDirectorySecretStore(options.ResolveCredentialsDirectory())));
         services.AddSingleton<TokenVault>();
         services.AddSingleton<IReadOnlyDictionary<CredentialProvider, OAuthClientOptions>>(_ => OAuthRegistrations(options));
         services.AddSingleton(sp => new OAuthClient(sp.GetRequiredService<IHttpClientFactory>().CreateClient(ConnectorHttpClient)));

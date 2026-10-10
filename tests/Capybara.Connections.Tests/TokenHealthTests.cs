@@ -61,4 +61,41 @@ public sealed class TokenHealthTests
         Assert.Contains(sink.Recent, a => a.Kind == "token_expiry" && a.Severity == AlertSeverity.Critical && a.Message.Contains("calendar: no credential", StringComparison.Ordinal));
         Assert.DoesNotContain(sink.Recent, a => a.Message.StartsWith("github", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public async Task Pat_without_recorded_expiry_raises_a_standing_warning()
+    {
+        var vault = new TokenVault(new TestSecretStore());
+        await vault.SetAsync("github", new ConnectionCredential { AccessToken = "github_pat_x" }, TestContext.Current.CancellationToken);
+        var registry = new ConnectorRegistry([ConnectorRegistry.Create(ConnectionDefinition.Create("github", ConnectorKind.GitHub), new HttpClient())]);
+        var source = new VaultCredentialHealthSource(vault, registry, new Dictionary<CredentialProvider, OAuthClientOptions>(), _time);
+        var sink = new InMemoryAlertSink();
+
+        var health = Assert.Single(await source.ListAsync(TestContext.Current.CancellationToken));
+        await new TokenHealthMonitor(source, sink, _time, Options.Create(new TokenHealthOptions())).CheckAsync(TestContext.Current.CancellationToken);
+
+        Assert.Null(health.ExpiresAt);
+        var alert = Assert.Single(sink.Recent);
+        Assert.Equal(("token_expiry_unknown", AlertSeverity.Warning), (alert.Kind, alert.Severity));
+        Assert.Contains("expiresAt", alert.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Consent_required_connection_reports_as_expired()
+    {
+        var vault = new TokenVault(new TestSecretStore());
+        var since = _time.GetUtcNow().AddHours(-1);
+        await vault.SetAsync("email", new ConnectionCredential { AccessToken = "a", ConsentRequiredSince = since, RefreshedAt = _time.GetUtcNow() }, TestContext.Current.CancellationToken);
+        var registry = new ConnectorRegistry([ConnectorRegistry.Create(ConnectionDefinition.Create("email", ConnectorKind.GraphMail), new HttpClient())]);
+        var source = new VaultCredentialHealthSource(vault, registry, new Dictionary<CredentialProvider, OAuthClientOptions>(), _time);
+        var sink = new InMemoryAlertSink();
+
+        var health = Assert.Single(await source.ListAsync(TestContext.Current.CancellationToken));
+        await new TokenHealthMonitor(source, sink, _time, Options.Create(new TokenHealthOptions())).CheckAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(since, health.ExpiresAt);
+        var alert = Assert.Single(sink.Recent);
+        Assert.Equal(AlertSeverity.Critical, alert.Severity);
+        Assert.Contains("consent required", alert.Message, StringComparison.Ordinal);
+    }
 }

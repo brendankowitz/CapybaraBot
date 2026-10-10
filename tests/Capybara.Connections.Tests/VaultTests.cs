@@ -86,4 +86,18 @@ public sealed class VaultTests
         Assert.Equal(["github"], await vault.ListConnectionIdsAsync(ct));
         Assert.DoesNotContain("replacement", credential.ToString(), StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task Verify_all_reports_entries_the_key_cannot_decrypt()
+    {
+        using var dir = new TempDirectory();
+        var ct = TestContext.Current.CancellationToken;
+        await new EncryptedFileSecretStore(dir.Path, RandomNumberGenerator.GetBytes(32)).SetAsync("connection-old", "x", ct);
+        var store = new EncryptedFileSecretStore(dir.Path, Key);
+        await store.SetAsync("connection-new", "y", ct);
+
+        var errors = await store.VerifyAllAsync(ct);
+
+        Assert.Contains("connection-old", Assert.Single(errors), StringComparison.Ordinal);
+    }
 }

@@ -78,12 +78,15 @@ public sealed class BrokerTests
     [Fact]
     public async Task Grant_constraints_deny_before_the_connector_runs()
     {
-        using var h = new BrokerHarness(new Grant
-        {
-            Connection = "email",
-            Operations = ["send"],
-            Constraints = new Dictionary<string, IReadOnlyList<string>> { ["to"] = ["*@example.com"] },
-        });
+        using var h = new BrokerHarness(grants:
+        [
+            new Grant
+            {
+                Connection = "email",
+                Operations = ["send"],
+                Constraints = new Dictionary<string, IReadOnlyList<string>> { ["to"] = ["*@example.com"] },
+            },
+        ]);
         await h.AuthorizeAsync();
         var ct = TestContext.Current.CancellationToken;
 
@@ -103,7 +106,7 @@ public sealed class BrokerTests
         var ct = TestContext.Current.CancellationToken;
         var call = new BrokerCall("ea", "email", "read", "{\"id\":\"1\"}");
 
-        await h.Freeze.FreezeAsync("kill switch engaged from phone", ct);
+        await h.Freeze.FreezeAsync("kill switch engaged from phone");
         var frozen = await h.Broker.InvokeAsync(call, ct);
         await h.Freeze.UnfreezeAsync(ct);
         var thawed = await h.Broker.InvokeAsync(call, ct);
@@ -119,7 +122,7 @@ public sealed class BrokerTests
     public async Task Freeze_survives_a_broker_restart()
     {
         using var h = new BrokerHarness();
-        await h.Freeze.FreezeAsync("kill switch", TestContext.Current.CancellationToken);
+        await h.Freeze.FreezeAsync("kill switch");
 
         using var restarted = new BrokerFreeze(h.FreezeMarker, new InMemoryAuditLog());
 
@@ -136,7 +139,7 @@ public sealed class BrokerTests
         var path = Path.Combine(dir.Path, "audit", "broker-audit.jsonl");
         using var log = new FileAuditLog(path, TimeProvider.System);
         using var h = new BrokerHarness();
-        var broker = new ConnectionBroker(new Grants.GrantEnforcer(h.Grants), h.Registry, h.Credentials, log, h.Freeze);
+        var broker = new ConnectionBroker(new Grants.GrantEnforcer(h.Grants), h.Catalog, h.Registry, h.Credentials, log, h.Freeze);
         await h.AuthorizeAsync();
         var ct = TestContext.Current.CancellationToken;
 
@@ -151,5 +154,26 @@ public sealed class BrokerTests
 
         Assert.Equal(["allow", "deny"], entries.Select(e => e.Decision));
         Assert.True(await log.VerifyAsync(ct));
+    }
+
+    [Fact]
+    public async Task Freeze_holds_in_memory_and_is_audited_when_the_marker_cannot_be_written()
+    {
+        using var scratch = new TempDirectory();
+        var blocker = Path.Combine(scratch.Path, "not-a-directory");
+        await File.WriteAllTextAsync(blocker, "x", TestContext.Current.CancellationToken);
+        using var h = new BrokerHarness(freezeMarker: Path.Combine(blocker, "broker.frozen"));
+        await h.AuthorizeAsync();
+
+        var outcome = await h.Freeze.FreezeAsync("kill switch");
+        var result = await h.Broker.InvokeAsync(new BrokerCall("ea", "email", "read", "{\"id\":\"1\"}"), TestContext.Current.CancellationToken);
+
+        Assert.False(outcome.Durable);
+        Assert.Contains("could not be persisted", outcome.Error, StringComparison.Ordinal);
+        Assert.True(h.Freeze.IsFrozen);
+        Assert.False(result.Allowed);
+        Assert.Empty(h.Connector.Calls);
+        var audited = Assert.Single(h.Audit.Entries, e => e.Kind == "broker_freeze");
+        Assert.Contains("could not be persisted", audited.Detail, StringComparison.Ordinal);
     }
 }

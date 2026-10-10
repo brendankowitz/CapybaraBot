@@ -43,17 +43,22 @@ accepts:
   consults: true
   messages: true
   tasks: true
-# One grant per constraint set: reads are scoped to allowlisted repos; writes also to agent/* branches. There is no
-# push, force-push, merge or release operation at all.
+# One grant per constraint set. There is no push, force-push, merge or release operation at all, and the broker
+# refuses commits under .github/workflows/ and .github/actions/ (they run with repository secrets on push).
+#
+# REPO ALLOWLIST: list exact repositories, never an owner-wide glob. Branch creation and commits to agent/* are NOT
+# approval-gated, so every repo listed here is one the agent may write to without asking. List only private repos
+# where unreviewed agent pushes are acceptable; a public repo would turn a branch write into publication of
+# whatever the agent has read. Replace the placeholder below with your own repos.
 grants:
   - connection: github
     operations: [list_issues, list_prs, read_file]
     constraints:
-      repo: ["brendankowitz/*"]
+      repo: [brendankowitz/capybara-sandbox]
   - connection: github
     operations: [create_branch, commit_file, create_pr]
     constraints:
-      repo: ["brendankowitz/*"]
+      repo: [brendankowitz/capybara-sandbox]
       branch: ["agent/*"]
 egress: [github.com, api.github.com]
 budget:

@@ -29,6 +29,11 @@ public sealed class GrantEnforcer(IGrantProvider grants)
 {
     public GrantDecision Decide(string agentId, string connection, string operation, JsonElement args)
     {
+        if (args.ValueKind != JsonValueKind.Object)
+        {
+            return GrantDecision.Deny("arguments must be a JSON object");
+        }
+
         var grant = grants.GetGrants(agentId).FirstOrDefault(g => string.Equals(g.Connection, connection, StringComparison.Ordinal) && g.Permits(operation));
         if (grant is null)
         {

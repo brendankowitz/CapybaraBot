@@ -92,6 +92,35 @@ public sealed class ConnectorTests
         await Assert.ThrowsAsync<ArgumentException>(async () => await connector.InvokeAsync(GitHubConnector.ReadFile, args.RootElement, "t", TestContext.Current.CancellationToken));
     }
 
+[Theory]
+    [InlineData(".github/workflows/ci.yml")]
+    [InlineData(".GitHub/Workflows/ci.yml")]
+    [InlineData(".github/actions/setup/action.yml")]
+    public async Task GitHub_refuses_to_commit_workflow_or_action_definitions(string path)
+    {
+        var handler = new FakeHttpMessageHandler(_ => FakeHttpMessageHandler.Json("{}"));
+        var connector = new GitHubConnector(new HttpClient(handler), ConnectionDefinition.Create("github", ConnectorKind.GitHub));
+        using var args = JsonDocument.Parse(JsonSerializer.Serialize(new { repo = "owner/repo", branch = "agent/x", path, content = "on: push", message = "m" }));
+
+        var ex = await Assert.ThrowsAsync<ArgumentException>(async () => await connector.InvokeAsync(GitHubConnector.CommitFile, args.RootElement, "t", TestContext.Current.CancellationToken));
+
+        Assert.Contains("protected", ex.Message, StringComparison.Ordinal);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task GitHub_commits_ordinary_files_on_the_branch()
+    {
+        var handler = new FakeHttpMessageHandler(_ => FakeHttpMessageHandler.Json("{}"));
+        var connector = new GitHubConnector(new HttpClient(handler), ConnectionDefinition.Create("github", ConnectorKind.GitHub));
+        using var args = JsonDocument.Parse("""{"repo":"owner/repo","branch":"agent/x","path":"src/a b.cs","content":"x","message":"m"}""");
+
+        await connector.InvokeAsync(GitHubConnector.CommitFile, args.RootElement, "t", TestContext.Current.CancellationToken);
+
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal((HttpMethod.Put, "https://api.github.com/repos/owner/repo/contents/src/a%20b.cs"), (request.Method, request.RequestUri!.AbsoluteUri));
+    }
+
     [Fact]
     public async Task Graph_calendar_normalizes_event_times_to_utc()
     {

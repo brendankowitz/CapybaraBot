@@ -27,17 +27,26 @@ public sealed record ConnectionCredential
     /// <summary>Hard expiry of the credential itself, e.g. a fine-grained PAT.</summary>
     public DateTimeOffset? ExpiresAt { get; init; }
 
+    /// <summary>
+    /// Set when the provider rejected the refresh token (<c>invalid_grant</c>). The broker then denies calls without
+    /// contacting the provider until the user completes consent again (FR-CON-05, FR-CON-08).
+    /// </summary>
+    public DateTimeOffset? ConsentRequiredSince { get; init; }
+
     public bool NeedsRefresh(DateTimeOffset now) =>
         RefreshToken is not null && AccessTokenExpiresAt is { } expires && expires <= now + RefreshSkew;
 
     /// <summary>Never prints token values, so an accidental log line cannot leak them (FR-SAF-08).</summary>
     public override string ToString() =>
-        $"ConnectionCredential {{ AccessTokenExpiresAt = {AccessTokenExpiresAt:O}, HasRefreshToken = {RefreshToken is not null}, ExpiresAt = {ExpiresAt:O} }}";
+        $"ConnectionCredential {{ AccessTokenExpiresAt = {AccessTokenExpiresAt:O}, HasRefreshToken = {RefreshToken is not null}, ExpiresAt = {ExpiresAt:O}, ConsentRequiredSince = {ConsentRequiredSince:O} }}";
 }
 
 /// <summary>
 /// Broker-only credential vault over encrypted secret storage (FR-CON-01, FR-CON-04). A connection's credential lives
 /// under the flat secret name <c>connection-{id}</c>, either as JSON or, for admin-seeded PATs, as the bare token.
+/// Seed a GitHub PAT as JSON so its expiry is alerted on (FR-CON-05), e.g.
+/// <c>{"accessToken":"github_pat_…","expiresAt":"2027-01-31T00:00:00Z"}</c>; a bare token has unknown expiry and
+/// raises a standing warning.
 /// </summary>
 public sealed class TokenVault(ISecretStore secrets)
 {

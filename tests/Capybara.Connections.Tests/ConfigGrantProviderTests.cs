@@ -30,6 +30,9 @@ public sealed class ConfigGrantProviderTests
         var write = Assert.Single(provider.GetGrants("code"), g => g.Permits("create_pr"));
         Assert.Equal(["agent/*"], write.Constraints["branch"]);
         Assert.Empty(provider.GetGrants("unknown-agent"));
+
+        // Unapproved writes are only safe on a curated list of repos, never an owner-wide glob.
+        Assert.All(provider.All.Values.SelectMany(g => g).Where(g => g.Constraints.ContainsKey("repo")).SelectMany(g => g.Constraints["repo"]), repo => Assert.DoesNotContain('*', repo));
     }
 
     [Fact]

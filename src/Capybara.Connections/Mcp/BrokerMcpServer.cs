@@ -3,7 +3,6 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Capybara.Connections.Broker;
-using Capybara.Connections.Model;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Routing;
@@ -59,16 +58,11 @@ public static class BrokerMcpServer
     private static async ValueTask<CallToolResult> CallToolAsync(RequestContext<CallToolRequestParams> request, CancellationToken cancellationToken)
     {
         var agent = AgentOf(request.User);
-        var name = request.Params?.Name ?? string.Empty;
-        var tool = request.Services!.GetRequiredService<BrokerToolCatalog>().Find(agent, name);
-        if (tool is null)
-        {
-            return new CallToolResult { IsError = true, Content = [new TextContentBlock { Text = $"denied: '{name}' is not granted" }] };
-        }
-
         var args = JsonSerializer.Serialize(request.Params?.Arguments ?? new Dictionary<string, JsonElement>());
+
+        // Name resolution happens in the broker so that ungranted names are denied and audited like any other call.
         var broker = request.Services!.GetRequiredService<ConnectionBroker>();
-        var result = await broker.InvokeAsync(new BrokerCall(agent, tool.Connection, tool.Operation, args), cancellationToken);
+        var result = await broker.InvokeToolAsync(agent, request.Params?.Name ?? string.Empty, args, cancellationToken: cancellationToken);
         return new CallToolResult
         {
             IsError = !result.Allowed,
@@ -76,7 +70,6 @@ public static class BrokerMcpServer
             Meta = new JsonObject { [TaintMetaKey] = result.Taint.ToString() },
         };
     }
-
     private static string AgentOf(ClaimsPrincipal? user) =>
         user?.FindFirst(AgentClaim)?.Value ?? throw new UnauthorizedAccessException("MCP request is not bound to an agent.");
 

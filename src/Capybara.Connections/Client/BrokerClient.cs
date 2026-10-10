@@ -34,7 +34,11 @@ public sealed class BrokerClient(HttpClient http)
 
     public ValueTask<BrokerHealth> GetHealthAsync(CancellationToken cancellationToken = default) => GetAsync<BrokerHealth>("/broker/health", cancellationToken);
 
-    /// <summary>Denies every broker call until <see cref="UnfreezeAsync"/>; survives a broker restart (FR-SAF-06).</summary>
+    /// <summary>
+    /// Denies every broker call until <see cref="UnfreezeAsync"/>; survives a broker restart (FR-SAF-06). Throws if the
+    /// broker could not make the freeze durable or audit it; the broker is frozen in memory regardless, so callers
+    /// should alert rather than retry blindly.
+    /// </summary>
     public ValueTask FreezeAsync(string reason, CancellationToken cancellationToken = default) => PostAsync("/broker/freeze", new BrokerFreezeRequest(reason), cancellationToken);
 
     public ValueTask UnfreezeAsync(CancellationToken cancellationToken = default) => PostAsync<object?>("/broker/unfreeze", null, cancellationToken);

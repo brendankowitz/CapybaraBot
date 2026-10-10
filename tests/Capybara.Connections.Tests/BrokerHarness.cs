@@ -7,25 +7,41 @@ using Capybara.Connections.OAuth;
 using Capybara.Connections.Vault;
 using Capybara.Contracts.Connections;
 using Capybara.Contracts.Messaging;
+using Capybara.Contracts.Storage;
 using Capybara.Testing;
 using Microsoft.Extensions.Time.Testing;
 
 namespace Capybara.Connections.Tests;
 
-/// <summary>A broker over in-memory grants, a recording connector and a fake vault.</summary>
+/// <summary>
+/// A broker over in-memory grants for agent <c>ea</c>, a connector (recording by default) on connection <c>email</c>
+/// (Gmail, so Google OAuth), a fake vault and a fake Google token endpoint.
+/// </summary>
 internal sealed class BrokerHarness : IDisposable
 {
+    public const string ClientSecretName = "oauth-google-client-secret";
+
     private readonly TempDirectory _dir = new();
 
-    public BrokerHarness(params Grant[] eaGrants)
+    public BrokerHarness(
+        IReadOnlyList<Grant>? grants = null,
+        IConnector? connector = null,
+        Func<HttpRequestMessage, HttpResponseMessage>? tokenEndpoint = null,
+        ISecretStore? secrets = null,
+        string? freezeMarker = null)
     {
-        Grants = new InMemoryGrantProvider().Set("ea", eaGrants.Length > 0 ? eaGrants : [new Grant { Connection = "email", Operations = ["read"] }]);
+        Secrets.SetAsync(ClientSecretName, "google-client-secret").AsTask().GetAwaiter().GetResult();
+        Grants = new InMemoryGrantProvider().Set("ea", grants ?? [new Grant { Connection = "email", Operations = ["read"] }]);
         Connector = new RecordingConnector(ConnectionDefinition.Create("email", ConnectorKind.Gmail));
-        Registry = new ConnectorRegistry([Connector]);
-        Vault = new TokenVault(Secrets);
-        Credentials = new CredentialManager(Vault, Secrets, new OAuthClient(new HttpClient(new FakeHttpMessageHandler(_ => throw new InvalidOperationException("no OAuth expected")))), Router, new Dictionary<CredentialProvider, OAuthClientOptions>(), Time);
-        Freeze = new BrokerFreeze(Path.Combine(_dir.Path, "broker.frozen"), Audit);
-        Broker = new ConnectionBroker(new GrantEnforcer(Grants), Registry, Credentials, Audit, Freeze);
+        Registry = new ConnectorRegistry([connector ?? Connector]);
+        Vault = new TokenVault(secrets ?? Secrets);
+        TokenEndpoint = new FakeHttpMessageHandler(tokenEndpoint ?? (_ => throw new InvalidOperationException("no OAuth expected")));
+        var registration = new OAuthClientOptions { ClientId = "google-id", ClientSecretName = ClientSecretName, RedirectUri = new Uri("https://capybara.example.ts.net/oauth/callback") };
+        Credentials = new CredentialManager(Vault, secrets ?? Secrets, new OAuthClient(new HttpClient(TokenEndpoint)), Router, new Dictionary<CredentialProvider, OAuthClientOptions> { [CredentialProvider.Google] = registration }, Audit, Time);
+        FreezeMarker = freezeMarker ?? Path.Combine(_dir.Path, "broker.frozen");
+        Freeze = new BrokerFreeze(FreezeMarker, Audit);
+        Catalog = new BrokerToolCatalog(Grants, Registry);
+        Broker = new ConnectionBroker(new GrantEnforcer(Grants), Catalog, Registry, Credentials, Audit, Freeze);
     }
 
     public FakeTimeProvider Time { get; } = new(DateTimeOffset.Parse("2026-10-10T08:00:00Z", System.Globalization.CultureInfo.InvariantCulture));
@@ -36,11 +52,15 @@ internal sealed class BrokerHarness : IDisposable
 
     public RecordingRouter Router { get; } = new();
 
+    public FakeHttpMessageHandler TokenEndpoint { get; }
+
     public InMemoryGrantProvider Grants { get; }
 
     public RecordingConnector Connector { get; }
 
     public ConnectorRegistry Registry { get; }
+
+    public BrokerToolCatalog Catalog { get; }
 
     public TokenVault Vault { get; }
 
@@ -50,7 +70,11 @@ internal sealed class BrokerHarness : IDisposable
 
     public ConnectionBroker Broker { get; }
 
-    public string FreezeMarker => Path.Combine(_dir.Path, "broker.frozen");
+    public string FreezeMarker { get; }
+
+    public string ScratchDirectory => _dir.Path;
+
+    public IEnumerable<Policy.Audit.AuditEntry> BrokerCalls => Audit.Entries.Where(e => e.Kind == "broker_call");
 
     public async Task<string> AuthorizeAsync(string connection = "email")
     {
@@ -58,6 +82,10 @@ internal sealed class BrokerHarness : IDisposable
         await Vault.SetAsync(connection, new ConnectionCredential { AccessToken = token });
         return token;
     }
+
+    /// <summary>An access token about to expire with a refresh token, so the next call refreshes.</summary>
+    public Task AuthorizeExpiringAsync(string connection = "email") =>
+        Vault.SetAsync(connection, new ConnectionCredential { AccessToken = "ya29.old-token-value", AccessTokenExpiresAt = Time.GetUtcNow(), RefreshToken = "refresh-1", ConsentedAt = Time.GetUtcNow().AddDays(-1) }).AsTask();
 
     public void Dispose()
     {
@@ -94,8 +122,15 @@ internal sealed class RecordingRouter : IInteractiveAuthRouter
 {
     public List<InteractiveAuthRequest> Requests { get; } = [];
 
+    public bool Fail { get; set; }
+
     public ValueTask RouteAsync(InteractiveAuthRequest request, CancellationToken cancellationToken = default)
     {
+        if (Fail)
+        {
+            throw new HttpRequestException("capybarad unreachable");
+        }
+
         Requests.Add(request);
         return ValueTask.CompletedTask;
     }

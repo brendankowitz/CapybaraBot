@@ -107,6 +107,8 @@ public sealed class BrokerHostTests
 
         Assert.Empty(await research.ListToolsAsync(cancellationToken: ct));
         Assert.Equal(6, (await code.ListToolsAsync(cancellationToken: ct)).Count);
+        var audit = await File.ReadAllTextAsync(Path.Combine(dirs.State, "audit", "broker-audit.jsonl"), ct);
+        Assert.Equal(2, audit.Split("mcp_token_issued").Length - 1);
     }
 
     [Fact]
@@ -120,6 +122,18 @@ public sealed class BrokerHostTests
         var ex = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
 
         Assert.Contains("'gmail'", ex.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Vault_entry_encrypted_with_another_key_fails_startup_closed()
+    {
+        using var dirs = new BrokerDirectories();
+        await new Connections.Vault.EncryptedFileSecretStore(Path.Combine(dirs.State, "vault"), RandomNumberGenerator.GetBytes(32)).SetAsync("connection-email", "x", TestContext.Current.CancellationToken);
+        await using var factory = new BrokerFactory(dirs);
+
+        var ex = Assert.ThrowsAny<Exception>(() => factory.CreateClient());
+
+        Assert.Contains("connection-email", ex.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]

@@ -4,6 +4,7 @@ using Capybara.Connections.Mcp;
 using Capybara.Connections.Model;
 using Capybara.Connections.OAuth;
 using Capybara.Connections.Vault;
+using Capybara.Policy.Audit;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -34,7 +35,7 @@ public static class BrokerApiEndpoints
         api.MapGet("/tools/{agentId}", (string agentId, BrokerToolCatalog catalog) => catalog.ForAgent(agentId));
         api.MapGet("/connections", ListConnectionsAsync);
         api.MapGet("/credentials/health", (ICredentialHealthSource health, CancellationToken ct) => health.ListAsync(ct));
-        api.MapPost("/connections/{id}/authorize", (string id, ConnectorRegistry registry, CredentialManager credentials) =>
+        api.MapPost("/connections/{id}/authorize", async (string id, ConnectorRegistry registry, CredentialManager credentials, CancellationToken ct) =>
         {
             if (registry.Find(id) is not { } connector)
             {
@@ -43,7 +44,7 @@ public static class BrokerApiEndpoints
 
             try
             {
-                return Results.Ok(credentials.BeginAuthorization(connector.Connection));
+                return Results.Ok(await credentials.BeginAuthorizationAsync(connector.Connection, ct));
             }
             catch (InvalidOperationException ex)
             {
@@ -61,19 +62,30 @@ public static class BrokerApiEndpoints
             {
                 return Results.Problem(ex.Message, statusCode: StatusCodes.Status400BadRequest, title: ex.Error);
             }
+            catch (Exception ex) when (ex is HttpRequestException or System.Text.Json.JsonException)
+            {
+                return Results.Problem("The token endpoint failed; start consent again.", statusCode: StatusCodes.Status502BadGateway);
+            }
         });
-        api.MapPost("/freeze", async (BrokerFreezeRequest request, BrokerFreeze freeze, CancellationToken ct) =>
+        api.MapPost("/freeze", async (BrokerFreezeRequest request, BrokerFreeze freeze) =>
         {
-            await freeze.FreezeAsync(request.Reason, ct);
-            return Results.NoContent();
+            // Not bound to the request token: a disconnecting caller must not abort the kill switch (FR-SAF-06).
+            var outcome = await freeze.FreezeAsync(request.Reason);
+            return outcome.Durable
+                ? Results.NoContent()
+                : Results.Problem(outcome.Error, statusCode: StatusCodes.Status500InternalServerError, title: "frozen, but not durably");
         });
         api.MapPost("/unfreeze", async (BrokerFreeze freeze, CancellationToken ct) =>
         {
             await freeze.UnfreezeAsync(ct);
             return Results.NoContent();
         });
-        api.MapPost("/mcp/{agentId}/token", (string agentId, PerAgentBearerTokenIssuer tokens) =>
-            new McpAgentEndpoint($"/mcp/{Uri.EscapeDataString(agentId)}", tokens.GetOrIssue(agentId)));
+        api.MapPost("/mcp/{agentId}/token", async (string agentId, PerAgentBearerTokenIssuer tokens, IAuditLog audit, CancellationToken ct) =>
+        {
+            var endpoint = new McpAgentEndpoint($"/mcp/{Uri.EscapeDataString(agentId)}", tokens.GetOrIssue(agentId));
+            await audit.AppendAsync(new AuditRecord("mcp_token_issued", "allow", Agent: agentId), ct);
+            return endpoint;
+        });
         api.MapGet("/health", (BrokerFreeze freeze) => new BrokerHealth("ok", freeze.IsFrozen, freeze.Reason));
         return endpoints;
     }
@@ -92,8 +104,11 @@ public static class BrokerApiEndpoints
     private static async Task<ConnectionStatus> StatusAsync(ConnectionDefinition connection, TokenVault vault, CancellationToken ct)
     {
         var credential = await vault.GetAsync(connection.Id, ct);
-        return credential is null
-            ? new ConnectionStatus(connection.Id, connection.Kind, connection.Provider, false, null, "not authorized")
-            : new ConnectionStatus(connection.Id, connection.Kind, connection.Provider, true, credential.AccessTokenExpiresAt, credential.RefreshToken is null ? "no refresh token" : null);
+        return credential switch
+        {
+            null => new ConnectionStatus(connection.Id, connection.Kind, connection.Provider, false, null, "not authorized"),
+            { ConsentRequiredSince: not null } => new ConnectionStatus(connection.Id, connection.Kind, connection.Provider, false, credential.AccessTokenExpiresAt, "consent required"),
+            _ => new ConnectionStatus(connection.Id, connection.Kind, connection.Provider, true, credential.AccessTokenExpiresAt, credential.RefreshToken is null ? "no refresh token" : null),
+        };
     }
 }

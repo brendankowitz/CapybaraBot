@@ -103,7 +103,7 @@ public abstract partial class HttpConnector(HttpClient http, ConnectionDefinitio
 
         string[] items = value.ValueKind switch
         {
-            JsonValueKind.Array => [.. value.EnumerateArray().Select(e => e.GetString() ?? string.Empty)],
+            JsonValueKind.Array => [.. value.EnumerateArray().Select(e => e.ValueKind == JsonValueKind.String ? e.GetString()! : throw new ArgumentException($"{name} must contain only strings."))],
             JsonValueKind.String => [value.GetString()!],
             _ => throw new ArgumentException($"{name} must be a string or an array of strings."),
         };

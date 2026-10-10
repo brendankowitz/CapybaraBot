@@ -107,10 +107,35 @@ public sealed partial class EncryptedFileSecretStore : ISecretStore
         await using (var stream = new FileStream(temp, options))
         {
             await stream.WriteAsync(blob, cancellationToken);
-            await stream.FlushAsync(cancellationToken);
+
+            // Durable before the rename, or a crash could leave a rotated refresh token lost and the old one revoked.
+            stream.Flush(flushToDisk: true);
         }
 
         File.Move(temp, path, overwrite: true);
+    }
+
+    /// <summary>
+    /// Decrypts every stored secret and returns one error per entry that fails (wrong key, tampering, unknown format).
+    /// The broker runs this at startup and refuses to start on any error, rather than discovering a wrong key on the
+    /// first refresh (FR-CON-04).
+    /// </summary>
+    public async ValueTask<IReadOnlyList<string>> VerifyAllAsync(CancellationToken cancellationToken = default)
+    {
+        var errors = new List<string>();
+        foreach (var name in await ListAsync(cancellationToken))
+        {
+            try
+            {
+                _ = await GetAsync(name, cancellationToken);
+            }
+            catch (CryptographicException ex)
+            {
+                errors.Add($"vault entry '{name}' cannot be decrypted with the configured key ({ex.GetType().Name}).");
+            }
+        }
+
+        return errors;
     }
 
     public ValueTask DeleteAsync(string name, CancellationToken cancellationToken = default)
