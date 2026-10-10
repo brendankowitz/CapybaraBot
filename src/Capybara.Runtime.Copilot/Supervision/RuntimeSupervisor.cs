@@ -5,14 +5,21 @@ namespace Capybara.Runtime.Copilot.Supervision;
 
 /// <summary>
 /// Health-checks every runtime with <c>PingAsync</c>, restarts failures with exponential backoff, and quarantines a
-/// runtime that keeps crashing, raising an alert instead of looping (FR-AGT-01, FR-OBS-05).
+/// runtime that keeps crashing, raising an alert instead of looping (FR-AGT-01, FR-AGT-04, FR-OBS-05). After a successful
+/// restart it reconciles the interrupted turn from the event log and reruns the tool self-test, which pauses the agent
+/// on failure (FR-AGT-09).
 /// </summary>
+/// <remarks>
+/// The self-test guard and reconciler are optional only so existing composition keeps compiling; production wires both.
+/// </remarks>
 public sealed partial class RuntimeSupervisor(
     IEnumerable<ISupervisedRuntime> runtimes,
     IAlertSink alerts,
     SupervisorOptions options,
     TimeProvider time,
-    ILogger<RuntimeSupervisor> logger)
+    ILogger<RuntimeSupervisor> logger,
+    SelfTestGuard? selfTest = null,
+    ISessionReconciler? reconciler = null)
 {
     private readonly Dictionary<string, State> _states = [];
     private readonly Lock _gate = new();
@@ -131,6 +138,32 @@ public sealed partial class RuntimeSupervisor(
             }
 
             LogRestartFailed(logger, ex, agent);
+            return;
+        }
+
+        await AfterRestartAsync(runtime, cancellationToken);
+    }
+
+    /// <summary>Reconcile first, so the user learns what the crash interrupted even if the self-test then pauses the agent.</summary>
+    private async Task AfterRestartAsync(ISupervisedRuntime runtime, CancellationToken cancellationToken)
+    {
+        if (reconciler is not null)
+        {
+            try
+            {
+                await reconciler.ReconcileAsync(runtime, cancellationToken);
+            }
+#pragma warning disable CA1031 // Reconciliation is best effort; the restarted runtime stays supervised either way.
+            catch (Exception ex) when (ex is not OperationCanceledException)
+#pragma warning restore CA1031
+            {
+                LogReconcileFailed(logger, ex, runtime.Agent.Value);
+            }
+        }
+
+        if (selfTest is not null)
+        {
+            await selfTest.VerifyAsync(runtime, cancellationToken);
         }
     }
 
@@ -166,6 +199,9 @@ public sealed partial class RuntimeSupervisor(
 
     [LoggerMessage(Level = LogLevel.Critical, Message = "Runtime {Agent} quarantined after {Crashes} crashes")]
     private static partial void LogQuarantined(ILogger logger, string agent, int crashes);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Reconciling runtime {Agent} after restart failed")]
+    private static partial void LogReconcileFailed(ILogger logger, Exception exception, string agent);
 
     private sealed class State
     {

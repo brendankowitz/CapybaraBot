@@ -1,5 +1,6 @@
 using Capybara.Contracts.Agents;
 using Capybara.Observability.Alerts;
+using Capybara.Runtime.Copilot.Hosting;
 using Capybara.Runtime.Copilot.Supervision;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
@@ -86,6 +87,8 @@ public sealed class RuntimeSupervisorTests
         public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
         public Task<bool> PingAsync(CancellationToken cancellationToken) => Task.FromResult(Healthy);
+
+        public Task<SelfTestResult> SelfTestAsync(CancellationToken cancellationToken) => Task.FromResult(new SelfTestResult(true, [], []));
 
         public Task RestartAsync(CancellationToken cancellationToken)
         {

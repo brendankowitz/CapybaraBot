@@ -23,11 +23,29 @@ public sealed class CopilotRuntimeOptions
     /// </summary>
     public string? GitHubToken { get; set; }
 
-    /// <summary>Skill folders shared by all agents; per-agent skills live under <c>config/agents/{id}/skills</c>.</summary>
-    public IList<string> SharedSkillDirectories { get; } = [];
+    /// <summary>
+    /// Built-in skill tier shipped with the binary (FR-SKL-01). The shared tier is <c>{ConfigRoot}/skills</c> and the
+    /// per-agent tier <c>{ConfigRoot}/agents/{id}/skills</c>; both must match their lock-file pins (FR-SKL-04).
+    /// </summary>
+    public string BuiltInSkillDirectory { get; set; } = Path.Combine(AppContext.BaseDirectory, "skills");
 
     /// <summary>Root of user-owned config (agents, rules, routines).</summary>
     public string ConfigRoot { get; set; } = "/etc/capybara";
+
+    /// <summary>
+    /// Tool count above which MCP and external tools are deferred behind <c>tool_search_tool</c> (FR-SKL-02).
+    /// <see langword="null"/> keeps the runtime default.
+    /// </summary>
+    public int? ToolSearchDeferThreshold { get; set; }
+
+    /// <summary>
+    /// OTLP endpoint the Copilot CLI exports its spans to (FR-OBS-01). <see langword="null"/> leaves SDK telemetry off.
+    /// Message content is never captured (FR-OBS-04).
+    /// </summary>
+    public string? OtlpEndpoint { get; set; }
+
+    /// <summary>OTLP HTTP protocol: <c>http/protobuf</c> or <c>http/json</c>.</summary>
+    public string OtlpProtocol { get; set; } = "http/protobuf";
 
     /// <summary>Tools whose results are untrusted; using one taints the session (FR-SAF-03).</summary>
     public IList<string> UntrustedInputTools { get; } = ["web_fetch", "web_search", "email_read", "calendar_read"];
@@ -44,6 +62,4 @@ public sealed class CopilotRuntimeOptions
     public string AgentBaseDirectory(string agentId) => Path.Combine(StateRoot, "agents", agentId, "copilot");
 
     public string AgentWorkingDirectory(string agentId) => Path.Combine(StateRoot, "agents", agentId, "workspace");
-
-    public string AgentSkillDirectory(string agentId) => Path.Combine(ConfigRoot, "agents", agentId, "skills");
 }

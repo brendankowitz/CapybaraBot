@@ -9,6 +9,7 @@ using Capybara.Orchestration.Envelopes;
 using Capybara.Policy.Approvals;
 using Capybara.Policy.Gate;
 using Capybara.Policy.Provenance;
+using Capybara.Policy.Redaction;
 using Capybara.Policy.Rules;
 using Capybara.Policy.Safety;
 using Capybara.Runtime.Copilot.Configuration;
@@ -26,25 +27,38 @@ internal sealed class RuntimeFixture : IDisposable
 {
     private readonly TempDirectory _dir = new();
 
-    public RuntimeFixture(IEnumerable<PolicyRule>? rules = null)
+    public RuntimeFixture(IEnumerable<PolicyRule>? rules = null, IUserInputBroker? userInput = null)
     {
-        Options = new CopilotRuntimeOptions { StateRoot = Path.Combine(_dir.Path, "state"), ConfigRoot = Path.Combine(_dir.Path, "config") };
-        var rulesEngine = new RulesEngine(rules ?? []);
+        Options = new CopilotRuntimeOptions
+        {
+            StateRoot = Path.Combine(_dir.Path, "state"),
+            ConfigRoot = Path.Combine(_dir.Path, "config"),
+            BuiltInSkillDirectory = Path.Combine(_dir.Path, "builtin-skills"),
+        };
+        Rules = new RulesEngine(rules ?? []);
         KillSwitch = new KillSwitch(Time);
-        Approvals = new ApprovalService(rulesEngine, new ApprovalOptions(), Time);
-        Gate = new PolicyGate(rulesEngine, Taint, Approvals, KillSwitch, new InMemoryAuditLog());
+        Approvals = new ApprovalService(Rules, new ApprovalOptions(), Time);
+        Gate = new PolicyGate(Rules, Taint, Approvals, KillSwitch, new InMemoryAuditLog());
         Ledger = new CostLedger(Alerts, Time);
-        Handlers = new SessionHandlers(Gate, Taint, Allowances, new UnattendedUserInputBroker(), Options, NullLogger<SessionHandlers>.Instance);
+        Handlers = new SessionHandlers(Gate, Taint, Allowances, userInput ?? new UnattendedUserInputBroker(), Options, NullLogger<SessionHandlers>.Instance, Redactor);
         Usage = new UsageCapture(Ledger, Time, NullLogger<UsageCapture>.Instance);
         var memory = new WikiStore(new MemoryOptions { Root = Path.Combine(_dir.Path, "memory") }, new NoMemoryVersioning(), Time);
         Tools = new CapybaraToolProvider(new Lazy<A2ACoordinator>(() => throw new InvalidOperationException("not used")), memory, Taint);
-        Configs = new SessionConfigFactory(Handlers, Usage, Tools, Options);
+        Configs = new SessionConfigFactory(Handlers, Usage, Tools, Options, Rules, NullLogger<SessionConfigFactory>.Instance, Secrets);
         Envelopes = new EnvelopeFactory(Time);
     }
 
     public FakeTimeProvider Time { get; } = new(new DateTimeOffset(2026, 10, 10, 12, 0, 0, TimeSpan.Zero));
 
     public CopilotRuntimeOptions Options { get; }
+
+    public string Root => _dir.Path;
+
+    public RulesEngine Rules { get; }
+
+    public SecretRedactor Redactor { get; } = new();
+
+    public FakeSecretStore Secrets { get; } = new();
 
     public KillSwitch KillSwitch { get; }
 
