@@ -54,15 +54,27 @@ public sealed class LiveSessionCreationTests
                 TestContext.Current.TestOutputHelper?.WriteLine($"{session.Kind}: created with MaxAiCredits={config.SessionLimits?.MaxAiCredits}");
                 if (session.Kind == SessionKind.Main)
                 {
-                    // The real self-test comparison (FR-AGT-09) must pass on what the CLI reports.
-                    var actual = await ToolMetadataPoller.WaitForToolsAsync(
-                        async token => (await created.Rpc.Tools.GetCurrentMetadataAsync(token)).Tools?.Select(t => t.Name).ToList(),
+                    // The SDK window is cumulative over a live session: the long-lived main session must carry none.
+                    Assert.Null(config.SessionLimits);
+
+                    // The real self-test comparison (FR-AGT-09) must pass on what the CLI reports, and every host tool
+                    // (list_agents included) must be ours, not the CLI built-in of the same name.
+                    List<(string Name, string Description)>? metadata = null;
+                    await ToolMetadataPoller.WaitForToolsAsync(
+                        async token =>
+                        {
+                            metadata = (await created.Rpc.Tools.GetCurrentMetadataAsync(token)).Tools?.Select(t => (t.Name, t.Description)).ToList();
+                            return metadata?.Select(t => t.Name).ToList();
+                        },
                         TimeSpan.FromSeconds(30),
                         TimeSpan.FromMilliseconds(250),
                         TimeProvider.System,
                         ct);
-                    var result = SelfTestGuard.Normalize(AgentRuntime.Compare(SessionConfigFactory.AvailableToolsFor(session), actual.ToHashSet(StringComparer.Ordinal)));
+                    var reported = metadata!.GroupBy(t => t.Name, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.First().Description, StringComparer.Ordinal);
+                    var result = SelfTestGuard.Normalize(AgentRuntime.Compare(SessionConfigFactory.AvailableToolsFor(session), reported.Keys.ToHashSet(StringComparer.Ordinal)));
                     Assert.True(result.Passed, $"missing: {string.Join(',', result.Missing)}; unexpected: {string.Join(',', result.Unexpected)}");
+                    Assert.Contains(FleetTools.ListAgents, reported.Keys);
+                    Assert.Empty(AgentRuntime.ImpostorTools(f.Configs.HostToolsFor(session), reported));
                 }
 
                 await client.DeleteSessionAsync(session.SessionId, ct);

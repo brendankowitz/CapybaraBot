@@ -11,6 +11,7 @@ using Capybara.Runtime.Copilot.Hooks;
 using Capybara.Runtime.Copilot.Sessions;
 using Capybara.Runtime.Copilot.Supervision;
 using GitHub.Copilot;
+using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 
 namespace Capybara.Runtime.Copilot.Hosting;
@@ -286,13 +287,20 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         try
         {
             var session = await EnsureMainSessionAsync(SystemEnvelope(), cancellationToken);
-            var actual = await ToolMetadataPoller.WaitForToolsAsync(
-                async ct => (await session.Rpc.Tools.GetCurrentMetadataAsync(ct)).Tools?.Select(t => t.Name).ToList(),
+            List<(string Name, string Description)>? metadata = null;
+            await ToolMetadataPoller.WaitForToolsAsync(
+                async ct =>
+                {
+                    metadata = (await session.Rpc.Tools.GetCurrentMetadataAsync(ct)).Tools?.Select(t => (t.Name, t.Description)).ToList();
+                    return metadata?.Select(t => t.Name).ToList();
+                },
                 _options.SelfTestToolsTimeout,
                 _options.SelfTestPollInterval,
                 _time,
                 cancellationToken);
-            return Compare(SessionConfigFactory.AvailableToolsFor(_mainSession!), actual.ToHashSet(StringComparer.Ordinal));
+            var reported = metadata!.GroupBy(t => t.Name, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.First().Description, StringComparer.Ordinal);
+            var result = Compare(SessionConfigFactory.AvailableToolsFor(_mainSession!), reported.Keys.ToHashSet(StringComparer.Ordinal));
+            return WithImpostors(result, ImpostorTools(_configs.HostToolsFor(_mainSession!), reported));
         }
         finally
         {
@@ -314,6 +322,25 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
             _mainLock.Release();
         }
     }
+
+    /// <summary>
+    /// Host tools whose name the runtime reports with a different description: a CLI built-in of the same name (such as
+    /// its own <c>list_agents</c>) standing in for a host tool that was not registered (FR-AGT-09).
+    /// </summary>
+    public static IReadOnlyList<string> ImpostorTools(IEnumerable<AIFunctionDeclaration> host, IReadOnlyDictionary<string, string> reported)
+    {
+        ArgumentNullException.ThrowIfNull(host);
+        ArgumentNullException.ThrowIfNull(reported);
+        return [.. host
+            .Where(t => reported.TryGetValue(t.Name, out var description) && !string.Equals(description, t.Description, StringComparison.Ordinal))
+            .Select(t => t.Name)
+            .Order(StringComparer.Ordinal)];
+    }
+
+    private static SelfTestResult WithImpostors(SelfTestResult result, IReadOnlyList<string> impostors) =>
+        impostors.Count == 0
+            ? result
+            : new SelfTestResult(false, result.Missing, [.. result.Unexpected, .. impostors.Select(t => $"{t} (not the host tool)")]);
 
     public static SelfTestResult Compare(IReadOnlyCollection<string> expected, IReadOnlySet<string> actual)
     {

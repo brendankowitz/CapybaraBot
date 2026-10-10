@@ -199,9 +199,9 @@ Removing `web_fetch` from the EA is not a stylistic choice: a GET with query par
 |---|---|
 | **Agent** | A persistent logical identity with a stable id (`ea`), a persona (name, job, description/standing rules, avatar), model tier, tool allowlist, connection grants, memory scopes, budget and trifecta profile. It is backed by **one `CopilotClient` with its own `BaseDirectory`**. |
 | **Persona files** | `SOUL.md` (identity and tone) and `AGENTS.md` (operating rules), owned and versioned by the user. **Agents cannot write them.** |
-| **Main session** | The agent's long-lived Copilot session (`agent:{id}:main`), resumed across restarts, with infinite-session compaction. Heartbeats and user DMs run here. |
-| **Consult session** | An **ephemeral** session on the *target* agent's client (`agent:{id}:consult:{uuid}`), created for one `ask_agent` call. It has read-only access to the target's memory and returns at most about 2k tokens plus artifact references. |
-| **Task session** | An isolated session for a delegated task or cron run (`agent:{id}:task:{taskId}`). It is retained for audit and then deleted. |
+| **Main session** | The agent's long-lived Copilot session (`agent_{id}_main`), resumed across restarts, with infinite-session compaction. Heartbeats and user DMs run here. |
+| **Consult session** | An **ephemeral** session on the *target* agent's client (`agent_{id}_consult_{uuid}`), created for one `ask_agent` call. It has read-only access to the target's memory and returns at most about 2k tokens plus artifact references. |
+| **Task session** | An isolated session for a delegated task or cron run (`agent_{id}_task_{taskId}`). It is retained for audit and then deleted. |
 | **Inbox** | A per-agent durable FIFO of user messages, agent messages, task results and events. It is the single serialization point for each agent. |
 | **Task** | A durable unit of delegated work using A2A-shaped states: `SUBMITTED`, `WORKING`, `INPUT_REQUIRED`, `COMPLETED`, `FAILED`, `CANCELED`, `REJECTED` ([A2A spec](https://a2a-protocol.org/latest/specification/)). |
 | **Envelope** | Metadata on every agent-to-agent call: trace, depth, hop path, budget, deadline, origin principal, taint. |

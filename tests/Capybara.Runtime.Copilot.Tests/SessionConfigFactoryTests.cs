@@ -33,7 +33,7 @@ public sealed class SessionConfigFactoryTests
             Assert.NotNull(config.OnEvent);
             Assert.Equal([.. Ea.Tools, .. SessionConfigFactory.InfrastructureTools], config.AvailableTools);
             Assert.False(config.EnableSessionStore);
-            Assert.Equal(30d, config.SessionLimits?.MaxAiCredits); // the CLI minimum; the host enforces the 3-credit turn limit
+            Assert.Null(config.SessionLimits); // cumulative SDK window: never on main; the host enforces the 3-credit turn limit
         }
 
         Assert.Equal(SessionIds.Main(Ea.Id), create.SessionId);

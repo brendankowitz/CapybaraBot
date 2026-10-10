@@ -165,8 +165,10 @@ public sealed class CapybaraToolProvider(
 
     /// <summary>
     /// Defines a host tool. Host tools are marked as deliberately overriding a CLI built-in of the same name: the CLI
-    /// ships built-ins such as <c>list_agents</c> and refuses a custom tool that shadows one unless it says so (verified
-    /// against the bundled CLI). In Empty mode no built-in is exposed anyway, so ours is the only one the agent sees.
+    /// ships a built-in <c>list_agents</c> (the only collision today) and refuses a custom tool that shadows one unless it
+    /// says so (verified against the bundled CLI). The mark matters: <c>AvailableTools</c> names the tool, so if the host
+    /// tool were ever missing, the CLI's own <c>list_agents</c> would be exposed in its place. The self-test therefore
+    /// checks that each host tool the runtime reports carries the host's description (FR-AGT-09).
     /// </summary>
     private static AIFunction Define(Delegate method, string name, string description) =>
         GitHub.Copilot.CopilotTool.DefineTool(

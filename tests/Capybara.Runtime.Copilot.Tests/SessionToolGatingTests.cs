@@ -222,7 +222,7 @@ public sealed class SessionToolGatingTests
         var task = f.Session(Ea, SessionKind.Task);
         task.Envelope = main.Envelope;
 
-        Assert.Equal(30d, f.Configs.CreateConfig(main).SessionLimits!.MaxAiCredits);
+        Assert.Null(f.Configs.CreateConfig(main).SessionLimits);
         Assert.Equal(30d, f.Configs.CreateConfig(task).SessionLimits!.MaxAiCredits);
         Assert.Equal(30d, f.Configs.CreateReviewerConfig("reviewer_1", "gpt-5-mini", Ea.Id).SessionLimits!.MaxAiCredits);
         Assert.Equal(45m, SessionConfigFactory.SdkSessionLimit(45m));

@@ -174,6 +174,13 @@ public sealed partial class SessionConfigFactory(
     /// </summary>
     public static decimal SdkSessionLimit(decimal configured) => Math.Max(SdkMinimumSessionCredits, configured);
 
+    /// <summary>The host-implemented tools of <paramref name="session"/>, with their descriptions (for the self-test).</summary>
+    public IReadOnlyList<AIFunctionDeclaration> HostToolsFor(CapybaraSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        return tools.GetTools(session, [.. AvailableToolsFor(session)]);
+    }
+
     /// <summary>
     /// The custom tools for <paramref name="session"/> as it is now (its depth may have changed since it was built), for
     /// <c>SetToolsAsync</c> on a live session. Lists broker tools afresh.
@@ -226,9 +233,13 @@ public sealed partial class SessionConfigFactory(
         };
         config.OnEvent = e => usage.OnEvent(session, e);
 
-        // Budgets are enforced by the host, per turn (the turn's credit limit aborts the run). The SDK limit is only a
-        // soft backstop, and the CLI refuses any below its minimum, so it is never sent lower than that.
-        config.SessionLimits = new SessionLimitsConfig { MaxAiCredits = (double)SdkSessionLimit(agent.Budget.SessionMaxCredits) };
+        // Budgets are enforced by the host, per turn (the turn's credit limit aborts the run). The SDK limit is a soft
+        // backstop for sessions that live for one piece of work; the CLI refuses any below its minimum. Never for the main
+        // session: the SDK window is cumulative over a live session (verified live), so the long-lived main session would
+        // exhaust it within hours, lose its tools and fail every turn until a restart.
+        config.SessionLimits = session.Kind == SessionKind.Main
+            ? null
+            : new SessionLimitsConfig { MaxAiCredits = (double)SdkSessionLimit(agent.Budget.SessionMaxCredits) };
         LogEffectiveLimits(agent);
         config.InfiniteSessions = new InfiniteSessionConfig { Enabled = session.Kind == SessionKind.Main };
 
@@ -459,7 +470,7 @@ public sealed partial class SessionConfigFactory(
         }
     }
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Credit limits for {Agent}: at most {TurnLimit} credits per turn, enforced by the host (abort); SDK session backstop {SdkLimit}")]
+    [LoggerMessage(Level = LogLevel.Information, Message = "Credit limits for {Agent}: at most {TurnLimit} credits per turn, enforced by the host (abort); SDK backstop {SdkLimit} for task, consult and incognito sessions, none for the main session")]
     private static partial void LogLimits(ILogger logger, string agent, decimal turnLimit, decimal sdkLimit);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Broker unreachable while building session {SessionId} of {Agent}; its broker tools are missing until the session is rebuilt")]
