@@ -227,6 +227,12 @@ public sealed class CapybaraToolProvider(
             return "rejected: unknown task.";
         }
 
+        // Before anything is written: a finished task's artifacts must never be overwritten.
+        if (task.State.IsTerminal())
+        {
+            return $"rejected: task is already {task.State}.";
+        }
+
         if (string.IsNullOrWhiteSpace(verification))
         {
             return "rejected: describe how you verified the result against the objective and the output schema.";
@@ -315,7 +321,7 @@ public sealed class CapybaraToolProvider(
 
     private static async Task WriteAtomicAsync(string path, string content, CancellationToken cancellationToken)
     {
-        var temp = path + ".tmp";
+        var temp = $"{path}.{Guid.NewGuid():N}.tmp";
         await File.WriteAllTextAsync(temp, content, cancellationToken);
         File.Move(temp, path, overwrite: true);
     }

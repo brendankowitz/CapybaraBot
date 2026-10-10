@@ -45,6 +45,11 @@ public sealed partial class SessionHandlers(
 
     private static readonly IReadOnlyList<string> ConfirmChoices = ["Accept", "Decline"];
 
+    /// <summary>Tools a routine dry run never runs: they act outside the test (FR-RTN-08).</summary>
+    private static readonly HashSet<string> DryRunForbidden = new(
+        [.. FleetTools.AgentToAgent, .. FleetTools.TaskProtocol, FleetTools.AnswerTask, .. FleetTools.MemoryWrite, FleetTools.ProposeChange],
+        StringComparer.Ordinal);
+
     internal SecretRedactor Redactor { get; } = redactor ?? new SecretRedactor();
 
     /// <summary>
@@ -64,6 +69,14 @@ public sealed partial class SessionHandlers(
             LogSecretInArguments(logger, input.ToolName, session.SessionId);
             turn.RecordAction($"{input.ToolName}: denied (secret in arguments)");
             return Deny("the arguments contain a secret or credential; secrets must never be passed to tools");
+        }
+
+        // FR-RTN-08: checked before the protocol bypass, so no dry run reaches another agent, memory or a proposal.
+        if (session.DryRun && DryRunForbidden.Contains(input.ToolName))
+        {
+            turn.RecordDeniedApproval(input.ToolName);
+            turn.RecordAction($"{input.ToolName}: denied ({PolicyGate.DryRunLayer})");
+            return Deny("dry run: tools that reach other agents, change memory or propose changes are not run in a test");
         }
 
         if (IsProtocolTool(session, input.ToolName))
@@ -141,10 +154,22 @@ public sealed partial class SessionHandlers(
         _ => tool == FleetTools.AnswerTask && SessionConfigFactory.AvailableToolsFor(session).Contains(FleetTools.AnswerTask, StringComparer.Ordinal),
     };
 
+    /// <summary>
+    /// A gate allow becomes exactly one credit of the kind the call will consume: a broker tool's wrapper consumes an
+    /// invocation credit; a built-in or MCP tool raises one permission request. Host tools need neither (the runtime
+    /// asks no permission for custom tools), so granting them a permission credit would leave it lying around for an
+    /// unrelated request.
+    /// </summary>
     private void Allow(CapybaraSession session, string tool)
     {
-        allowances.Grant(session.SessionId);
-        allowances.GrantInvocation(session.SessionId, tool);
+        if (session.IsGatedTool(tool))
+        {
+            allowances.GrantInvocation(session.SessionId, tool);
+        }
+        else if (!session.IsHostTool(tool))
+        {
+            allowances.Grant(session.SessionId);
+        }
     }
 
     /// <summary>

@@ -56,7 +56,14 @@ public static class FleetTools
     public static IReadOnlyList<string> ForConsult(IEnumerable<string> tools, int depth) =>
         [.. ForDepth(tools, depth).Where(t => !MemoryWrite.Contains(t, StringComparer.Ordinal) && t != ProposeChange)];
 
-    /// <summary>Incognito sessions read no memory and write none (FR-MEM-12).</summary>
+    /// <summary>
+    /// Incognito sessions read no memory and write none (FR-MEM-12), and cannot reach other agents either: anything sent
+    /// to another agent could end up in that agent's memory.
+    /// </summary>
     public static IReadOnlyList<string> ForIncognito(IEnumerable<string> tools, int depth) =>
-        [.. ForDepth(tools, depth).Where(t => !MemoryReadTools.Contains(t, StringComparer.Ordinal) && !MemoryWrite.Contains(t, StringComparer.Ordinal))];
+        [.. ForDepth(tools, depth).Where(t =>
+            !MemoryReadTools.Contains(t, StringComparer.Ordinal)
+            && !MemoryWrite.Contains(t, StringComparer.Ordinal)
+            && !AgentToAgent.Contains(t, StringComparer.Ordinal)
+            && t != AnswerTask)];
 }

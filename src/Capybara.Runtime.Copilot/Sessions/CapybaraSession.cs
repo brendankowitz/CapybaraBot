@@ -15,6 +15,7 @@ public sealed class CapybaraSession
     private Envelope _envelope;
     private SessionTurnLog _turn = new();
     private Task _envelopeTail = Task.CompletedTask;
+    private CustomTools _customTools = CustomTools.None;
 
     public CapybaraSession(AgentDefinition agent, string sessionId, SessionKind kind, Envelope envelope, string? taskId = null)
     {
@@ -100,11 +101,26 @@ public sealed class CapybaraSession
         }
     }
 
+    /// <summary>A host-implemented tool registered on this session (fleet tools).</summary>
+    public bool IsHostTool(string tool) => Volatile.Read(ref _customTools).Host.Contains(tool);
+
+    /// <summary>A host-invoked tool wrapped by the policy gate (broker tools).</summary>
+    public bool IsGatedTool(string tool) => Volatile.Read(ref _customTools).Gated.Contains(tool);
+
+    /// <summary>Records the custom tools the session was last built with.</summary>
+    public void SetCustomTools(IEnumerable<string> host, IEnumerable<string> gated) =>
+        Volatile.Write(ref _customTools, new CustomTools(host.ToHashSet(StringComparer.Ordinal), gated.ToHashSet(StringComparer.Ordinal)));
+
     public bool IsReadOnly => Kind == SessionKind.Consult;
 
     public bool IsIncognito => Kind == SessionKind.Incognito;
 
     public int Depth => Envelope.Depth;
+
+    private sealed record CustomTools(IReadOnlySet<string> Host, IReadOnlySet<string> Gated)
+    {
+        public static CustomTools None { get; } = new(new HashSet<string>(), new HashSet<string>());
+    }
 
     /// <summary>Starts a fresh <see cref="Turn"/> record and returns it.</summary>
     public SessionTurnLog BeginTurn()

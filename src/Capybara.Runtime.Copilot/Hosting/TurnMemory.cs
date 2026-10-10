@@ -45,11 +45,14 @@ public sealed partial class TurnMemory(
         }
     }
 
-    /// <summary>Offers the turn's text (not the injected index) to memory providers, with the session's taint.</summary>
+    /// <summary>
+    /// Offers the turn's text (not the injected index) to memory providers, with the session's taint. Never for a dry
+    /// run (FR-RTN-08): a test must leave no trace in memory.
+    /// </summary>
     public async Task IngestAsync(CapybaraSession session, string prompt, string? reply, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(session);
-        if (providers is null || !UsesMemory(session))
+        if (providers is null || session.DryRun || !UsesMemory(session))
         {
             return;
         }

@@ -174,7 +174,9 @@ public sealed partial class SessionConfigFactory(
         config.AvailableTools = [.. available, .. InfrastructureTools];
 
         // Host tools win a name clash: a broker tool can never shadow a fleet tool.
-        config.Tools = [.. hostTools, .. brokerTools.Where(t => !hostNames.Contains(t.Name)).Select(t => handlers.GateInvocation(session, t))];
+        var gated = brokerTools.Where(t => !hostNames.Contains(t.Name)).ToList();
+        config.Tools = [.. hostTools, .. gated.Select(t => handlers.GateInvocation(session, t))];
+        session.SetCustomTools(hostNames, gated.Select(t => t.Name));
         config.McpServers = McpServersFor(agent, resolved.McpTokens);
         config.ToolSearch = new ToolSearchConfig { Enabled = true, DeferThreshold = options.ToolSearchDeferThreshold };
         config.ManagedSettings = ManagedSettingsFor(agent);
