@@ -61,10 +61,12 @@ public sealed class RoutineDispatcher : IDisposable
 
     /// <summary>
     /// Runs a routine as a dry run now (FR-RTN-08), for testing before it is enabled. A dry run bypasses the lifecycle
-    /// state and active hours — the routine may be disabled — but never the kill switch, concurrency cap or budget.
+    /// state and active hours — the routine may be disabled — but never the kill switch, concurrency cap or budget. It is
+    /// still a billed model loop, so only a human may start one; call this only from a user-originated surface.
     /// </summary>
-    public Task<RoutineExecutionResult> DryRunAsync(string routineId, CancellationToken cancellationToken = default)
+    public Task<RoutineExecutionResult> DryRunAsync(string routineId, RoutinePrincipal principal, CancellationToken cancellationToken = default)
     {
+        principal.RequireHuman();
         var routine = _registry.Find(routineId) ?? throw new KeyNotFoundException($"Routine '{routineId}' is not registered.");
         return DispatchAsync(new RoutineFiring(routine, _time.GetUtcNow(), Guid.NewGuid().ToString("n"), DryRun: true), cancellationToken);
     }
@@ -185,10 +187,17 @@ public sealed class RoutineDispatcher : IDisposable
             return result;
         }
 
-        await RecordAsync(routine, firing.FireTime, ToOutcome(result.Status), dryRun ? $"[dry run] {result.Summary}" : result.Summary, cancellationToken, result);
-        if (result.CreditsUsed > 0)
+        // Credits were really spent, so the ledger comes first: nothing in the history path may lose them.
+        try
         {
-            await _costLedger.RecordAsync(new UsageRecord(routine.Owner, result.Model ?? routine.Model, result.CreditsUsed, _time.GetUtcNow(), RoutineId: routine.Id), cancellationToken);
+            if (result.CreditsUsed > 0)
+            {
+                await _costLedger.RecordAsync(new UsageRecord(routine.Owner, result.Model ?? routine.Model, result.CreditsUsed, _time.GetUtcNow(), RoutineId: routine.Id), cancellationToken);
+            }
+        }
+        finally
+        {
+            await RecordAsync(routine, firing.FireTime, ToOutcome(result.Status), dryRun ? $"[dry run] {result.Summary}" : result.Summary, cancellationToken, result);
         }
 
         return result;

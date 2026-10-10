@@ -52,7 +52,7 @@ public sealed class EventRouter(RoutineRegistry registry, RoutineDispatcher disp
             var results = new List<EventRouteResult>();
             foreach (var routine in registry.Routines.Where(r => r.Kind == TriggerKind.Event))
             {
-                if (!await MatchesAsync(routine, payload, document.RootElement, cancellationToken))
+                if (!Matches(routine, payload, document.RootElement))
                 {
                     continue;
                 }
@@ -78,20 +78,9 @@ public sealed class EventRouter(RoutineRegistry registry, RoutineDispatcher disp
         source.Fired -= OnFired;
     }
 
-    private async ValueTask<bool> MatchesAsync(RoutineSpec routine, RoutineEventPayload payload, JsonElement root, CancellationToken cancellationToken)
-    {
-        try
-        {
-            return EventFilter.Parse(routine.EventFilter ?? string.Empty).Matches(payload.Source, payload.EventType, root);
-        }
-        catch (FormatException ex)
-        {
-            // Validation rejects these at load time; this guards a routine that bypassed it. A broad filter never matches.
-            await RejectAsync($"Event routine '{routine.Id}' has an unusable filter and was not triggered: {ex.Message}", cancellationToken);
-            return false;
-        }
-    }
-
+    // The registry only accepts event routines whose filter parses and is narrow, so parsing here cannot fail.
+    private static bool Matches(RoutineSpec routine, RoutineEventPayload payload, JsonElement root) =>
+        EventFilter.Parse(routine.EventFilter ?? string.Empty).Matches(payload.Source, payload.EventType, root);
     private ValueTask RejectAsync(string message, CancellationToken cancellationToken) =>
         alerts.PublishAsync(new Alert("routine.event-rejected", AlertSeverity.Warning, message, time.GetUtcNow()), cancellationToken);
 

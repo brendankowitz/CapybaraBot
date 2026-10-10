@@ -33,6 +33,7 @@ public sealed class RoutineJob : IJob
             : null;
 
         var completed = false;
+        synchronizer.BeginRun(routine.Id);
         try
         {
             await dispatcher.DispatchAsync(new RoutineFiring(routine, context.FireTimeUtc, Guid.NewGuid().ToString("n"), ScheduledFor: scheduledFor), cancellationToken);
@@ -40,11 +41,18 @@ public sealed class RoutineJob : IJob
         }
         finally
         {
-            // Cancellation means the host is shutting down: the pending-trigger repair at the next startup plans the next
-            // fire. For any other outcome the chain must continue, even if recording the run failed.
-            if (completed || !cancellationToken.IsCancellationRequested)
+            // Cancellation means the host is shutting down: the reconcile at the next startup plans the next fire. For any
+            // other outcome the chain must continue, even if recording the run failed.
+            try
             {
-                await synchronizer.AdvanceAsync(routine.Id, context.Trigger.Key, CancellationToken.None);
+                if (completed || !cancellationToken.IsCancellationRequested)
+                {
+                    await synchronizer.AdvanceAsync(routine.Id, context.Trigger.Key, CancellationToken.None);
+                }
+            }
+            finally
+            {
+                synchronizer.EndRun(routine.Id);
             }
         }
     }

@@ -1,3 +1,4 @@
+using Capybara.Scheduling.Validation;
 using Quartz;
 
 namespace Capybara.Scheduling.Planning;
@@ -11,10 +12,14 @@ public static class CronSchedule
     /// <summary>Fixed anchor so projections and validation are deterministic, not dependent on today's date.</summary>
     private static readonly DateTimeOffset SampleAnchor = new(2024, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
-    private const int ValidationWindowDays = 366;
-    private const int ProjectionWindowDays = 30;
-    private const int MaxValidationSamples = 50_000;
-    private const int MaxProjectionSamples = 100_000;
+    private static readonly TimeSpan SampleWindow = TimeSpan.FromDays(366);
+    private static readonly TimeSpan ProjectionWindow = TimeSpan.FromDays(30);
+
+    /// <summary>
+    /// More fires than fit into the sample window at the minimum interval means some gap is too short, so sampling can stop.
+    /// Doubles as the memory bound when projecting an (invalid) very frequent expression.
+    /// </summary>
+    private static readonly int MaxSamples = (int)(SampleWindow / RoutineLimits.MinimumInterval) + 1;
 
     /// <summary>Parses <paramref name="expression"/>; returns false with a human-readable reason when invalid.</summary>
     public static bool TryParse(string? expression, TimeZoneInfo timeZone, out CronExpression cron, out string? error)
@@ -41,44 +46,65 @@ public static class CronSchedule
     }
 
     /// <summary>
-    /// Smallest gap between consecutive fires, found by sampling Quartz's own next-fire computation over a year.
-    /// Null when the expression fires fewer than twice in that window (nothing can be too frequent).
+    /// The shortest gap below <see cref="RoutineLimits.MinimumInterval"/> found between consecutive fires, or null when
+    /// every gap is long enough (FR-RTN-03). Samples Quartz's own next-fire computation over 366 days starting at the
+    /// expression's first fire, so year-pinned expressions are checked too.
     /// </summary>
-    public static TimeSpan? MinimumGap(CronExpression cron)
+    public static TimeSpan? TooFrequentGap(CronExpression cron)
     {
         ArgumentNullException.ThrowIfNull(cron);
-        var end = SampleAnchor.AddDays(ValidationWindowDays);
-        TimeSpan? min = null;
         DateTimeOffset? previous = null;
-        var next = cron.GetNextValidTimeAfter(SampleAnchor.AddSeconds(-1));
-        for (var i = 0; i < MaxValidationSamples && next is { } current && current < end; i++)
+        foreach (var current in Fires(cron))
         {
-            if (previous is { } p && (min is null || current - p < min))
+            if (previous is { } p && current - p < RoutineLimits.MinimumInterval)
             {
-                min = current - p;
+                return current - p;
             }
 
             previous = current;
-            next = cron.GetNextValidTimeAfter(current);
         }
 
-        return min;
+        return null;
     }
 
-    /// <summary>Number of fires in a fixed 30-day sample window — the monthly run count used for cost projection (FR-RTN-09).</summary>
+    /// <summary>
+    /// Fires in the worst 30-day window found within a year of sampling — the monthly run count used for cost projection
+    /// (FR-RTN-09). Using the worst window rather than a year's average means seasonal expressions (<c>JUN-AUG</c>) are not
+    /// under-projected. An expression that fires at all projects at least 1; one that never fires projects 0.
+    /// </summary>
     public static int FiresPerMonth(CronExpression cron)
     {
         ArgumentNullException.ThrowIfNull(cron);
-        var end = SampleAnchor.AddDays(ProjectionWindowDays);
-        var count = 0;
-        var next = cron.GetNextValidTimeAfter(SampleAnchor.AddSeconds(-1));
-        // The cap keeps projecting a too-frequent (and therefore invalid) expression cheap; real routines fire at most ~8,640 times.
-        while (count < MaxProjectionSamples && next is { } current && current < end)
+        var fires = Fires(cron).ToList();
+        var worst = 0;
+        var end = 0;
+        for (var start = 0; start < fires.Count; start++)
         {
-            count++;
-            next = cron.GetNextValidTimeAfter(current);
+            while (end < fires.Count && fires[end] - fires[start] < ProjectionWindow)
+            {
+                end++;
+            }
+
+            worst = Math.Max(worst, end - start);
         }
 
-        return count;
+        return worst;
+    }
+
+    /// <summary>The fires in the sample window, lazily, stopping at <see cref="MaxSamples"/>.</summary>
+    private static IEnumerable<DateTimeOffset> Fires(CronExpression cron)
+    {
+        var next = cron.GetNextValidTimeAfter(SampleAnchor.AddSeconds(-1));
+        if (next is not { } first)
+        {
+            yield break;
+        }
+
+        var end = first + SampleWindow;
+        for (var i = 0; i < MaxSamples && next is { } current && current < end; i++)
+        {
+            yield return current;
+            next = cron.GetNextValidTimeAfter(current);
+        }
     }
 }

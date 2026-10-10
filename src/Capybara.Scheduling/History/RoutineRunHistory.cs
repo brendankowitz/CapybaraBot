@@ -33,13 +33,23 @@ public sealed class RoutineRunHistory
     public async ValueTask RecordAsync(RoutineRun run, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(run);
-        if (_sqlitePath is null)
+        try
         {
-            RecordInMemory(run);
+            if (_sqlitePath is null)
+            {
+                RecordInMemory(run);
+            }
+            else
+            {
+                RecordDurably(run);
+            }
         }
-        else
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            RecordDurably(run);
+            // A failed write must not swallow the run's own alert below, nor hide that history is being lost.
+            await _alerts.PublishAsync(
+                new Alert("scheduler.error", AlertSeverity.Critical, $"Could not persist the run history of routine '{run.RoutineId}' ({run.Outcome}): {ex.Message}", run.StartedAt),
+                cancellationToken);
         }
 
         if (run.Outcome != RoutineRunOutcome.Succeeded)

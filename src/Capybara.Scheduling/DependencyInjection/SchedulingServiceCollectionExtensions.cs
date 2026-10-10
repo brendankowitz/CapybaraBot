@@ -34,7 +34,7 @@ public static class SchedulingServiceCollectionExtensions
         services.TryAddSingleton(options);
         services.TryAddSingleton(TimeProvider.System);
         services.TryAddSingleton(sp => new RoutineRunHistory(sp.GetRequiredService<IAlertSink>(), sp.GetRequiredService<SchedulingOptions>().SQLitePath));
-        services.TryAddSingleton<RoutineRegistry>();
+        services.TryAddSingleton(sp => new RoutineRegistry(sp.GetRequiredService<SchedulingOptions>().TimeZone));
         services.TryAddSingleton(sp =>
         {
             var configured = sp.GetRequiredService<SchedulingOptions>();
@@ -55,6 +55,7 @@ public static class SchedulingServiceCollectionExtensions
 
         services.AddHostedService<SchedulerHostedService>();
         services.AddHostedService<AutoPauseHostedService>();
+        services.AddHostedService<ScheduleRepairHostedService>();
         services.AddHostedService<EventSourceHostedService>();
         return services;
     }

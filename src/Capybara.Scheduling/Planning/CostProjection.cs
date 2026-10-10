@@ -9,7 +9,11 @@ public static class CostProjection
 {
     private const double DaysPerMonth = 30.0;
 
-    public static double RunsPerMonth(RoutineSpec routine)
+    /// <summary>
+    /// Projected billed runs in a month, evaluating cron expressions in <paramref name="timeZone"/> (UTC when omitted).
+    /// Cron expressions use the worst 30-day window of a year (see <see cref="CronSchedule.FiresPerMonth"/>).
+    /// </summary>
+    public static double RunsPerMonth(RoutineSpec routine, TimeZoneInfo? timeZone = null)
     {
         ArgumentNullException.ThrowIfNull(routine);
         if (routine.Kind == TriggerKind.Event)
@@ -17,11 +21,11 @@ public static class CostProjection
             return 0;
         }
 
-        // A cron expression takes precedence over Interval (RoutineSpec.Cron). The cron itself defines when it fires, so
-        // active hours do not apply; the projection is the number of fires Quartz computes in a fixed 30-day window.
-        if (!string.IsNullOrWhiteSpace(routine.Cron))
+        // A cron routine's expression takes precedence over Interval (RoutineSpec.Cron). The cron itself defines when it
+        // fires, so active hours do not apply.
+        if (routine.Kind == TriggerKind.Cron && !string.IsNullOrWhiteSpace(routine.Cron))
         {
-            return CronSchedule.TryParse(routine.Cron, TimeZoneInfo.Utc, out var cron, out _)
+            return CronSchedule.TryParse(routine.Cron, timeZone ?? TimeZoneInfo.Utc, out var cron, out _)
                 ? CronSchedule.FiresPerMonth(cron)
                 : 0;
         }
@@ -38,9 +42,12 @@ public static class CostProjection
             activeHoursPerDay = (span <= TimeSpan.Zero ? span + TimeSpan.FromDays(1) : span).TotalHours;
         }
 
-        return Math.Floor(activeHoursPerDay / interval.TotalHours) * DaysPerMonth;
+        // Rarer than once per active day (a weekly routine): active hours cannot make it cheaper, and it must not round down to zero.
+        return interval.TotalHours >= activeHoursPerDay
+            ? Math.Max(1, Math.Ceiling(DaysPerMonth * 24.0 / interval.TotalHours))
+            : Math.Floor(activeHoursPerDay / interval.TotalHours) * DaysPerMonth;
     }
 
-    public static decimal MonthlyCredits(RoutineSpec routine) =>
-        (decimal)RunsPerMonth(routine) * routine.BudgetCreditsPerRun;
+    public static decimal MonthlyCredits(RoutineSpec routine, TimeZoneInfo? timeZone = null) =>
+        (decimal)RunsPerMonth(routine, timeZone) * routine.BudgetCreditsPerRun;
 }

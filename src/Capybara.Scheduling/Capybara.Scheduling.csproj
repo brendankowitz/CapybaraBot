@@ -17,4 +17,8 @@
   <ItemGroup>
     <EmbeddedResource Include="Resources\tables_sqlite.sql" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Lets the tests reach the fail-closed planning rule (ScheduleSynchronizer.NextPlannedFire), which no public path can hit once the registry validates. -->
+    <InternalsVisibleTo Include="Capybara.Scheduling.Tests" />
+  </ItemGroup>
 </Project>

@@ -10,10 +10,11 @@ namespace Capybara.Scheduling.Lifecycle;
 /// Auto-pauses unattended routines after a configurable absence of user interaction (FR-RTN-06). A paused routine
 /// stays paused until a human confirms with <see cref="ConfirmResume"/>.
 /// <para>
-/// "Interaction" is recorded by the gateway whenever the user touches a routine or talks to its owner agent
-/// (<see cref="RecordUserInteraction(string)"/>, <see cref="RecordUserInteraction(AgentId)"/>). A routine nobody has
-/// interacted with yet starts its clock the first time it is seen. When <c>sqlitePath</c> is given, the interaction
-/// times survive restarts, so frequent restarts cannot keep resetting the clock.
+/// "Interaction" is recorded by the gateway, for a human principal only, whenever the user touches a routine or talks to
+/// its owner agent (<see cref="RecordUserInteraction(string, RoutinePrincipal)"/>,
+/// <see cref="RecordUserInteraction(AgentId, RoutinePrincipal)"/>); a human enabling or resuming a routine through the
+/// registry counts as well. A routine nobody has interacted with yet starts its clock the first time it is seen. When
+/// <c>sqlitePath</c> is given, the interaction times survive restarts, so frequent restarts cannot keep resetting the clock.
 /// </para>
 /// </summary>
 public sealed class RoutineAutoPauser
@@ -41,14 +42,21 @@ public sealed class RoutineAutoPauser
             SchedulingDatabase.Initialize(sqlitePath);
             LoadPersisted(sqlitePath);
         }
+
+        registry.UserInteraction += (_, routineId) => Touch(routineId, _time.GetUtcNow());
     }
 
-    /// <summary>Records that the user interacted with one routine now.</summary>
-    public void RecordUserInteraction(string routineId) => Touch(routineId, _time.GetUtcNow());
+    /// <summary>Records that the user interacted with one routine now. Only a human principal can; an agent cannot keep its own routines alive.</summary>
+    public void RecordUserInteraction(string routineId, RoutinePrincipal principal)
+    {
+        principal.RequireHuman();
+        Touch(routineId, _time.GetUtcNow());
+    }
 
     /// <summary>Records that the user interacted with an agent, which counts for every routine that agent owns.</summary>
-    public void RecordUserInteraction(AgentId owner)
+    public void RecordUserInteraction(AgentId owner, RoutinePrincipal principal)
     {
+        principal.RequireHuman();
         var now = _time.GetUtcNow();
         foreach (var routine in _registry.Routines.Where(r => r.Owner == owner))
         {
@@ -56,12 +64,11 @@ public sealed class RoutineAutoPauser
         }
     }
 
-    /// <summary>The confirmation step for resuming an auto-paused routine; also restarts its inactivity clock.</summary>
-    public void ConfirmResume(string routineId, RoutinePrincipal principal)
-    {
-        _registry.Resume(routineId, principal);
-        RecordUserInteraction(routineId);
-    }
+    /// <summary>
+    /// The confirmation step for resuming an auto-paused routine. The inactivity clock restarts as part of the resume,
+    /// before the routine becomes runnable again, so a check cannot pause it straight back.
+    /// </summary>
+    public void ConfirmResume(string routineId, RoutinePrincipal principal) => _registry.Resume(routineId, principal);
 
     public async ValueTask CheckAsync(CancellationToken cancellationToken = default)
     {

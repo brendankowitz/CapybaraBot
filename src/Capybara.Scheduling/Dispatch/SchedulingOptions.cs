@@ -27,6 +27,12 @@ public sealed record SchedulingOptions
 
     public TimeSpan AlertLead { get; init; } = TimeSpan.FromMinutes(10);
 
+    /// <summary>How often the scheduler checks that every runnable routine still has a live trigger and re-plans any that lost theirs (FR-RTN-05).</summary>
+    public TimeSpan RepairInterval { get; init; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>First wait before re-planning a routine's next fire after a scheduler failure; it doubles per attempt (four attempts).</summary>
+    public TimeSpan RescheduleRetryDelay { get; init; } = TimeSpan.FromMilliseconds(500);
+
     /// <summary>
     /// Time zone for cron expressions and heartbeat active hours. Defaults to the host's local zone because a user's
     /// "07:00–21:00" and "every day at 08:00" are wall-clock statements.

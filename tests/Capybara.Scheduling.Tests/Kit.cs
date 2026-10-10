@@ -63,11 +63,15 @@ internal static class Kit
     }
 }
 
-/// <summary>Executor double that records invocations and returns a scripted result.</summary>
-internal sealed class ScriptedExecutor(Func<RoutineInvocation, RoutineExecutionResult>? script = null) : IRoutineExecutor
+/// <summary>Executor double that records invocations and returns a scripted result. With <c>blocking</c> it parks until <see cref="Release"/> is completed, ignoring cancellation (a hung runtime).</summary>
+internal sealed class ScriptedExecutor(Func<RoutineInvocation, RoutineExecutionResult>? script = null, bool blocking = false) : IRoutineExecutor
 {
     private readonly List<RoutineInvocation> _invocations = [];
     private readonly Lock _gate = new();
+
+    public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public IReadOnlyList<RoutineInvocation> Invocations
     {
@@ -80,14 +84,20 @@ internal sealed class ScriptedExecutor(Func<RoutineInvocation, RoutineExecutionR
         }
     }
 
-    public Task<RoutineExecutionResult> ExecuteAsync(RoutineInvocation invocation, CancellationToken cancellationToken)
+    public async Task<RoutineExecutionResult> ExecuteAsync(RoutineInvocation invocation, CancellationToken cancellationToken)
     {
         lock (_gate)
         {
             _invocations.Add(invocation);
         }
 
-        return Task.FromResult(script?.Invoke(invocation) ?? new RoutineExecutionResult(RoutineExecutionStatus.Succeeded, "ok"));
+        Started.TrySetResult();
+        if (blocking)
+        {
+            await Release.Task;
+        }
+
+        return script?.Invoke(invocation) ?? new RoutineExecutionResult(RoutineExecutionStatus.Succeeded, "ok");
     }
 }
 
@@ -101,7 +111,7 @@ internal sealed class Harness : IDisposable
         Executor = executor ?? new ScriptedExecutor();
         Alerts = new InMemoryAlertSink();
         Ledger = new CostLedger(Alerts, Time);
-        Registry = new RoutineRegistry();
+        Registry = new RoutineRegistry(Options.TimeZone);
         KillSwitch = new KillSwitch(Time);
         History = new RoutineRunHistory(Alerts, historyPath);
         Dispatcher = new RoutineDispatcher(Executor, History, Alerts, Ledger, Registry, KillSwitch, Time, Options);
@@ -135,9 +145,9 @@ internal sealed class Harness : IDisposable
 /// <summary>A <see cref="Harness"/> wired to a real durable Quartz scheduler on a temp SQLite file.</summary>
 internal sealed class QuartzHarness : IAsyncDisposable
 {
-    private readonly TempDirectory _directory;
+    private readonly TempDirectory? _directory;
 
-    private QuartzHarness(TempDirectory directory, Harness inner, IScheduler scheduler, ScheduleSynchronizer synchronizer, string databasePath)
+    private QuartzHarness(TempDirectory? directory, Harness inner, IScheduler scheduler, ScheduleSynchronizer synchronizer, string databasePath)
     {
         _directory = directory;
         Inner = inner;
@@ -154,10 +164,26 @@ internal sealed class QuartzHarness : IAsyncDisposable
 
     public string DatabasePath { get; }
 
-    public static async Task<QuartzHarness> StartAsync(Func<string, SchedulingOptions> options, ScriptedExecutor? executor = null, TimeProvider? time = null)
+    /// <summary>Makes the routine's single pending chain trigger fire right now (same data, so it is still "ours"), as if its time had come.</summary>
+    public async Task FireChainNowAsync(string routineId = "hb", string owner = "ea")
     {
-        var directory = new TempDirectory();
-        var path = Path.Combine(directory.Path, "scheduling.sqlite");
+        var ct = TestContext.Current.CancellationToken;
+        var existing = Assert.Single(await Scheduler.GetTriggersOfJob(new JobKey(routineId, owner), ct));
+        var data = new JobDataMap();
+        foreach (var (key, value) in existing.JobDataMap)
+        {
+            data[key] = value;
+        }
+
+        data["plannedFire"] = DateTimeOffset.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
+        var now = TriggerBuilder.Create().WithIdentity(existing.Key).ForJob(existing.JobKey).UsingJobData(data).StartNow().Build();
+        await Scheduler.RescheduleJob(existing.Key, now, ct);
+    }
+    /// <summary>Starts a scheduler on a fresh temp SQLite file, or on <paramref name="existingDatabase"/> to simulate a restart.</summary>
+    public static async Task<QuartzHarness> StartAsync(Func<string, SchedulingOptions> options, ScriptedExecutor? executor = null, TimeProvider? time = null, string? existingDatabase = null)
+    {
+        var directory = existingDatabase is null ? new TempDirectory() : null;
+        var path = existingDatabase ?? Path.Combine(directory!.Path, "scheduling.sqlite");
         var resolved = options(path);
         var inner = new Harness(resolved, executor, time, path);
         var scheduler = await new Durable.QuartzSchedulerFactory(resolved).CreateSchedulerAsync(TestContext.Current.CancellationToken);
@@ -170,6 +196,6 @@ internal sealed class QuartzHarness : IAsyncDisposable
         Synchronizer.Dispose();
         await Scheduler.Shutdown(waitForJobsToComplete: false, CancellationToken.None);
         Inner.Dispose();
-        _directory.Dispose();
+        _directory?.Dispose();
     }
 }

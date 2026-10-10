@@ -74,4 +74,81 @@ public sealed class CronValidationAndProjectionTests
         Assert.Equal(0, CostProjection.MonthlyCredits(Kit.Event("github:issues.opened repo=a/b")));
         Assert.Equal(24 * 30, CostProjection.RunsPerMonth(Kit.Heartbeat(interval: TimeSpan.FromHours(1))));
     }
+
+    [Theory]
+    [InlineData("0 0 9 L * ?", 2)]
+    [InlineData("0 0 9 1 7 ?", 1)]
+    [InlineData("0 0 9 1 * ?", 2)]
+    [InlineData("0 0 9 ? * MON#1", 2)]
+    [InlineData("0 0 9 1 1 ? 2031", 1)]
+    public void Rare_crons_never_project_zero_so_enabling_cannot_be_acknowledged_for_free(string expression, int worstMonthFires)
+    {
+        var routine = Kit.Cron(expression) with { BudgetCreditsPerRun = 3m };
+
+        Assert.True(CostProjection.RunsPerMonth(routine) >= 1, "a cron that fires at all must cost something");
+        Assert.True(CostProjection.RunsPerMonth(routine) <= worstMonthFires);
+        Assert.NotEqual(0m, CostProjection.MonthlyCredits(routine));
+
+        var registry = new Capybara.Scheduling.Lifecycle.RoutineRegistry();
+        registry.AddOrUpdate(routine, Kit.User);
+        Assert.Throws<InvalidOperationException>(() => registry.Enable(routine.Id, 0m, Kit.User));
+        registry.Enable(routine.Id, registry.ProjectedMonthlyCredits(routine), Kit.User);
+    }
+
+    [Fact]
+    public void Seasonal_crons_project_their_busiest_month_not_the_yearly_average()
+    {
+        var summerDaily = Kit.Cron("0 0 9 * JUN-AUG ?");
+
+        Assert.Equal(30, CostProjection.RunsPerMonth(summerDaily));
+    }
+
+    [Fact]
+    public void A_cron_that_never_fires_projects_zero()
+    {
+        Assert.Equal(0, CostProjection.RunsPerMonth(Kit.Cron("0 0 9 1 1 ? 2020")));
+    }
+
+    [Fact]
+    public void An_interval_rarer_than_daily_projects_its_real_cost()
+    {
+        var weekly = Kit.Heartbeat(interval: TimeSpan.FromDays(7));
+
+        Assert.Equal(5, CostProjection.RunsPerMonth(weekly));
+    }
+
+    [Fact]
+    public void A_heartbeat_ignores_a_stray_cron_expression()
+    {
+        var heartbeat = Kit.Heartbeat(interval: TimeSpan.FromHours(2)) with { Cron = "0 0 9 1 1 ?" };
+
+        Assert.Equal(12 * 30, CostProjection.RunsPerMonth(heartbeat));
+    }
+
+    [Fact]
+    public void A_too_frequent_stretch_in_one_part_of_the_year_or_a_pinned_year_is_still_found()
+    {
+        Assert.True(CronSchedule.TryParse("0 0/2 * * 11 ?", TimeZoneInfo.Utc, out var everyTwoMinutesInNovember, out _));
+        Assert.True(CronSchedule.TryParse("0 * * 1 1 ? 2035", TimeZoneInfo.Utc, out var everyMinuteInOneYear, out _));
+        Assert.True(CronSchedule.TryParse("0 0/5 * * * ?", TimeZoneInfo.Utc, out var everyFiveMinutes, out _));
+
+        Assert.Equal(TimeSpan.FromMinutes(2), CronSchedule.TooFrequentGap(everyTwoMinutesInNovember));
+        Assert.Equal(TimeSpan.FromMinutes(1), CronSchedule.TooFrequentGap(everyMinuteInOneYear));
+        Assert.Null(CronSchedule.TooFrequentGap(everyFiveMinutes));
+        Assert.NotEmpty(RoutineValidator.Validate([Kit.Cron("0 0/2 * * 11 ?")], Known));
+    }
+
+    [Fact]
+    public void Cron_checks_use_the_configured_time_zone()
+    {
+        var pacific = TimeZoneInfo.CreateCustomTimeZone("test-minus-7", TimeSpan.FromHours(-7), "test", "test");
+        var routine = Kit.Cron("0 0 9 * * ?");
+        var registry = new Capybara.Scheduling.Lifecycle.RoutineRegistry(pacific);
+
+        registry.AddOrUpdate(routine, Kit.User);
+
+        Assert.Same(pacific, registry.TimeZone);
+        Assert.Equal(30, CostProjection.RunsPerMonth(routine, pacific));
+        Assert.Empty(RoutineValidator.Validate([routine], Known, pacific));
+    }
 }

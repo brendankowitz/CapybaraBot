@@ -2,6 +2,7 @@ using System.Text.Json;
 using Capybara.Contracts.Messaging;
 using Capybara.Scheduling.Execution;
 using Capybara.Scheduling.History;
+using Capybara.Scheduling.Lifecycle;
 using Capybara.Scheduling.Triggers;
 
 namespace Capybara.Scheduling.Tests;
@@ -56,20 +57,6 @@ public sealed class EventRoutingAndDryRunTests
         var router = new EventRouter(harness.Registry, harness.Dispatcher, harness.Alerts, harness.Time);
 
         Assert.Empty(await router.RouteAsync(PullRequest(), TestContext.Current.CancellationToken));
-    }
-
-    [Fact]
-    public async Task A_broad_filter_that_bypassed_validation_never_matches_and_raises_an_alert()
-    {
-        using var harness = new Harness();
-        harness.Registry.AddOrUpdate(Kit.Event("github:pull_request.opened", "broad"), Kit.User);
-        var router = new EventRouter(harness.Registry, harness.Dispatcher, harness.Alerts, harness.Time);
-
-        var results = await router.RouteAsync(PullRequest(), TestContext.Current.CancellationToken);
-
-        Assert.Empty(results);
-        Assert.Empty(harness.Executor.Invocations);
-        Assert.Single(harness.Alerts.Recent, a => a.Kind == "routine.event-rejected");
     }
 
     [Theory]
@@ -156,7 +143,7 @@ public sealed class EventRoutingAndDryRunTests
         var routine = Kit.Heartbeat() with { Enabled = false };
         harness.Registry.AddOrUpdate(routine, Kit.User);
 
-        var result = await harness.Dispatcher.DryRunAsync(routine.Id, TestContext.Current.CancellationToken);
+        var result = await harness.Dispatcher.DryRunAsync(routine.Id, Kit.User, TestContext.Current.CancellationToken);
 
         Assert.Equal(RoutineExecutionStatus.Succeeded, result.Status);
         Assert.True(Assert.Single(executor.Invocations).DryRun);
@@ -174,11 +161,12 @@ public sealed class EventRoutingAndDryRunTests
         harness.Registry.AddOrUpdate(routine, Kit.User);
         harness.KillSwitch.Engage("stop");
 
-        var result = await harness.Dispatcher.DryRunAsync(routine.Id, TestContext.Current.CancellationToken);
+        var result = await harness.Dispatcher.DryRunAsync(routine.Id, Kit.User, TestContext.Current.CancellationToken);
 
         Assert.Equal(RoutineExecutionStatus.Skipped, result.Status);
         Assert.Empty(harness.Executor.Invocations);
-        await Assert.ThrowsAsync<KeyNotFoundException>(() => harness.Dispatcher.DryRunAsync("nope", TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<KeyNotFoundException>(() => harness.Dispatcher.DryRunAsync("nope", Kit.User, TestContext.Current.CancellationToken));
+        Assert.Throws<InvalidOperationException>(() => { _ = harness.Dispatcher.DryRunAsync(routine.Id, RoutinePrincipal.Agent("ea"), TestContext.Current.CancellationToken); });
     }
 
     [Fact]
@@ -188,7 +176,7 @@ public sealed class EventRoutingAndDryRunTests
         var routine = Kit.Heartbeat();
         harness.Registry.AddOrUpdate(routine, Kit.User);
 
-        await harness.Dispatcher.DryRunAsync(routine.Id, TestContext.Current.CancellationToken);
+        await harness.Dispatcher.DryRunAsync(routine.Id, Kit.User, TestContext.Current.CancellationToken);
         await harness.Dispatcher.DispatchAsync(new Dispatch.RoutineFiring(routine, DateTimeOffset.UtcNow, "real"), TestContext.Current.CancellationToken);
 
         var run = Assert.Single(harness.History.Get(routine.Id));

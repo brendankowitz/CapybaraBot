@@ -125,7 +125,7 @@ public sealed class SchedulerFeatureTests
         registry.Enable(routine.Id, Capybara.Scheduling.Planning.CostProjection.MonthlyCredits(routine), RoutinePrincipal.Human("user"));
 
         var auto = new RoutineAutoPauser(registry, alerts, time, autoPauseDays: 14);
-        auto.RecordUserInteraction(routine.Id);
+        auto.RecordUserInteraction(routine.Id, RoutinePrincipal.Human("user"));
         time.Advance(TimeSpan.FromDays(15));
         await auto.CheckAsync(TestContext.Current.CancellationToken);
         Assert.True(registry.GetState(routine.Id).AutoPaused);

@@ -207,7 +207,7 @@ public sealed class QuartzSchedulingTests
         var known = new HashSet<AgentId> { Kit.Ea };
         var ct = TestContext.Current.CancellationToken;
 
-        var first = await loader.ApplyAsync([Kit.Heartbeat(), Kit.Cron("0 0 */2 * * ?") with { BudgetCreditsPerRun = 2m }, Kit.Event("github:push repo=a/b")], known, ct);
+        var first = await loader.ApplyAsync([Kit.Heartbeat(), Kit.Cron("0 0 */2 * * ?") with { BudgetCreditsPerRun = 2m }, Kit.Event("github:push repo=a/b")], known, Kit.User, ct);
 
         Assert.True(first.Applied);
         Assert.Equal(["hb", "cron", "evt"], first.Added);
@@ -215,7 +215,7 @@ public sealed class QuartzSchedulingTests
         Assert.Single(await TriggersAsync(harness));
         Assert.Single(await TriggersAsync(harness, new JobKey("cron", "ea")));
 
-        var second = await loader.ApplyAsync([Kit.Heartbeat() with { Prompt = "changed" }, Kit.Event("github:push repo=a/b")], known, ct);
+        var second = await loader.ApplyAsync([Kit.Heartbeat() with { Prompt = "changed" }, Kit.Event("github:push repo=a/b")], known, Kit.User, ct);
 
         Assert.Equal(["hb"], second.Updated);
         Assert.Equal(["cron"], second.Removed);
@@ -230,9 +230,9 @@ public sealed class QuartzSchedulingTests
         using var loader = new RoutineConfigLoader(harness.Inner.Registry, harness.Synchronizer, harness.Inner.Alerts, TimeProvider.System);
         var known = new HashSet<AgentId> { Kit.Ea };
         var ct = TestContext.Current.CancellationToken;
-        await loader.ApplyAsync([Kit.Heartbeat()], known, ct);
+        await loader.ApplyAsync([Kit.Heartbeat()], known, Kit.User, ct);
 
-        var rejected = await loader.ApplyAsync([Kit.Heartbeat() with { Prompt = "edited" }, Kit.Cron("0 */1 * * * ?")], known, ct);
+        var rejected = await loader.ApplyAsync([Kit.Heartbeat() with { Prompt = "edited" }, Kit.Cron("0 */1 * * * ?")], known, Kit.User, ct);
 
         Assert.False(rejected.Applied);
         Assert.NotEmpty(rejected.Errors);
@@ -248,11 +248,29 @@ public sealed class QuartzSchedulingTests
         using var loader = new RoutineConfigLoader(harness.Inner.Registry, harness.Synchronizer, harness.Inner.Alerts, TimeProvider.System);
         harness.Inner.Registry.AddOrUpdate(Kit.Heartbeat("manual"), Kit.User);
 
-        await loader.ApplyAsync([Kit.Heartbeat()], new HashSet<AgentId> { Kit.Ea }, TestContext.Current.CancellationToken);
-        await loader.ApplyAsync([], new HashSet<AgentId> { Kit.Ea }, TestContext.Current.CancellationToken);
+        await loader.ApplyAsync([Kit.Heartbeat()], new HashSet<AgentId> { Kit.Ea }, Kit.User, TestContext.Current.CancellationToken);
+        await loader.ApplyAsync([], new HashSet<AgentId> { Kit.Ea }, Kit.User, TestContext.Current.CancellationToken);
 
         Assert.NotNull(harness.Inner.Registry.Find("manual"));
         Assert.Null(harness.Inner.Registry.Find("hb"));
+    }
+
+    [Fact]
+    public async Task Routines_not_loaded_from_config_count_towards_the_per_agent_limit_and_nothing_is_half_applied()
+    {
+        await using var harness = await QuartzHarness.StartAsync(p => Options(p));
+        using var loader = new RoutineConfigLoader(harness.Inner.Registry, harness.Synchronizer, harness.Inner.Alerts, TimeProvider.System);
+        for (var i = 0; i < 10; i++)
+        {
+            harness.Inner.Registry.AddOrUpdate(Kit.Heartbeat($"manual{i}"), Kit.User);
+        }
+
+        var declared = Enumerable.Range(0, 45).Select(i => Kit.Heartbeat($"cfg{i}")).ToList();
+        var result = await loader.ApplyAsync(declared, new HashSet<AgentId> { Kit.Ea }, Kit.User, TestContext.Current.CancellationToken);
+
+        Assert.False(result.Applied);
+        Assert.Equal(10, harness.Inner.Registry.Routines.Count);
+        Assert.Single(harness.Inner.Alerts.Recent, a => a.Kind == "routine.config-rejected");
     }
 
     [Fact]
@@ -272,6 +290,7 @@ public sealed class QuartzSchedulingTests
         var hosted = provider.GetServices<IHostedService>().ToList();
         var scheduler = Assert.Single(hosted.OfType<SchedulerHostedService>());
         Assert.Single(hosted.OfType<AutoPauseHostedService>());
+        Assert.Single(hosted.OfType<ScheduleRepairHostedService>());
         Assert.Single(hosted.OfType<EventSourceHostedService>());
         Assert.Same(provider.GetRequiredService<CostLedger>(), provider.GetRequiredService<CostLedger>());
         Assert.Same(alerts, provider.GetRequiredService<IAlertSink>());
