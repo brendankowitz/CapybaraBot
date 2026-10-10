@@ -29,6 +29,7 @@ public sealed partial class KillSwitchCoordinator(
     IAlertSink alerts,
     ICapybaraEvents events,
     TimeProvider time,
+    IHostApplicationLifetime lifetime,
     ILogger<KillSwitchCoordinator> logger) : IHostedService, IDisposable
 {
     public const string BrokerAlertKind = "killswitch.broker";
@@ -44,10 +45,11 @@ public sealed partial class KillSwitchCoordinator(
         killSwitch.Engaged += OnEngaged;
         killSwitch.Released += OnReleased;
 
-        // Composition re-engaged a switch that was on before the restart; finish the job (stop the runtimes it started).
+        // Composition re-engaged a switch that was on before the restart, so no turn can run. This service starts before
+        // the runtimes (it must hear every engagement), so finish the job once they have started: stop them again.
         if (killSwitch.IsEngaged)
         {
-            Enqueue(() => EngageAsync(killSwitch.Reason ?? "restored after restart", restored: true));
+            lifetime.ApplicationStarted.Register(() => Enqueue(() => EngageAsync(killSwitch.Reason ?? "restored after restart", restored: true)));
         }
 
         return Task.CompletedTask;

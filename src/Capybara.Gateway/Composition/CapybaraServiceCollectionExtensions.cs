@@ -139,6 +139,15 @@ public static class CapybaraServiceCollectionExtensions
         services.AddCapybaraMemory(new MemoryOptions { Root = state.Memory });
         AddOrchestration(services, fleet, state, host, configuration, soleAgent);
         AddBroker(services, configuration);
+        if (soleAgent is null)
+        {
+            // Hosted services start in registration order. These subscribe to the kill switch and to approval, thread
+            // and turn events, so they must be listening before the runtimes and inbox pumps start producing them.
+            services.AddSingleton<KillSwitchCoordinator>();
+            services.AddHostedService(sp => sp.GetRequiredService<KillSwitchCoordinator>());
+            services.AddHostedService<EventBridge>();
+        }
+
         AddRuntime(services, configuration, runtime, hosting, host, state);
 
         return new CoreSettings(host, state, fleet, new RuntimeSettings(autoStart));
@@ -283,9 +292,6 @@ public static class CapybaraServiceCollectionExtensions
         services.AddHostedService(sp => sp.GetRequiredService<ConfigurationSync>());
         AddScheduling(services, configuration, core.State);
 
-        services.AddSingleton<KillSwitchCoordinator>();
-        services.AddHostedService(sp => sp.GetRequiredService<KillSwitchCoordinator>());
-        services.AddHostedService<EventBridge>();
         services.AddHostedService<ApprovalSweepService>();
 
         // Account quota (FR-OBS-02): read through a running agent CLI, so only when runtimes start.
