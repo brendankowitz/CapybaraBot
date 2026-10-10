@@ -292,6 +292,8 @@ public sealed class SelfTestAndRecoveryTests : IDisposable
 
         public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
+        public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
         public Task<bool> PingAsync(CancellationToken cancellationToken) => Task.FromResult(Healthy);
 
         public Task RestartAsync(CancellationToken cancellationToken)

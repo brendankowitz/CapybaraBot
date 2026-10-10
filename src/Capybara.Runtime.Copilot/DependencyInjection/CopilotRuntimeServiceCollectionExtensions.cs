@@ -36,8 +36,10 @@ public static class CopilotRuntimeServiceCollectionExtensions
     /// <para>
     /// Expects the policy, orchestration, observability and memory services (<see cref="WikiStore"/> at least) to be
     /// registered. Optional collaborators are used when present: <c>IBrokerToolSource</c> (broker tools),
-    /// <see cref="IUserEscalation"/> (phone channel), <c>ProposalService</c> (<c>propose_change</c>), <c>ISecretStore</c>
-    /// and <see cref="IMemoryProvider"/>s. <see cref="InboxPumpOptions"/> can be registered first to override defaults.
+    /// <see cref="IUserEscalation"/> (phone channel), <c>ProposalService</c> (<c>propose_change</c>), <c>ISecretStore</c>,
+    /// <see cref="IAgentCliLauncher"/> (per-agent sandbox) and <see cref="IMemoryProvider"/>s. <see cref="InboxPumpOptions"/>
+    /// can be registered first to override defaults. Turn, compaction and egress-denial signals are raised on
+    /// <see cref="RuntimeActivity"/>.
     /// </para>
     /// <para>
     /// The host must pass <see cref="IToolCallReviewer"/> to its <c>PolicyGate</c>; the reviewer resolves the session
@@ -73,6 +75,7 @@ public static class CopilotRuntimeServiceCollectionExtensions
         services.TryAddSingleton<IMemoryStore>(sp => sp.GetRequiredService<CompositeMemoryStore>());
 
         // Sessions, hooks and tools.
+        services.TryAddSingleton<RuntimeActivity>();
         services.TryAddSingleton<IUserInputBroker, EscalatingUserInputBroker>();
         services.AddSingleton<PermissionAllowances>();
         services.AddSingleton<ApprovalTurnStore>();
@@ -140,5 +143,7 @@ public static class CopilotRuntimeServiceCollectionExtensions
         sp.GetRequiredService<Capybara.Observability.Alerts.IAlertSink>(),
         sp.GetRequiredService<SessionLimiter>(),
         sp.GetRequiredService<TimeProvider>(),
-        sp.GetRequiredService<ILogger<AgentRuntime>>());
+        sp.GetRequiredService<ILogger<AgentRuntime>>(),
+        sp.GetRequiredService<RuntimeActivity>(),
+        sp.GetService<IAgentCliLauncher>());
 }

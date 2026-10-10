@@ -10,6 +10,9 @@ public interface ISupervisedRuntime
 
     Task StartAsync(CancellationToken cancellationToken);
 
+    /// <summary>Ends the runtime's process; <see cref="StartAsync"/> or <see cref="RestartAsync"/> brings it back.</summary>
+    Task StopAsync(CancellationToken cancellationToken);
+
     Task<bool> PingAsync(CancellationToken cancellationToken);
 
     Task RestartAsync(CancellationToken cancellationToken);

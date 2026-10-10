@@ -13,7 +13,7 @@ namespace Capybara.Runtime.Copilot.Supervision;
 /// The self-test guard and reconciler are optional only so composition that predates them keeps compiling. Running
 /// without either is a degraded, not fail-closed, configuration, so it is logged as Critical at construction.
 /// </remarks>
-public sealed partial class RuntimeSupervisor
+public sealed partial class RuntimeSupervisor : IDisposable
 {
     private readonly IEnumerable<ISupervisedRuntime> _runtimes;
     private readonly IAlertSink _alerts;
@@ -53,6 +53,22 @@ public sealed partial class RuntimeSupervisor
     private readonly Dictionary<string, State> _states = [];
     private readonly Lock _gate = new();
 
+    // Serializes health checks with suspension, so a restart already under way can never outlive a suspend.
+    private readonly SemaphoreSlim _checks = new(1, 1);
+    private bool _suspended;
+
+    /// <summary>Whether <see cref="SuspendAsync"/> stopped the runtimes and checks are off until <see cref="Resume"/>.</summary>
+    public bool IsSuspended
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _suspended;
+            }
+        }
+    }
+
     public IReadOnlyList<RuntimeHealth> Health
     {
         get
@@ -75,9 +91,73 @@ public sealed partial class RuntimeSupervisor
 
     public async Task CheckOnceAsync(CancellationToken cancellationToken)
     {
-        foreach (var runtime in _runtimes)
+        await _checks.WaitAsync(cancellationToken);
+        try
         {
-            await CheckAsync(runtime, cancellationToken);
+            foreach (var runtime in _runtimes)
+            {
+                if (IsSuspended)
+                {
+                    return;
+                }
+
+                await CheckAsync(runtime, cancellationToken);
+            }
+        }
+        finally
+        {
+            _checks.Release();
+        }
+    }
+
+    /// <summary>
+    /// Stops every runtime's process and turns health checks off, so nothing restarts them (FR-SAF-06 kill switch).
+    /// Waits for a check in progress first. A runtime that fails to stop is logged and the rest are still stopped.
+    /// </summary>
+    public async Task SuspendAsync(CancellationToken cancellationToken)
+    {
+        await _checks.WaitAsync(cancellationToken);
+        try
+        {
+            lock (_gate)
+            {
+                _suspended = true;
+            }
+
+            foreach (var runtime in _runtimes)
+            {
+                lock (_gate)
+                {
+                    StateFor(runtime.Agent.Value).Stopped = true;
+                }
+
+                try
+                {
+                    await runtime.StopAsync(cancellationToken);
+                }
+#pragma warning disable CA1031 // Stop the rest regardless.
+                catch (Exception ex) when (ex is not OperationCanceledException)
+#pragma warning restore CA1031
+                {
+                    LogStopFailed(_logger, ex, runtime.Agent.Value);
+                }
+            }
+        }
+        finally
+        {
+            _checks.Release();
+        }
+    }
+
+    /// <summary>
+    /// Turns health checks back on. The next check restarts each runtime <see cref="SuspendAsync"/> stopped, without
+    /// counting it as a crash, then reconciles and self-tests it like any restart.
+    /// </summary>
+    public void Resume()
+    {
+        lock (_gate)
+        {
+            _suspended = false;
         }
     }
 
@@ -113,6 +193,7 @@ public sealed partial class RuntimeSupervisor
             {
                 state.ConsecutiveFailures = 0;
                 state.NextAttemptAt = null;
+                state.Stopped = false;
             }
 
             return;
@@ -120,16 +201,23 @@ public sealed partial class RuntimeSupervisor
 
         int crashes;
         bool quarantined;
+        bool deliberate;
         lock (_gate)
         {
-            state.Crashes.Enqueue(now);
+            // A runtime stopped by SuspendAsync is down on purpose: bring it back without counting a crash.
+            deliberate = state.Stopped;
+            if (!deliberate)
+            {
+                state.Crashes.Enqueue(now);
+            }
+
             while (state.Crashes.TryPeek(out var oldest) && now - oldest > _options.CrashWindow)
             {
                 state.Crashes.Dequeue();
             }
 
             crashes = state.Crashes.Count;
-            if (crashes >= _options.MaxCrashes)
+            if (!deliberate && crashes >= _options.MaxCrashes)
             {
                 state.Quarantined = true;
             }
@@ -154,6 +242,7 @@ public sealed partial class RuntimeSupervisor
             {
                 state.ConsecutiveFailures = 0;
                 state.NextAttemptAt = null;
+                state.Stopped = false;
             }
         }
 #pragma warning disable CA1031 // A failed restart backs off; it must not stop supervision of other agents.
@@ -196,6 +285,8 @@ public sealed partial class RuntimeSupervisor
         }
     }
 
+    public void Dispose() => _checks.Dispose();
+
     public TimeSpan Backoff(int consecutiveFailures)
     {
         var factor = Math.Pow(2, Math.Clamp(consecutiveFailures - 1, 0, 20));
@@ -235,6 +326,9 @@ public sealed partial class RuntimeSupervisor
     [LoggerMessage(Level = LogLevel.Error, Message = "Reconciling runtime {Agent} after restart failed")]
     private static partial void LogReconcileFailed(ILogger logger, Exception exception, string agent);
 
+    [LoggerMessage(Level = LogLevel.Error, Message = "Stopping runtime {Agent} for suspension failed")]
+    private static partial void LogStopFailed(ILogger logger, Exception exception, string agent);
+
     private sealed class State
     {
         public Queue<DateTimeOffset> Crashes { get; } = new();
@@ -244,5 +338,8 @@ public sealed partial class RuntimeSupervisor
         public DateTimeOffset? NextAttemptAt { get; set; }
 
         public bool Quarantined { get; set; }
+
+        /// <summary>Stopped by <see cref="SuspendAsync"/> and not yet restarted.</summary>
+        public bool Stopped { get; set; }
     }
 }
