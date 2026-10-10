@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Capybara.Client\Capybara.Client.csproj" />
+    <ProjectReference Include="..\..\src\Capybara.Contracts\Capybara.Contracts.csproj" />
+  </ItemGroup>
+</Project>

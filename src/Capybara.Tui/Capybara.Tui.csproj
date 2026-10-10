@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <Description>Spectre.Console TUI for the personal agent fleet.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Spectre.Console" />
+    <ProjectReference Include="..\Capybara.Client\Capybara.Client.csproj" />
+  </ItemGroup>
+</Project>

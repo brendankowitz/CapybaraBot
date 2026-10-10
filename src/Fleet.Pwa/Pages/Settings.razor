@@ -1,6 +1,0 @@
-@page "/settings"
-@inject TokenStore Tokens
-@inject FleetApiClient Api
-@inject IJSRuntime Js
-<h1>Settings</h1><label>Device token<input type="password" @bind="_token" /></label><button @onclick="SaveAsync">Save token</button><label>Notifications<select @bind="_notifications"><option>enabled</option><option>quiet</option><option>disabled</option></select></label><button @onclick="SavePrefsAsync">Save preferences</button><button @onclick="SubscribeAsync">Enable web push</button><p>@_message</p>
-@code { private string _token = string.Empty; private string _notifications = "enabled"; private string _message = string.Empty; protected override async Task OnInitializedAsync() { _token = await Tokens.GetTokenAsync() ?? string.Empty; _notifications = await Tokens.GetNotificationPreferenceAsync() ?? "enabled"; await Js.InvokeVoidAsync("fleetPresence.start", DotNetObjectReference.Create(this)); } private async Task SaveAsync() { await Tokens.SetTokenAsync(_token); _message = "Token saved locally."; } private async Task SavePrefsAsync() { await Tokens.SetNotificationPreferenceAsync(_notifications); _message = "Preferences saved."; } private async Task SubscribeAsync() { await Js.InvokeVoidAsync("fleetPush.subscribe"); _message = "Push subscription requested."; } [JSInvokable] public Task SetFocused(bool focused) => Api.SetPresenceAsync(focused); }

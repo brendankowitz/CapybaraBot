@@ -1,0 +1,25 @@
+@page "/agents/{Id}"
+@inject CapybaraApiClient Api
+
+<h1>Chat: @Id</h1>
+<div class="chat">
+@foreach (var line in _lines) { <pre>@line</pre> }
+</div>
+<textarea @bind="_prompt" rows="5" placeholder="Message"></textarea>
+<button @onclick="SendAsync">Send</button>
+
+@code {
+    [Parameter] public string Id { get; set; } = string.Empty;
+    private string _prompt = string.Empty;
+    private readonly List<string> _lines = [];
+
+    private async Task SendAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_prompt)) { return; }
+        var prompt = _prompt;
+        _prompt = string.Empty;
+        _lines.Add($"> {prompt}");
+        var result = await Api.SendTurnAsync(Id, prompt);
+        _lines.Add(result?.Content ?? "No response.");
+    }
+}

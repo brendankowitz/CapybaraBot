@@ -1,0 +1,5 @@
+@page "/thread"
+@inject CapybaraApiClient Api
+<h1>Fleet thread</h1>
+@if (_entries is null) { <p>Loading…</p> } else { @foreach (var entry in _entries) { <article class="card"><b>@entry.From → @entry.To</b><pre>@entry.Summary</pre></article> } }
+@code { private IReadOnlyList<ThreadEntryDto>? _entries; protected override async Task OnInitializedAsync() => _entries = await Api.GetThreadAsync(); }

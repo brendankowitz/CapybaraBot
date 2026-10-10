@@ -1,0 +1,5 @@
+@page "/kill"
+@inject CapybaraApiClient Api
+@inject IJSRuntime Js
+<h1>Kill switch</h1><p>@_status</p><input @bind="_reason" placeholder="Reason" /><button class="danger" @onclick="EngageAsync">Engage from this device</button><button disabled="@(!_desktop)" @onclick="ReleaseAsync">Release from desktop</button>
+@code { private string _status = string.Empty; private string _reason = "manual"; private bool _desktop; protected override async Task OnInitializedAsync() { _desktop = await Js.InvokeAsync<bool>("capybaraDevice.isDesktop"); await LoadAsync(); } private async Task LoadAsync() { var s = await Api.GetKillSwitchAsync(); _status = s?.IsEngaged == true ? $"Engaged: {s.Reason}" : "Released"; } private async Task EngageAsync() { await Api.EngageKillSwitchAsync(_reason); await LoadAsync(); } private async Task ReleaseAsync() { await Api.ReleaseKillSwitchAsync(); await LoadAsync(); } }

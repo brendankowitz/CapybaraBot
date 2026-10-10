@@ -1,9 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <UsePolicyTestKit>true</UsePolicyTestKit>
-  </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\Fleet.Broker\Fleet.Broker.csproj" />
-    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
-  </ItemGroup>
-</Project>

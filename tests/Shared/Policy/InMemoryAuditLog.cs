@@ -1,7 +1,7 @@
 using System.Runtime.CompilerServices;
-using Fleet.Policy.Audit;
+using Capybara.Policy.Audit;
 
-namespace Fleet.Testing;
+namespace Capybara.Testing;
 
 /// <summary>Records audit entries in memory; no hash chain.</summary>
 internal sealed class InMemoryAuditLog : IAuditLog

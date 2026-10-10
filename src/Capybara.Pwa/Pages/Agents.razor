@@ -1,0 +1,38 @@
+@page "/"
+@inject CapybaraApiClient Api
+@inject CapybaraRealtimeService Realtime
+
+<h1>Agents</h1>
+@if (_agents is null) { <p>Loading…</p> } else {
+<section class="cards">
+@foreach (var agent in _agents)
+{
+    var status = _activity.TryGetValue(agent.Id, out var item) ? item : ("idle", 0);
+    <article class="card">
+        <h2><a href="@($"agents/{agent.Id}")">@agent.Name</a></h2>
+        <p>@agent.Job</p>
+        <p>Model: @agent.Model</p>
+        <StatusBadge State="@status.Item1" Unread="@status.Item2" />
+        @if (agent.Paused || agent.BudgetExhausted) { <p class="warning">Paused or budget exhausted</p> }
+    </article>
+}
+</section>
+}
+
+@code {
+    private IReadOnlyList<AgentStatusDto>? _agents;
+    private readonly Dictionary<string, (string, int)> _activity = new(StringComparer.Ordinal);
+
+    protected override async Task OnInitializedAsync()
+    {
+        _agents = await Api.GetAgentsAsync();
+        Realtime.AgentStatusChanged += OnAgentStatusChanged;
+        try { await Realtime.StartAsync(); } catch (HttpRequestException) { }
+    }
+
+    private void OnAgentStatusChanged(string id, string state, int unread)
+    {
+        _activity[id] = (state, unread);
+        _ = InvokeAsync(StateHasChanged);
+    }
+}

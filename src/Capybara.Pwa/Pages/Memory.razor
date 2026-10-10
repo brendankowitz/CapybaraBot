@@ -1,0 +1,6 @@
+@page "/memory"
+@inject CapybaraApiClient Api
+<h1>Memory</h1>
+<input @bind="_prefix" placeholder="Prefix" /><button @onclick="LoadPagesAsync">Browse</button><button @onclick="ExportAsync">Export zip</button>
+<div class="split"><ul>@foreach (var p in _pages) { <li><button @onclick="() => OpenAsync(p.Path)">@p.Path</button></li> }</ul><section><input @bind="_path" placeholder="Path" /><textarea @bind="_content" rows="16"></textarea><button @onclick="SaveAsync">Save</button><button @onclick="DeleteAsync">Delete</button></section></div>
+@code { private string _prefix = string.Empty; private string _path = string.Empty; private string _content = string.Empty; private IReadOnlyList<MemoryPageInfoDto> _pages = []; protected override async Task OnInitializedAsync() => await LoadPagesAsync(); private async Task LoadPagesAsync() => _pages = await Api.GetMemoryPagesAsync(_prefix); private async Task OpenAsync(string path) { var page = await Api.GetMemoryPageAsync(path); _path = page?.Path ?? path; _content = page?.Content ?? string.Empty; } private async Task SaveAsync() { await Api.SaveMemoryPageAsync(_path, _content); await LoadPagesAsync(); } private async Task DeleteAsync() { await Api.DeleteMemoryPageAsync(_path); _content = string.Empty; await LoadPagesAsync(); } private async Task ExportAsync() { await using var stream = await Api.ExportMemoryAsync(); } }

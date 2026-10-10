@@ -386,12 +386,12 @@ The host owns memory. Copilot runtime Memory and the session store stay **off**,
 
 **Process topology (MVP).** Four systemd units, plus one sandbox per agent:
 
-- **`fleetd`** contains the gateway, orchestrator, scheduler, policy engine, memory service and channel adapters. It hosts one `CopilotClient` per agent, each with its own `BaseDirectory` under `/var/lib/fleet/agents/{id}/copilot` and its own stdio CLI child process.
-- **`fleet-broker`** has its own UID. It is the only reader of the encrypted credentials and serves loopback MCP and gRPC.
+- **`capybarad`** contains the gateway, orchestrator, scheduler, policy engine, memory service and channel adapters. It hosts one `CopilotClient` per agent, each with its own `BaseDirectory` under `/var/lib/capybara/agents/{id}/copilot` and its own stdio CLI child process.
+- **`capybara-broker`** has its own UID. It is the only reader of the encrypted credentials and serves loopback MCP and gRPC.
 - **`aspire-dashboard`** and **`ntfy`** run as Quadlet containers bound to localhost.
 - **Per-agent sandboxes**: Podman or `srt` wrappers for shell and browser execution.
 
-Phase 2 splits each agent into its own unit (`fleet-agent@{id}.service`) with its own UID. The orchestrator talks to it over gRPC on a Unix domain socket using the same contracts.
+Phase 2 splits each agent into its own unit (`capybara-agent@{id}.service`) with its own UID. The orchestrator talks to it over gRPC on a Unix domain socket using the same contracts.
 
 **Sandboxing the built-in shell.** Two seams are available, and the second is an untested inference. Option (a): replace the built-in shell and edit tools with custom tools (`OverridesBuiltInTool`) that execute through `srt` or `podman exec`. Option (b): launch the CLI runtime itself under a wrapper via `RuntimeConnection.ForStdio(path, args)` or `CopilotCliBinaryPath`, so every native tool inherits the sandbox. Option (b) is stronger and cheaper to maintain, and the first spike should validate it ([dotnet README](https://raw.githubusercontent.com/github/copilot-sdk/main/dotnet/README.md)).
 
@@ -399,18 +399,18 @@ Phase 2 splits each agent into its own unit (`fleet-agent@{id}.service`) with it
 
 | Project | Responsibility | Key dependencies |
 |---|---|---|
-| `Fleet.Contracts` | A2A-shaped records: `AgentCard`, `FleetTask` (A2A state enum), `FleetMessage` / `Part` / `Artifact`, `Envelope`, `ApprovalRequest`, `Grant`, `RoutineSpec` | none |
-| `Fleet.Runtime.Copilot` | `AgentRuntime` wraps `CopilotClient`: Empty mode, session id scheme, resume with full re-registration, supervisor, inbox pump, usage capture | `GitHub.Copilot.SDK` (pinned) |
-| `Fleet.Orchestration` | Agent registry, `list_agents`, `ask_agent`, `send_message`, `delegate_task`, envelope enforcement, task table, fleet thread | `System.Threading.Channels`, optionally `Microsoft.Agents.AI` |
-| `Fleet.Policy` | Rules engine, taint tracker, approval service (nonce + args hash + TTL), reviewer agent, kill switch, `ManagedSettings` generation | — |
-| `Fleet.Memory` | Wiki store (git via LibGit2Sharp), index ranker, tools, steward and consolidation job, FTS5 | `Microsoft.Data.Sqlite` |
-| `Fleet.Connections` | Broker, OAuth flows, token vault, MCP servers per connection, grant enforcement, token health | `ModelContextProtocol` 2.x, MSAL, Google APIs |
-| `Fleet.Scheduling` | Heartbeat, cron and event triggers, jitter, catch-up, cost projection | Quartz.NET |
-| `Fleet.Gateway` | Minimal API, SignalR hub, Tailscale identity middleware, PWA host, approval endpoints | ASP.NET Core |
-| `Fleet.Channels.*` | ntfy and Telegram adapters (and Slack Socket Mode if wanted) | — |
-| `Fleet.Hosting` | `IAgentHost`: `SystemdHost`, `PodmanHost`, later `AcaSandboxHost` | — |
-| `Fleet.Tui` | Spectre.Console client | — |
-| `Fleet.AppHost` | Aspire AppHost for **dev only** | Aspire |
+| `Capybara.Contracts` | A2A-shaped records: `AgentCard`, `FleetTask` (A2A state enum), `FleetMessage` / `Part` / `Artifact`, `Envelope`, `ApprovalRequest`, `Grant`, `RoutineSpec` | none |
+| `Capybara.Runtime.Copilot` | `AgentRuntime` wraps `CopilotClient`: Empty mode, session id scheme, resume with full re-registration, supervisor, inbox pump, usage capture | `GitHub.Copilot.SDK` (pinned) |
+| `Capybara.Orchestration` | Agent registry, `list_agents`, `ask_agent`, `send_message`, `delegate_task`, envelope enforcement, task table, fleet thread | `System.Threading.Channels`, optionally `Microsoft.Agents.AI` |
+| `Capybara.Policy` | Rules engine, taint tracker, approval service (nonce + args hash + TTL), reviewer agent, kill switch, `ManagedSettings` generation | — |
+| `Capybara.Memory` | Wiki store (git via LibGit2Sharp), index ranker, tools, steward and consolidation job, FTS5 | `Microsoft.Data.Sqlite` |
+| `Capybara.Connections` | Broker, OAuth flows, token vault, MCP servers per connection, grant enforcement, token health | `ModelContextProtocol` 2.x, MSAL, Google APIs |
+| `Capybara.Scheduling` | Heartbeat, cron and event triggers, jitter, catch-up, cost projection | Quartz.NET |
+| `Capybara.Gateway` | Minimal API, SignalR hub, Tailscale identity middleware, PWA host, approval endpoints | ASP.NET Core |
+| `Capybara.Channels.*` | ntfy and Telegram adapters (and Slack Socket Mode if wanted) | — |
+| `Capybara.Hosting` | `IAgentHost`: `SystemdHost`, `PodmanHost`, later `AcaSandboxHost` | — |
+| `Capybara.Tui` | Spectre.Console client | — |
+| `Capybara.AppHost` | Aspire AppHost for **dev only** | Aspire |
 
 **Where Microsoft Agent Framework helps, and where it doesn't:**
 

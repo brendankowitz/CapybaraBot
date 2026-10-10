@@ -1,4 +1,4 @@
-namespace Fleet.Testing;
+namespace Capybara.Testing;
 
 internal static class RepositoryPaths
 {

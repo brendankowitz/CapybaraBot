@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Capybara.Channels\Capybara.Channels.csproj" />
+    <ProjectReference Include="..\..\src\Capybara.Channels.Ntfy\Capybara.Channels.Ntfy.csproj" />
+    <ProjectReference Include="..\..\src\Capybara.Channels.Telegram\Capybara.Channels.Telegram.csproj" />
+  </ItemGroup>
+</Project>

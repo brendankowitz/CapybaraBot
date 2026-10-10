@@ -13,7 +13,7 @@
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
     <InvariantGlobalization>true</InvariantGlobalization>
     <Authors>Brendan Kowitz</Authors>
-    <Product>CharcuterieBot</Product>
+    <Product>Capybara</Product>
     <RootNamespace>$(MSBuildProjectName)</RootNamespace>
   </PropertyGroup>
 </Project>

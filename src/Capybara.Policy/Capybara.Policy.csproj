@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Deterministic policy gate: rules, trifecta, taint, approvals, kill switch and audit log.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Capybara.Contracts\Capybara.Contracts.csproj" />
+  </ItemGroup>
+</Project>

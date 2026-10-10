@@ -1,0 +1,5 @@
+@page "/approvals"
+@inject CapybaraApiClient Api
+<h1>Approvals</h1>
+@if (_approvals is null) { <p>Loading…</p> } else { @foreach (var a in _approvals) { <article class="card"><h2>@a.Agent · @a.Tool</h2><p>Risk: @a.Risk</p><pre>@a.Preview</pre><button @onclick="() => Decide(a, "allowOnce")">Allow once</button>@if (a.OffersAlwaysAllow) { <button @onclick="() => Decide(a, "always")">Always</button> }<button @onclick="() => Decide(a, "deny")">Deny</button></article> } }
+@code { private IReadOnlyList<ApprovalDto>? _approvals; protected override async Task OnInitializedAsync() => _approvals = await Api.GetApprovalsAsync(); private async Task Decide(ApprovalDto a, string decision) { await Api.DecideApprovalAsync(a.Id, a.Nonce, decision); _approvals = await Api.GetApprovalsAsync(); } }

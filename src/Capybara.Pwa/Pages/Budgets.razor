@@ -1,0 +1,5 @@
+@page "/budgets"
+@inject CapybaraApiClient Api
+<h1>Budgets</h1>
+<pre>@_json</pre>
+@code { private string _json = "Loading…"; protected override async Task OnInitializedAsync() { var b = await Api.GetBudgetsAsync(); _json = b?.ToString() ?? "Budget endpoint unavailable."; } }

@@ -5,7 +5,7 @@ Description=ntfy push server (loopback only)
 [Container]
 Image=docker.io/binwiederhier/ntfy:v2.11.0
 PublishPort=127.0.0.1:8080:80
-Volume=/var/lib/fleet/ntfy:/var/lib/ntfy:Z
+Volume=/var/lib/capybara/ntfy:/var/lib/ntfy:Z
 Exec=serve
 
 [Service]

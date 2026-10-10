@@ -1,5 +1,0 @@
-@page "/routines"
-@inject FleetApiClient Api
-<h1>Routines</h1>
-@if (_items is null) { <p>Loading…</p> } else { @foreach (var r in _items) { <article class="card"><h2>@r.Id</h2><p>@r.Owner · @r.Kind · projected monthly credits: @r.ProjectedMonthlyCredits</p><button @onclick="() => EnableAsync(r)">Enable with cost acknowledgement</button><button @onclick="() => Api.DisableRoutineAsync(r.Id)">Disable</button><button @onclick="() => Api.DryRunRoutineAsync(r.Id)">Dry run</button></article> } }
-@code { private IReadOnlyList<RoutineDto>? _items; protected override async Task OnInitializedAsync() => _items = await Api.GetRoutinesAsync(); private async Task EnableAsync(RoutineDto routine) => await Api.EnableRoutineAsync(routine.Id, routine.ProjectedMonthlyCredits); }

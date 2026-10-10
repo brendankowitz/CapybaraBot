@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <UsePolicyTestKit>true</UsePolicyTestKit>
+    <!-- The SDK marks SessionLimits, Cost and PermissionDecision as evaluation-only (see src csproj). -->
+    <NoWarn>$(NoWarn);GHCP001</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Capybara.Runtime.Copilot\Capybara.Runtime.Copilot.csproj" />
+  </ItemGroup>
+</Project>

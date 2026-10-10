@@ -1,13 +1,13 @@
 @description('Azure region for fleet resources.')
 param location string = resourceGroup().location
 
-@description('Container image for fleetd and broker.')
-param fleetImage string
+@description('Container image for capybarad and broker.')
+param capybaraImage string
 
 @description('No public ingress by default; keep true only behind private networking.')
 param internalOnly bool = true
 
-var namePrefix = 'charcuteriebot'
+var namePrefix = 'capybara'
 
 resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: '${namePrefix}-mi'
@@ -52,8 +52,8 @@ resource vault 'Microsoft.KeyVault/vaults@2024-04-01-preview' = {
   }
 }
 
-resource fleet 'Microsoft.App/containerApps@2024-03-01' = {
-  name: '${namePrefix}-fleetd'
+resource capybara 'Microsoft.App/containerApps@2024-03-01' = {
+  name: '${namePrefix}-capybarad'
   location: location
   identity: {
     type: 'UserAssigned'
@@ -84,11 +84,11 @@ resource fleet 'Microsoft.App/containerApps@2024-03-01' = {
       }
       containers: [
         {
-          name: 'fleetd'
-          image: fleetImage
+          name: 'capybarad'
+          image: capybaraImage
           env: [
             {
-              name: 'Fleet__Runtime__AutoStart'
+              name: 'Capybara__Runtime__AutoStart'
               value: 'true'
             }
             {
@@ -103,8 +103,8 @@ resource fleet 'Microsoft.App/containerApps@2024-03-01' = {
         }
         {
           name: 'broker'
-          image: fleetImage
-          command: [ '/app/fleet-broker' ]
+          image: capybaraImage
+          command: [ '/app/capybara-broker' ]
           resources: {
             cpu: json('0.25')
             memory: '512Mi'
@@ -118,4 +118,4 @@ resource fleet 'Microsoft.App/containerApps@2024-03-01' = {
 // ACA Sandboxes for agent workspaces are provisioned separately by AcaSandboxHost with default-deny egress Transform rules.
 output managedIdentityClientId string = identity.properties.clientId
 output keyVaultUri string = vault.properties.vaultUri
-output containerAppName string = fleet.name
+output containerAppName string = capybara.name

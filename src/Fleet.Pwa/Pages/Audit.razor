@@ -1,4 +1,0 @@
-@page "/audit"
-@inject FleetApiClient Api
-<h1>Audit</h1><button @onclick="VerifyAsync">Verify</button><p>@_status</p>
-@code { private string _status = string.Empty; protected override async Task OnInitializedAsync() => await VerifyAsync(); private async Task VerifyAsync() { var v = await Api.VerifyAuditAsync(); _status = v is null ? "Audit endpoint unavailable." : v.Valid ? "Valid" : "Invalid"; } }

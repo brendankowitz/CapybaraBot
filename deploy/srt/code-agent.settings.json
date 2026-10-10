@@ -7,6 +7,6 @@
   ],
   "writeAllowlist": [
     "/workspace",
-    "/var/lib/fleet/agents/code"
+    "/var/lib/capybara/agents/code"
   ]
 }

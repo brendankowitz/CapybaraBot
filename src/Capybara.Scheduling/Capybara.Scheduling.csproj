@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Routine validation, jittered scheduling and cost projection.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Capybara.Contracts\Capybara.Contracts.csproj" />
+    <ProjectReference Include="..\Capybara.Observability\Capybara.Observability.csproj" />
+    <ProjectReference Include="..\Capybara.Policy\Capybara.Policy.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Quartz" />
+    <PackageReference Include="Quartz.Extensions.Hosting" />
+    <PackageReference Include="Quartz.Serialization.SystemTextJson" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\tables_sqlite.sql" />
+  </ItemGroup>
+</Project>

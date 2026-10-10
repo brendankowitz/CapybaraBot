@@ -1,0 +1,51 @@
+# capybara-broker: credential broker hardened like capybarad (FR-HST-02).
+# MemoryDenyWriteExecute is intentionally NOT set because .NET and Node JITs require executable memory.
+[Unit]
+Description=Capybara credential broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=capybara-broker
+Group=capybara-broker
+ExecStart=/opt/capybara/capybara-broker
+WorkingDirectory=/opt/capybara
+Environment=DOTNET_ENVIRONMENT=Production
+Restart=on-failure
+RestartSec=5s
+LoadCredentialEncrypted=github-token:/etc/capybara/credentials/github-token.cred
+LoadCredentialEncrypted=broker-secrets:/etc/capybara/credentials/broker-secrets.cred
+StateDirectory=capybara-broker
+StateDirectoryMode=0700
+ConfigurationDirectory=capybara
+ReadOnlyPaths=/etc/capybara
+ReadWritePaths=/var/lib/capybara-broker
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

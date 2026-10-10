@@ -1,5 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\Fleet.Observability\Fleet.Observability.csproj" />
-  </ItemGroup>
-</Project>

@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Credential broker connections: grants, vault, OAuth, connectors, MCP exposure, browser profiles and token health.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Capybara.Contracts\Capybara.Contracts.csproj" />
+    <ProjectReference Include="..\Capybara.Policy\Capybara.Policy.csproj" />
+    <ProjectReference Include="..\Capybara.Observability\Capybara.Observability.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="ModelContextProtocol" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" />
+    <PackageReference Include="Microsoft.Identity.Client" />
+    <PackageReference Include="Google.Apis.Auth" />
+    <PackageReference Include="Microsoft.Playwright" />
+  </ItemGroup>
+</Project>

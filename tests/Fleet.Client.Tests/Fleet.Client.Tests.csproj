@@ -1,6 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\Fleet.Client\Fleet.Client.csproj" />
-    <ProjectReference Include="..\..\src\Fleet.Contracts\Fleet.Contracts.csproj" />
-  </ItemGroup>
-</Project>

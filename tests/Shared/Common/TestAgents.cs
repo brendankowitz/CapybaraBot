@@ -1,6 +1,6 @@
-using Fleet.Contracts.Agents;
+using Capybara.Contracts.Agents;
 
-namespace Fleet.Testing;
+namespace Capybara.Testing;
 
 /// <summary>Builders for agent definitions used across test projects.</summary>
 internal static class TestAgents

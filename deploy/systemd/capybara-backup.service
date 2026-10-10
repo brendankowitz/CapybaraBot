@@ -1,0 +1,26 @@
+# Nightly backup job for FR-HST-05. Trigger with capybara-backup.timer.
+[Unit]
+Description=Capybara fleet backup
+
+[Service]
+Type=oneshot
+User=capybara
+Group=capybara
+ExecStart=/opt/capybara/capybara-backup
+WorkingDirectory=/opt/capybara
+Environment=DOTNET_ENVIRONMENT=Production
+LoadCredentialEncrypted=github-token:/etc/capybara/credentials/github-token.cred
+StateDirectory=capybara
+ReadWritePaths=/var/lib/capybara /var/backups/capybara
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
