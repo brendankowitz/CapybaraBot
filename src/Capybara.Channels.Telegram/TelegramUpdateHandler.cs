@@ -21,7 +21,12 @@ public sealed class TelegramUpdateHandler(ConversationalChannelGuard guard, IInb
             return;
         }
 
-        await sink.ReceiveAsync("telegram", userId, textElement.GetString() ?? string.Empty, cancellationToken);
+        if (!root.TryGetProperty("update_id", out var updateId) || !updateId.TryGetInt64(out var id))
+        {
+            throw new InvalidDataException("Telegram update has no numeric update_id.");
+        }
+
+        await sink.ReceiveAsync("telegram", userId, textElement.GetString() ?? string.Empty, $"telegram:{id}", cancellationToken);
     }
 
     private static string? ExtractUserId(JsonElement message)

@@ -71,9 +71,9 @@ public sealed partial class WebPushChannel(
                     LogDeviceFailed(_logger, subscription.DeviceId, $"HTTP {(int)response.StatusCode}", null);
                 }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
-                // One bad device (network error, malformed keys) must not stop delivery to the others.
+                // One bad device (network error, timeout, malformed keys) must not stop delivery to the others.
                 LogDeviceFailed(_logger, subscription.DeviceId, ex.Message, ex);
             }
         }

@@ -96,6 +96,25 @@ public sealed class WebPushSubscriptionStore
             JsonSerializer.Serialize(stream, _subscriptions.Values, JsonOptions);
         }
 
-        File.Move(temp, _path, overwrite: true);
+        MoveWithRetry(temp, _path);
+    }
+
+    // On Windows, replacing a file that a scanner/indexer has just opened can fail transiently with "access denied";
+    // a short bounded retry rides that out without hiding a persistent failure (the last attempt's exception propagates).
+    private static void MoveWithRetry(string source, string destination)
+    {
+        const int attempts = 5;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                File.Move(source, destination, overwrite: true);
+                return;
+            }
+            catch (Exception ex) when (attempt < attempts && ex is IOException or UnauthorizedAccessException)
+            {
+                Thread.Sleep(20 * attempt);
+            }
+        }
     }
 }

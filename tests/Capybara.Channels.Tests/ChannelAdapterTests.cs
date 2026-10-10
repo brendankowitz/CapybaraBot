@@ -139,7 +139,7 @@ public sealed class ChannelAdapterTests
         Assert.Equal(0, await service.PollOnceAsync(TestContext.Current.CancellationToken));
 
         var received = Assert.Single(sink.Messages);
-        Assert.Equal(("123", "hello"), received);
+        Assert.Equal(("123", "hello", "telegram:11"), received);
         var first = JsonDocument.Parse(handler.Bodies[0]).RootElement;
         Assert.Equal(0, first.GetProperty("offset").GetInt64());
         Assert.Equal(30, first.GetProperty("timeout").GetInt32());
@@ -163,30 +163,118 @@ public sealed class ChannelAdapterTests
         Assert.Equal(2, await service.PollOnceAsync(TestContext.Current.CancellationToken));
         Assert.Equal(7, service.Offset);
         Assert.Equal(["boom", "ok"], sink.Messages.Select(m => m.Text));
+        Assert.Equal(["telegram:5", "telegram:6"], sink.Messages.Select(m => m.MessageId));
     }
 
     [Fact]
-    public async Task Polling_skips_a_poison_update_after_bounded_attempts_and_raises_an_alert()
+    public async Task Handler_requires_an_update_id_for_the_idempotency_key_but_not_for_dropped_messages()
+    {
+        var sink = new RecordingInboundSink();
+        var handler = new TelegramUpdateHandler(new ConversationalChannelGuard(new Dictionary<string, string> { ["telegram"] = "123" }), sink);
+
+        await handler.HandleAsync(JsonDocument.Parse("""{"message":{"from":{"id":999},"text":"intruder"}}"""), TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<InvalidDataException>(() => handler.HandleAsync(JsonDocument.Parse("""{"message":{"from":{"id":123},"text":"x"}}"""), TestContext.Current.CancellationToken).AsTask());
+        Assert.Empty(sink.Messages);
+    }
+
+    [Fact]
+    public async Task Polling_skips_a_poison_update_only_after_the_window_and_minimum_attempts_and_raises_an_alert()
     {
         var update = """{"update_id":5,"message":{"from":{"id":123},"text":"boom"}}""";
         var body = $$"""{"ok":true,"result":[{{update}}]}""";
-        var handler = new QueueHandler(Enumerable.Repeat<object>(body, TelegramPollingService.MaxDeliveryAttempts).Append("""{"ok":true,"result":[]}""").ToArray());
+        var attempts = TelegramPollingService.MaxDeliveryAttempts;
+        var handler = new QueueHandler(Enumerable.Repeat<object>(body, attempts + 1).Append("""{"ok":true,"result":[]}""").ToArray());
         var sink = new RecordingInboundSink { ThrowOn = "boom" };
         var alerts = new InMemoryAlertSink();
-        var service = NewPoller(handler, sink, alerts: alerts);
+        var time = new FakeTimeProvider(Noon);
+        var service = NewPoller(handler, sink, time, alerts);
 
-        for (var attempt = 1; attempt < TelegramPollingService.MaxDeliveryAttempts; attempt++)
+        // Many attempts inside a short outage never skip: the window has not elapsed.
+        for (var attempt = 1; attempt <= attempts; attempt++)
         {
             await Assert.ThrowsAsync<InvalidOperationException>(() => service.PollOnceAsync(TestContext.Current.CancellationToken));
-            Assert.Equal(0, service.Offset);
-            Assert.Empty(alerts.Recent);
+            time.Advance(TimeSpan.FromSeconds(30));
         }
 
+        Assert.Equal(0, service.Offset);
+        Assert.Empty(alerts.Recent);
+
+        time.Advance(TimeSpan.FromMinutes(10));
         Assert.Equal(1, await service.PollOnceAsync(TestContext.Current.CancellationToken));
         Assert.Equal(6, service.Offset);
         var alert = Assert.Single(alerts.Recent);
         Assert.Equal("telegram.inbound_skipped", alert.Kind);
         Assert.DoesNotContain("boom", alert.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Polling_does_not_skip_when_the_window_elapsed_but_too_few_attempts_were_made()
+    {
+        var body = """{"ok":true,"result":[{"update_id":5,"message":{"from":{"id":123},"text":"boom"}}]}""";
+        var handler = new QueueHandler(body, body);
+        var alerts = new InMemoryAlertSink();
+        var time = new FakeTimeProvider(Noon);
+        var service = NewPoller(handler, new RecordingInboundSink { ThrowOn = "boom" }, time, alerts);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.PollOnceAsync(TestContext.Current.CancellationToken));
+        time.Advance(TimeSpan.FromHours(1));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.PollOnceAsync(TestContext.Current.CancellationToken));
+
+        Assert.Equal(0, service.Offset);
+        Assert.Empty(alerts.Recent);
+    }
+
+    [Fact]
+    public async Task Polling_advances_even_when_the_alert_sink_fails_while_skipping_poison()
+    {
+        var body = """{"ok":true,"result":[{"update_id":5,"message":{"from":{"id":123},"text":"boom"}}]}""";
+        var handler = new QueueHandler(Enumerable.Repeat<object>(body, TelegramPollingService.MaxDeliveryAttempts).ToArray());
+        var time = new FakeTimeProvider(Noon);
+        var service = NewPoller(handler, new RecordingInboundSink { ThrowOn = "boom" }, time, new ThrowingAlertSink(), new TelegramOptions("bot-token", "123") { AllowedUserId = "123", PoisonMessageWindow = TimeSpan.Zero });
+
+        for (var attempt = 1; attempt < TelegramPollingService.MaxDeliveryAttempts; attempt++)
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => service.PollOnceAsync(TestContext.Current.CancellationToken));
+        }
+
+        Assert.Equal(1, await service.PollOnceAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(6, service.Offset);
+    }
+
+    [Fact]
+    public async Task Polling_service_survives_a_transport_timeout_and_keeps_polling()
+    {
+        var time = new FakeTimeProvider(Noon);
+        var handler = new QueueHandler(new TaskCanceledException("HttpClient.Timeout"), """{"ok":true,"result":[{"update_id":1,"message":{"from":{"id":123},"text":"hi"}}]}""") { BlockWhenEmpty = true };
+        var sink = new RecordingInboundSink();
+        var service = NewPoller(handler, sink, time);
+
+        await service.StartAsync(TestContext.Current.CancellationToken);
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (sink.Messages.Count == 0 && DateTime.UtcNow < deadline)
+        {
+            time.Advance(TimeSpan.FromSeconds(1));
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal("hi", Assert.Single(sink.Messages).Text);
+        Assert.False(service.ExecuteTask!.IsCompleted);
+
+        await service.StopAsync(TestContext.Current.CancellationToken);
+        Assert.True(service.ExecuteTask.IsCompletedSuccessfully);
+    }
+
+    [Fact]
+    public async Task Polling_service_stops_cleanly_on_real_shutdown_during_a_blocked_poll()
+    {
+        var handler = new QueueHandler { BlockWhenEmpty = true };
+        var service = NewPoller(handler, new RecordingInboundSink());
+
+        await service.StartAsync(TestContext.Current.CancellationToken);
+        await WaitForAsync(() => handler.Requests.Count == 1);
+        await service.StopAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(service.ExecuteTask!.IsCompletedSuccessfully);
     }
 
     [Fact]
@@ -528,6 +616,57 @@ public sealed class ChannelAdapterTests
     }
 
     [Fact]
+    public async Task Web_push_timeout_on_one_device_does_not_abort_delivery_to_the_others()
+    {
+        var store = new WebPushSubscriptionStore();
+        var keys = NewSubscriptionKeys();
+        store.Upsert(new WebPushSubscription("slow", new Uri("https://push.example.test/slow"), keys.Public, keys.Auth));
+        store.Upsert(new WebPushSubscription("ok", new Uri("https://push.example.test/ok"), keys.Public, keys.Auth));
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath == "/slow"
+            ? throw new TaskCanceledException("HttpClient.Timeout", new TimeoutException())
+            : HttpStatusCode.Created);
+        var channel = NewWebPush(store, handler, out _);
+
+        await channel.SendAsync(NotificationFactory.Finished(Ea), TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.Equal(2, store.Subscriptions.Count);
+    }
+
+    [Fact]
+    public async Task Router_falls_back_to_the_next_channel_when_every_web_push_device_times_out()
+    {
+        var time = new FakeTimeProvider(Noon);
+        var store = new WebPushSubscriptionStore();
+        var keys = NewSubscriptionKeys();
+        store.Upsert(new WebPushSubscription("slow", new Uri("https://push.example.test/slow"), keys.Public, keys.Auth));
+        var webPush = NewWebPush(store, new RecordingHandler(_ => throw new TaskCanceledException("HttpClient.Timeout", new TimeoutException())), out _);
+        var fallback = new StubChannel("ntfy");
+        var router = new NotificationRouter([webPush, fallback], new PresenceTracker(time, TimeSpan.FromSeconds(30)), new InMemoryAlertSink(), new ChannelOptions(), time);
+
+        await router.RouteAsync(NotificationFactory.Finished(Ea), TestContext.Current.CancellationToken);
+
+        Assert.Single(fallback.Sent);
+    }
+
+    [Fact]
+    public async Task Router_falls_back_when_a_channel_times_out_but_propagates_real_cancellation()
+    {
+        var time = new FakeTimeProvider(Noon);
+        var fallback = new StubChannel("ntfy");
+        var timingOut = new StubChannel("web-push") { Throw = new TaskCanceledException("HttpClient.Timeout") };
+        var router = new NotificationRouter([timingOut, fallback], new PresenceTracker(time, TimeSpan.FromSeconds(30)), new InMemoryAlertSink(), new ChannelOptions(), time);
+
+        await router.RouteAsync(NotificationFactory.Finished(Ea), TestContext.Current.CancellationToken);
+        Assert.Single(fallback.Sent);
+
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => router.RouteAsync(NotificationFactory.Finished(Ea), cts.Token).AsTask());
+        Assert.Single(fallback.Sent);
+    }
+
+    [Fact]
     public async Task Web_push_throws_when_no_device_succeeds_even_if_one_failure_is_a_crypto_error()
     {
         var store = new WebPushSubscriptionStore();
@@ -587,9 +726,9 @@ public sealed class ChannelAdapterTests
         Assert.True(condition(), "Condition was not met in time.");
     }
 
-    private static TelegramPollingService NewPoller(QueueHandler handler, RecordingInboundSink sink, TimeProvider? time = null, IAlertSink? alerts = null) => new(
+    private static TelegramPollingService NewPoller(QueueHandler handler, RecordingInboundSink sink, TimeProvider? time = null, IAlertSink? alerts = null, TelegramOptions? options = null) => new(
         new HttpClient(handler) { BaseAddress = new Uri("https://api.telegram.org/") },
-        new TelegramOptions("bot-token", "123") { AllowedUserId = "123" },
+        options ?? new TelegramOptions("bot-token", "123") { AllowedUserId = "123" },
         new TelegramUpdateHandler(new ConversationalChannelGuard(new Dictionary<string, string> { ["telegram"] = "123" }), sink),
         time ?? TimeProvider.System,
         alerts: alerts);
@@ -665,6 +804,7 @@ public sealed class ChannelAdapterTests
 
             return next switch
             {
+                Exception ex => throw ex,
                 HttpStatusCode code => new HttpResponseMessage(code),
                 string json => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json, Encoding.UTF8, "application/json") },
                 _ => throw new InvalidOperationException(),
@@ -678,12 +818,19 @@ public sealed class ChannelAdapterTests
 
         public bool Fail { get; init; }
 
+        public Exception? Throw { get; init; }
+
         public string Name => name;
 
         public bool SupportsSensitiveContent => true;
 
         public ValueTask SendAsync(Notification notification, CancellationToken cancellationToken = default)
         {
+            if (Throw is not null)
+            {
+                throw Throw;
+            }
+
             if (Fail)
             {
                 throw new HttpRequestException("boom");
@@ -738,22 +885,28 @@ public sealed class ChannelAdapterTests
             Task.FromResult(new HttpResponseMessage(status));
     }
 
+    private sealed class ThrowingAlertSink : IAlertSink
+    {
+        public ValueTask PublishAsync(Alert alert, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("alert sink down");
+    }
+
     private sealed class RecordingInboundSink : IInboundMessageSink
     {
-        public List<(string UserId, string Text)> Messages { get; } = [];
+        public List<(string UserId, string Text, string MessageId)> Messages { get; } = [];
 
         public string? ThrowOn { get; init; }
 
         public int ThrowCount { get; set; } = int.MaxValue;
 
-        public ValueTask ReceiveAsync(string channel, string userId, string text, CancellationToken cancellationToken = default)
+        public ValueTask ReceiveAsync(string channel, string userId, string text, string messageId, CancellationToken cancellationToken = default)
         {
             if (text == ThrowOn && ThrowCount-- > 0)
             {
                 throw new InvalidOperationException("sink failed");
             }
 
-            Messages.Add((userId, text));
+            Messages.Add((userId, text, messageId));
             return ValueTask.CompletedTask;
         }
     }

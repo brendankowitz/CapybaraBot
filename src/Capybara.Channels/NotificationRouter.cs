@@ -148,7 +148,7 @@ public sealed partial class NotificationRouter(
                 await channel.SendAsync(outbound, cancellationToken);
                 return;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
                 LogChannelFailed(_logger, channel.Name, ex.Message, ex);
             }

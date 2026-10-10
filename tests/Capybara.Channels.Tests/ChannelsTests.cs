@@ -149,11 +149,12 @@ public sealed class ChannelsTests
         var guard = new ConversationalChannelGuard(new Dictionary<string, string> { ["telegram"] = "123" });
         var handler = new TelegramUpdateHandler(guard, sink);
 
-        await handler.HandleAsync(JsonDocument.Parse("{\"message\":{\"from\":{\"id\":999},\"text\":\"bad\"}}"), TestContext.Current.CancellationToken);
-        await handler.HandleAsync(JsonDocument.Parse("{\"message\":{\"from\":{\"id\":123},\"text\":\"hello\"}}"), TestContext.Current.CancellationToken);
+        await handler.HandleAsync(JsonDocument.Parse("{\"update_id\":1,\"message\":{\"from\":{\"id\":999},\"text\":\"bad\"}}"), TestContext.Current.CancellationToken);
+        await handler.HandleAsync(JsonDocument.Parse("{\"update_id\":2,\"message\":{\"from\":{\"id\":123},\"text\":\"hello\"}}"), TestContext.Current.CancellationToken);
 
         var received = Assert.Single(sink.Messages);
         Assert.Equal("hello", received.Text);
+        Assert.Equal("telegram:2", received.MessageId);
     }
 
     [Fact]
@@ -257,11 +258,11 @@ public sealed class ChannelsTests
 
     private sealed class RecordingInboundSink : IInboundMessageSink
     {
-        public List<(string UserId, string Text)> Messages { get; } = [];
+        public List<(string UserId, string Text, string MessageId)> Messages { get; } = [];
 
-        public ValueTask ReceiveAsync(string channel, string userId, string text, CancellationToken cancellationToken = default)
+        public ValueTask ReceiveAsync(string channel, string userId, string text, string messageId, CancellationToken cancellationToken = default)
         {
-            Messages.Add((userId, text));
+            Messages.Add((userId, text, messageId));
             return ValueTask.CompletedTask;
         }
     }
