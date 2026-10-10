@@ -1,12 +1,17 @@
 {
-  "agentId": "code",
-  "denyByDefault": true,
-  "allowDomains": [
-    "github.com",
-    "api.github.com"
-  ],
-  "writeAllowlist": [
-    "/workspace",
-    "/var/lib/capybara/agents/code"
-  ]
+  "network": {
+    "allowedDomains": [
+      "github.com",
+      "api.github.com"
+    ],
+    "deniedDomains": []
+  },
+  "filesystem": {
+    "denyRead": [],
+    "allowWrite": [
+      "/workspace",
+      "/var/lib/capybara/agents/code/copilot"
+    ],
+    "denyWrite": []
+  }
 }

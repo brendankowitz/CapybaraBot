@@ -8,7 +8,7 @@ public sealed class SandboxedCliLauncher
         ArgumentException.ThrowIfNullOrWhiteSpace(srtPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(settingsPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(copilotCliPath);
-        return new LaunchCommand(srtPath, ["run", "--settings", settingsPath, "--", copilotCliPath, .. copilotArgs]);
+        return new LaunchCommand(srtPath, ["--settings", settingsPath, "--", copilotCliPath, .. copilotArgs]);
     }
 
     public static LaunchCommand ForPodmanExec(string podmanPath, string containerName, string copilotCliPath, IReadOnlyList<string> copilotArgs)

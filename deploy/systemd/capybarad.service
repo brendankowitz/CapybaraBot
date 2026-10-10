@@ -6,7 +6,9 @@ After=network-online.target tailscaled.service
 Wants=network-online.target
 
 [Service]
-Type=exec
+# Generic Host with AddSystemd() reports readiness/stopping over sd_notify (FR-HST-02).
+Type=notify
+NotifyAccess=main
 User=capybara
 Group=capybara
 ExecStart=/opt/capybara/capybarad
@@ -16,6 +18,18 @@ Environment=Capybara__ConfigRoot=/etc/capybara
 Environment=Capybara__StateRoot=/var/lib/capybara
 Restart=on-failure
 RestartSec=5s
+
+# Resource limits for the gateway and the Copilot CLI children it spawns (NFR-05); measure on the target mini-PC and tune.
+MemoryMax=2G
+CPUQuota=200%
+
+# Network: loopback and the tailnet only. systemd filters by IP, not DNS name, so per-agent domain egress is enforced by srt
+# (FR-SAF-07). Public endpoints capybarad itself must reach (GitHub Copilot, Telegram, ntfy, Google, Microsoft) are added by the
+# operator in capybarad.service.d/egress.conf; see deploy/systemd/capybarad.egress.sample.conf.
+IPAddressDeny=any
+IPAddressAllow=localhost
+IPAddressAllow=100.64.0.0/10
+IPAddressAllow=fd7a:115c:a1e0::/48
 
 # The Copilot PAT is an encrypted credential, never an env var or config file (FR-HST-03).
 LoadCredentialEncrypted=github-token:/etc/capybara/credentials/github-token.cred

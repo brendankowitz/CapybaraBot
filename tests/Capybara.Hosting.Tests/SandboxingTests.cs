@@ -11,7 +11,8 @@ public sealed class SandboxingTests
 
         Assert.Contains("github.com", json, StringComparison.Ordinal);
         Assert.Contains("/workspace", json, StringComparison.Ordinal);
-        Assert.Contains("denyByDefault", json, StringComparison.Ordinal);
+        Assert.Contains("allowedDomains", json, StringComparison.Ordinal);
+        Assert.Contains("allowWrite", json, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -20,6 +21,6 @@ public sealed class SandboxingTests
         var launch = SandboxedCliLauncher.ForSrt("srt", "settings.json", "copilot", ["agent"]);
 
         Assert.Equal("srt", launch.Path);
-        Assert.Equal(["run", "--settings", "settings.json", "--", "copilot", "agent"], launch.Arguments);
+        Assert.Equal(["--settings", "settings.json", "--", "copilot", "agent"], launch.Arguments);
     }
 }

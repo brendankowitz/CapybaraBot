@@ -1,0 +1,18 @@
+{
+  "Capybara": {
+    "Backup": {
+      "Prefix": "backups",
+      "RetainCount": 14,
+      "ScheduleUtc": "02:00",
+      "WorkingDirectory": "/var/lib/capybara/backup-staging",
+      "Sources": [
+        { "Name": "agent-assistant-copilot-home", "Path": "/var/lib/capybara/agents/assistant/copilot", "Kind": "Files" },
+        { "Name": "agent-research-copilot-home", "Path": "/var/lib/capybara/agents/research/copilot", "Kind": "Files" },
+        { "Name": "agent-code-copilot-home", "Path": "/var/lib/capybara/agents/code/copilot", "Kind": "Files" },
+        { "Name": "memory-repo", "Path": "/var/lib/capybara/memory", "Kind": "Files" },
+        { "Name": "state-db", "Path": "/var/lib/capybara/capybara-state.db", "Kind": "SqliteDatabase" },
+        { "Name": "credentials", "Path": "/etc/capybara/credentials", "Kind": "Files" }
+      ]
+    }
+  }
+}

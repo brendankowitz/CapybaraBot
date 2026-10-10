@@ -6,11 +6,14 @@ Description=Capybara fleet backup
 Type=oneshot
 User=capybara
 Group=capybara
-ExecStart=/opt/capybara/capybara-backup
+ExecStart=/opt/capybara/capybarad backup
 WorkingDirectory=/opt/capybara
 Environment=DOTNET_ENVIRONMENT=Production
+Environment=Capybara__ConfigRoot=/etc/capybara
+Environment=Capybara__StateRoot=/var/lib/capybara
 LoadCredentialEncrypted=github-token:/etc/capybara/credentials/github-token.cred
 StateDirectory=capybara
+ReadOnlyPaths=/etc/capybara
 ReadWritePaths=/var/lib/capybara /var/backups/capybara
 NoNewPrivileges=yes
 ProtectSystem=strict

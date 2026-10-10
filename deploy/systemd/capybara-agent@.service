@@ -1,15 +1,23 @@
-# Phase 2 per-agent unit template (FR-HST-02). MemoryDenyWriteExecute intentionally omitted for JIT compatibility.
+# Phase 2 per-agent unit template (FR-HST-02, FR-HST-01 SystemdHost). Not installed by default: Phase 1 runs every agent inside capybarad.
+# It runs capybarad itself in per-agent mode: `capybarad agent <agent-id>` starts only that agent's runtime (no other agents,
+# channels or scheduler ownership) and reports readiness via sd_notify (Type=notify). That mode is implemented by the gateway
+# (WP10); until it exists, do not enable this unit.
+# MemoryDenyWriteExecute intentionally omitted for JIT compatibility.
 [Unit]
 Description=Capybara agent %i
 After=network-online.target capybara-broker.service
 Wants=network-online.target
 
 [Service]
-Type=exec
+Type=notify
+NotifyAccess=main
 DynamicUser=yes
-ExecStart=/opt/capybara/capybara-agent --agent %i
+ExecStart=/opt/capybara/capybarad agent %i
 WorkingDirectory=/var/lib/capybara/agents/%i
 Environment=DOTNET_ENVIRONMENT=Production
+Environment=Capybara__ConfigRoot=/etc/capybara
+Environment=Capybara__StateRoot=/var/lib/capybara
+ReadOnlyPaths=/etc/capybara
 Restart=on-failure
 RestartSec=5s
 StateDirectory=capybara/agents/%i
