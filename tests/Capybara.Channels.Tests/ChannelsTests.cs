@@ -118,7 +118,7 @@ public sealed class ChannelsTests
         Assert.Single(fallback.Sent);
         await router.FlushBatchesAsync(ct);
         Assert.Equal(2, fallback.Sent.Count);
-        Assert.Contains("2 low-risk approvals", fallback.Sent[1].Title, StringComparison.Ordinal);
+        Assert.Contains("2 approvals need review", fallback.Sent[1].Title, StringComparison.Ordinal);
 
         var failingRouter = new NotificationRouter([new StubChannel("only") { Fail = true }], presence, alerts, new ChannelOptions(), time);
         await failingRouter.RouteAsync(new Notification(NotificationKind.Alert, Ea, "alert", "body", NotificationPriority.Critical, "/alerts"), ct);

@@ -1,3 +1,4 @@
+using Capybara.Observability.Alerts;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -16,12 +17,13 @@ public static class CapybaraTelegramServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(options);
 
-        // The HTTP timeout must outlast the server-side long poll.
+        // The HTTP timeout must outlast the server-side long poll. The bot token is part of every request URL, so the
+        // default HttpClient logging (which records the full URI) is removed.
         services.AddHttpClient(HttpClientName, client =>
         {
             client.BaseAddress = options.ApiBaseUrl;
             client.Timeout = options.PollTimeout + TimeSpan.FromSeconds(30);
-        });
+        }).RemoveAllLoggers();
         services.AddSingleton<INotificationChannel>(sp =>
             new TelegramChannel(sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientName), options));
 
@@ -36,7 +38,8 @@ public static class CapybaraTelegramServiceCollectionExtensions
                         sp.GetService<ILogger<ConversationalChannelGuard>>()),
                     sp.GetRequiredService<IInboundMessageSink>()),
                 sp.GetRequiredService<TimeProvider>(),
-                sp.GetService<ILogger<TelegramPollingService>>()));
+                sp.GetService<ILogger<TelegramPollingService>>(),
+                sp.GetService<IAlertSink>()));
         }
 
         return services;

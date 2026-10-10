@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Capybara.Channels.DependencyInjection;
@@ -25,7 +26,7 @@ public static class CapybaraChannelsServiceCollectionExtensions
             sp.GetRequiredService<Capybara.Observability.Alerts.IAlertSink>(),
             options,
             sp.GetRequiredService<TimeProvider>(),
-            NullLogger<NotificationRouter>.Instance));
+            sp.GetService<ILogger<NotificationRouter>>() ?? NullLogger<NotificationRouter>.Instance));
         services.TryAddSingleton<IUserEscalation, PhoneUserEscalation>();
         return services;
     }

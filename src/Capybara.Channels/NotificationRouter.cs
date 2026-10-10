@@ -58,11 +58,16 @@ public sealed partial class NotificationRouter(
             return;
         }
 
-        var first = items[0];
-        var agents = string.Join(", ", items.Select(n => n.Agent?.Value).Where(v => !string.IsNullOrWhiteSpace(v)).Distinct(StringComparer.Ordinal));
-        var title = items.Count == 1 ? first.Title : $"{items.Count} low-risk approvals need review";
-        var body = string.IsNullOrWhiteSpace(agents) ? "Open approvals in the PWA." : $"Agents: {agents}. Open approvals in the PWA.";
-        var summary = new Notification(NotificationKind.Approval, first.Agent, title, body, NotificationPriority.Normal, "/approvals", IsSensitive: false);
+        // Fixed, content-free text: a batch summary must never reuse item titles, which name agents and tools.
+        var title = items.Count == 1 ? "1 approval needs review" : $"{items.Count} approvals need review";
+        var summary = new Notification(
+            NotificationKind.Approval,
+            null,
+            title,
+            "Open approvals in the PWA.",
+            NotificationPriority.Normal,
+            "/approvals",
+            IsSensitive: items.Any(n => n.IsSensitive));
         await DispatchAsync(summary, cancellationToken);
     }
 
@@ -162,9 +167,13 @@ public sealed partial class NotificationRouter(
             notification.Agent?.Value), cancellationToken);
     }
 
+    /// <summary>
+    /// Reduces a sensitive notification for channels that cannot carry sensitive content. Action buttons are dropped too:
+    /// they would let someone approve blind, and would put a single-use nonce on an untrusted server.
+    /// </summary>
     private static Notification StripSensitive(Notification notification) =>
         notification.IsSensitive
-            ? notification with { Title = $"{notification.Kind} notification", Body = string.Empty, IsSensitive = false }
+            ? notification with { Title = $"{notification.Kind} notification", Body = string.Empty, Actions = [], IsSensitive = false }
             : notification;
 
     private static Notification Sanitize(Notification notification)

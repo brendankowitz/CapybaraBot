@@ -1,11 +1,15 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Capybara.Channels.Ntfy;
+using Capybara.Channels.DependencyInjection;
 using Capybara.Channels.Telegram;
 using Capybara.Channels.WebPush;
 using Capybara.Contracts.Agents;
 using Capybara.Contracts.Approvals;
 using Capybara.Observability.Alerts;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Time.Testing;
 
 namespace Capybara.Channels.Tests;
@@ -144,16 +148,45 @@ public sealed class ChannelAdapterTests
     }
 
     [Fact]
-    public async Task Polling_skips_an_update_whose_sink_throws_instead_of_wedging()
+    public async Task Polling_redelivers_an_update_whose_sink_throws_and_never_skips_ahead()
     {
-        var handler = new QueueHandler("""{"ok":true,"result":[{"update_id":5,"message":{"from":{"id":123},"text":"boom"}},{"update_id":6,"message":{"from":{"id":123},"text":"ok"}}]}""");
-        var sink = new RecordingInboundSink { ThrowOn = "boom" };
+        var update5 = """{"update_id":5,"message":{"from":{"id":123},"text":"boom"}}""";
+        var update6 = """{"update_id":6,"message":{"from":{"id":123},"text":"ok"}}""";
+        var handler = new QueueHandler($$"""{"ok":true,"result":[{{update5}},{{update6}}]}""", $$"""{"ok":true,"result":[{{update5}},{{update6}}]}""");
+        var sink = new RecordingInboundSink { ThrowOn = "boom", ThrowCount = 1 };
         var service = NewPoller(handler, sink);
 
-        await service.PollOnceAsync(TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.PollOnceAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(0, service.Offset);
+        Assert.Empty(sink.Messages);
 
+        Assert.Equal(2, await service.PollOnceAsync(TestContext.Current.CancellationToken));
         Assert.Equal(7, service.Offset);
-        Assert.Equal("ok", Assert.Single(sink.Messages).Text);
+        Assert.Equal(["boom", "ok"], sink.Messages.Select(m => m.Text));
+    }
+
+    [Fact]
+    public async Task Polling_skips_a_poison_update_after_bounded_attempts_and_raises_an_alert()
+    {
+        var update = """{"update_id":5,"message":{"from":{"id":123},"text":"boom"}}""";
+        var body = $$"""{"ok":true,"result":[{{update}}]}""";
+        var handler = new QueueHandler(Enumerable.Repeat<object>(body, TelegramPollingService.MaxDeliveryAttempts).Append("""{"ok":true,"result":[]}""").ToArray());
+        var sink = new RecordingInboundSink { ThrowOn = "boom" };
+        var alerts = new InMemoryAlertSink();
+        var service = NewPoller(handler, sink, alerts: alerts);
+
+        for (var attempt = 1; attempt < TelegramPollingService.MaxDeliveryAttempts; attempt++)
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => service.PollOnceAsync(TestContext.Current.CancellationToken));
+            Assert.Equal(0, service.Offset);
+            Assert.Empty(alerts.Recent);
+        }
+
+        Assert.Equal(1, await service.PollOnceAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(6, service.Offset);
+        var alert = Assert.Single(alerts.Recent);
+        Assert.Equal("telegram.inbound_skipped", alert.Kind);
+        Assert.DoesNotContain("boom", alert.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -366,6 +399,181 @@ public sealed class ChannelAdapterTests
         await WaitForAsync(() => channel.Sent.Count == 2);
     }
 
+    // ---- Review fixes ----
+
+    [Fact]
+    public async Task Batched_low_risk_approvals_never_leak_agent_or_tool_names_to_telegram()
+    {
+        var time = new FakeTimeProvider(Noon);
+        var handler = new RecordingHandler();
+        var telegram = new TelegramChannel(new HttpClient(handler) { BaseAddress = new Uri("https://api.telegram.org/") }, new TelegramOptions("bot-token", "123"));
+        var router = new NotificationRouter([telegram], new PresenceTracker(time, TimeSpan.FromSeconds(30)), new InMemoryAlertSink(), new ChannelOptions(), time);
+        var ct = TestContext.Current.CancellationToken;
+        var nonSensitiveLeaky = new Notification(NotificationKind.Approval, Ea, "approval needed: ea → email_send", "ea wants email_send", NotificationPriority.Low, "/approvals");
+
+        var leaky = new[] { nonSensitiveLeaky };
+        var mixed = new[] { NotificationFactory.Approval(Approval(RiskLevel.Low)), nonSensitiveLeaky };
+        var sensitiveOnly = new[] { NotificationFactory.Approval(Approval(RiskLevel.Low)) };
+
+        foreach (var batch in new[] { sensitiveOnly, leaky, mixed })
+        {
+            handler.Bodies.Clear();
+            foreach (var item in batch)
+            {
+                await router.RouteAsync(item, ct);
+            }
+
+            await router.FlushBatchesAsync(ct);
+
+            var text = JsonDocument.Parse(Assert.Single(handler.Bodies)).RootElement.GetProperty("text").GetString()!;
+            Assert.DoesNotContain("email_send", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("ea →", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("abc123", text, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task Batch_summary_uses_fixed_text_and_has_no_actions()
+    {
+        var time = new FakeTimeProvider(Noon);
+        var channel = new StubChannel("ntfy");
+        var router = new NotificationRouter([channel], new PresenceTracker(time, TimeSpan.FromSeconds(30)), new InMemoryAlertSink(), new ChannelOptions(), time);
+        var ct = TestContext.Current.CancellationToken;
+
+        await router.RouteAsync(NotificationFactory.Approval(Approval(RiskLevel.Low)), ct);
+        await router.FlushBatchesAsync(ct);
+
+        var summary = Assert.Single(channel.Sent);
+        Assert.Equal("1 approval needs review", summary.Title);
+        Assert.Equal("Open approvals in the PWA.", summary.Body);
+        Assert.Null(summary.Agent);
+        Assert.Empty(summary.Actions);
+    }
+
+    [Fact]
+    public async Task Ntfy_without_sensitive_support_gets_no_action_buttons_or_tool_name()
+    {
+        var time = new FakeTimeProvider(Noon);
+        var handler = new RecordingHandler();
+        var ntfy = new NtfyChannel(new HttpClient(handler), new NtfyOptions(new Uri("https://ntfy.sh/"), "capybara") { GatewayBaseUrl = new Uri("https://capybara.tailnet/") });
+        var router = new NotificationRouter([ntfy], new PresenceTracker(time, TimeSpan.FromSeconds(30)), new InMemoryAlertSink(), new ChannelOptions(), time);
+
+        await router.RouteAsync(NotificationFactory.Approval(Approval(RiskLevel.High)), TestContext.Current.CancellationToken);
+
+        var raw = Encoding.UTF8.GetString(Assert.Single(handler.Bodies));
+        using var json = JsonDocument.Parse(raw);
+        Assert.False(json.RootElement.TryGetProperty("actions", out _));
+        Assert.Equal("Approval notification", json.RootElement.GetProperty("title").GetString());
+        Assert.Equal("https://capybara.tailnet/approvals", json.RootElement.GetProperty("click").GetString());
+        Assert.DoesNotContain("email_send", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("abc123", raw, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Ntfy_with_sensitive_support_keeps_nonce_bound_buttons()
+    {
+        var time = new FakeTimeProvider(Noon);
+        var handler = new RecordingHandler();
+        var ntfy = new NtfyChannel(new HttpClient(handler), new NtfyOptions(new Uri("https://ntfy.tailnet/"), "capybara") { GatewayBaseUrl = new Uri("https://capybara.tailnet/"), SupportsSensitiveContent = true });
+        var router = new NotificationRouter([ntfy], new PresenceTracker(time, TimeSpan.FromSeconds(30)), new InMemoryAlertSink(), new ChannelOptions(), time);
+
+        await router.RouteAsync(NotificationFactory.Approval(Approval(RiskLevel.High)), TestContext.Current.CancellationToken);
+
+        using var json = JsonDocument.Parse(Assert.Single(handler.Bodies));
+        Assert.Equal("approval needed: ea → email_send", json.RootElement.GetProperty("title").GetString());
+        Assert.Equal(2, json.RootElement.GetProperty("actions").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task Telegram_http_client_logging_never_records_the_bot_token()
+    {
+        const string token = "123456:SECRET-TOKEN";
+        var logs = new CapturingLoggerProvider();
+        var services = new ServiceCollection();
+        services.AddLogging(b => b.SetMinimumLevel(LogLevel.Trace).AddProvider(logs));
+        services.AddCapybaraTelegramChannel(new TelegramOptions(token, "123"));
+        services.ConfigureHttpClientDefaults(b => b.ConfigurePrimaryHttpMessageHandler(() => new ConstantHandler()));
+        await using var provider = services.BuildServiceProvider();
+
+        await provider.GetServices<INotificationChannel>().Single().SendAsync(NotificationFactory.Finished(Ea), TestContext.Current.CancellationToken);
+
+        Assert.DoesNotContain(logs.Messages, m => m.Contains("SECRET-TOKEN", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Web_push_delivers_to_healthy_devices_when_others_fail_and_logs_the_failures()
+    {
+        var store = new WebPushSubscriptionStore();
+        var keys = NewSubscriptionKeys();
+        store.Upsert(new WebPushSubscription("badkey", new Uri("https://push.example.test/badkey"), "AAAA", keys.Auth));
+        store.Upsert(new WebPushSubscription("flaky", new Uri("https://push.example.test/flaky"), keys.Public, keys.Auth));
+        store.Upsert(new WebPushSubscription("gone", new Uri("https://push.example.test/gone"), keys.Public, keys.Auth));
+        store.Upsert(new WebPushSubscription("ok", new Uri("https://push.example.test/ok"), keys.Public, keys.Auth));
+        var handler = new RecordingHandler(request => request.RequestUri!.AbsolutePath switch
+        {
+            "/flaky" => HttpStatusCode.InternalServerError,
+            "/gone" => HttpStatusCode.Gone,
+            _ => HttpStatusCode.Created,
+        });
+        var logs = new CapturingLoggerProvider();
+        using var loggerFactory = LoggerFactory.Create(b => b.AddProvider(logs));
+        var channel = NewWebPush(store, handler, out _, loggerFactory.CreateLogger<WebPushChannel>());
+
+        await channel.SendAsync(NotificationFactory.Finished(Ea), TestContext.Current.CancellationToken);
+
+        Assert.Equal(["badkey", "flaky", "ok"], store.Subscriptions.Select(s => s.DeviceId).Order());        Assert.DoesNotContain(store.Subscriptions, s => s.DeviceId == "gone");
+        Assert.Contains(logs.Messages, m => m.Contains("badkey", StringComparison.Ordinal));
+        Assert.Contains(logs.Messages, m => m.Contains("flaky", StringComparison.Ordinal) && m.Contains("500", StringComparison.Ordinal));
+        Assert.Equal(3, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Web_push_throws_when_no_device_succeeds_even_if_one_failure_is_a_crypto_error()
+    {
+        var store = new WebPushSubscriptionStore();
+        var keys = NewSubscriptionKeys();
+        store.Upsert(new WebPushSubscription("badkey", new Uri("https://push.example.test/badkey"), "AAAA", keys.Auth));
+        store.Upsert(new WebPushSubscription("flaky", new Uri("https://push.example.test/flaky"), keys.Public, keys.Auth));
+        var channel = NewWebPush(store, new RecordingHandler(_ => HttpStatusCode.InternalServerError), out _);
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => channel.SendAsync(NotificationFactory.Finished(Ea), TestContext.Current.CancellationToken).AsTask());
+    }
+
+    [Fact]
+    public async Task Di_router_logs_channel_failures_through_the_host_logger()
+    {
+        var logs = new CapturingLoggerProvider();
+        var services = new ServiceCollection();
+        services.AddLogging(b => b.SetMinimumLevel(LogLevel.Debug).AddProvider(logs));
+        services.AddSingleton<IAlertSink, InMemoryAlertSink>();
+        services.AddSingleton<INotificationChannel>(new StubChannel("flaky-ntfy") { Fail = true });
+        services.AddSingleton<INotificationChannel>(new StubChannel("backup"));
+        services.AddCapybaraChannels(new ChannelOptions());
+        await using var provider = services.BuildServiceProvider();
+
+        await provider.GetRequiredService<NotificationRouter>().RouteAsync(NotificationFactory.Finished(Ea), TestContext.Current.CancellationToken);
+
+        Assert.Contains(logs.Messages, m => m.Contains("flaky-ntfy", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Router_lets_approvals_through_pwa_focus_suppression_but_not_other_kinds()
+    {
+        var time = new FakeTimeProvider(Noon);
+        var channel = new StubChannel("ntfy");
+        var presence = new PresenceTracker(time, TimeSpan.FromSeconds(45));
+        var router = new NotificationRouter([channel], presence, new InMemoryAlertSink(), new ChannelOptions(), time);
+        var ct = TestContext.Current.CancellationToken;
+        presence.SetFocused("phone", true);
+
+        await router.RouteAsync(NotificationFactory.Finished(Ea), ct);
+        await router.RouteAsync(NotificationFactory.NeedsInput(Ea), ct);
+        Assert.Empty(channel.Sent);
+
+        await router.RouteAsync(NotificationFactory.Approval(Approval(RiskLevel.High)), ct);
+        Assert.Equal(NotificationKind.Approval, Assert.Single(channel.Sent).Kind);
+    }
+
     // ---- helpers ----
 
     private static async Task WaitForAsync(Func<bool> condition)
@@ -379,11 +587,12 @@ public sealed class ChannelAdapterTests
         Assert.True(condition(), "Condition was not met in time.");
     }
 
-    private static TelegramPollingService NewPoller(QueueHandler handler, RecordingInboundSink sink, TimeProvider? time = null) => new(
+    private static TelegramPollingService NewPoller(QueueHandler handler, RecordingInboundSink sink, TimeProvider? time = null, IAlertSink? alerts = null) => new(
         new HttpClient(handler) { BaseAddress = new Uri("https://api.telegram.org/") },
         new TelegramOptions("bot-token", "123") { AllowedUserId = "123" },
         new TelegramUpdateHandler(new ConversationalChannelGuard(new Dictionary<string, string> { ["telegram"] = "123" }), sink),
-        time ?? TimeProvider.System);
+        time ?? TimeProvider.System,
+        alerts: alerts);
 
     private static (string Public, string Auth) NewSubscriptionKeys()
     {
@@ -393,7 +602,7 @@ public sealed class ChannelAdapterTests
             WebPushCrypto.Base64UrlEncode(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16)));
     }
 
-    private static WebPushChannel NewWebPush(WebPushSubscriptionStore store, RecordingHandler handler, out WebPushVapidOptions vapidOptions)
+    private static WebPushChannel NewWebPush(WebPushSubscriptionStore store, RecordingHandler handler, out WebPushVapidOptions vapidOptions, ILogger<WebPushChannel>? logger = null)
     {
         using var vapid = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
         var p = vapid.ExportParameters(true);
@@ -401,7 +610,7 @@ public sealed class ChannelAdapterTests
             "mailto:owner@example.test",
             WebPushCrypto.Base64UrlEncode(WebPushCrypto.ExportUncompressed(new System.Security.Cryptography.ECParameters { Q = p.Q })),
             WebPushCrypto.Base64UrlEncode([.. p.D!, .. p.Q.X!, .. p.Q.Y!]));
-        return new WebPushChannel(new HttpClient(handler), store, vapidOptions, TimeProvider.System);
+        return new WebPushChannel(new HttpClient(handler), store, vapidOptions, TimeProvider.System, logger);
     }
 
     private sealed class TempDirectory : IDisposable
@@ -467,15 +676,66 @@ public sealed class ChannelAdapterTests
     {
         public List<Notification> Sent { get; } = [];
 
+        public bool Fail { get; init; }
+
         public string Name => name;
 
         public bool SupportsSensitiveContent => true;
 
         public ValueTask SendAsync(Notification notification, CancellationToken cancellationToken = default)
         {
+            if (Fail)
+            {
+                throw new HttpRequestException("boom");
+            }
+
             Sent.Add(notification);
             return ValueTask.CompletedTask;
         }
+    }
+
+    private sealed class CapturingLoggerProvider : ILoggerProvider
+    {
+        private readonly List<string> _messages = [];
+
+        public IReadOnlyList<string> Messages
+        {
+            get
+            {
+                lock (_messages)
+                {
+                    return [.. _messages];
+                }
+            }
+        }
+
+        public ILogger CreateLogger(string categoryName) => new CapturingLogger(this);
+
+        public void Dispose()
+        {
+        }
+
+        private sealed class CapturingLogger(CapturingLoggerProvider owner) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state)
+                where TState : notnull => null;
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            {
+                lock (owner._messages)
+                {
+                    owner._messages.Add(formatter(state, exception));
+                }
+            }
+        }
+    }
+
+    private sealed class ConstantHandler(HttpStatusCode status = HttpStatusCode.OK) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(new HttpResponseMessage(status));
     }
 
     private sealed class RecordingInboundSink : IInboundMessageSink
@@ -484,9 +744,11 @@ public sealed class ChannelAdapterTests
 
         public string? ThrowOn { get; init; }
 
+        public int ThrowCount { get; set; } = int.MaxValue;
+
         public ValueTask ReceiveAsync(string channel, string userId, string text, CancellationToken cancellationToken = default)
         {
-            if (text == ThrowOn)
+            if (text == ThrowOn && ThrowCount-- > 0)
             {
                 throw new InvalidOperationException("sink failed");
             }
