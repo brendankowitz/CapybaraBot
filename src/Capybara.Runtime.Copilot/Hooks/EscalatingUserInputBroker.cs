@@ -13,11 +13,12 @@ namespace Capybara.Runtime.Copilot.Hooks;
 /// never consent, FR-A2A-08). A root session escalates to the user's phone and waits up to
 /// <see cref="CopilotRuntimeOptions.UserEscalationTimeout"/>. Consults and dry runs never ask anyone.
 /// </summary>
+/// <remarks>Without an <see cref="IUserEscalation"/> (no phone channel) a root session's question goes unanswered.</remarks>
 public sealed partial class EscalatingUserInputBroker(
     Lazy<A2ACoordinator> coordinator,
-    IUserEscalation escalation,
     CopilotRuntimeOptions options,
-    ILogger<EscalatingUserInputBroker> logger) : IUserInputBroker
+    ILogger<EscalatingUserInputBroker> logger,
+    IUserEscalation? escalation = null) : IUserInputBroker
 {
     /// <summary>What a sub-agent is told after its question was passed up.</summary>
     public const string QuestionPassedUp =
@@ -40,7 +41,7 @@ public sealed partial class EscalatingUserInputBroker(
             return result.Success ? QuestionPassedUp : null;
         }
 
-        if (session.Depth > 0)
+        if (session.Depth > 0 || escalation is null)
         {
             return null;
         }

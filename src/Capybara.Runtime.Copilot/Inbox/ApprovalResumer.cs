@@ -5,6 +5,7 @@ using Capybara.Observability.Alerts;
 using Capybara.Orchestration.Inbox;
 using Capybara.Orchestration.Tasks;
 using Capybara.Policy.Approvals;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace Capybara.Runtime.Copilot.Inbox;
@@ -20,7 +21,7 @@ namespace Capybara.Runtime.Copilot.Inbox;
 /// too (one small file write). If that fails, the user is alerted: the approval stands, but the agent will not resume
 /// on its own.
 /// </remarks>
-public sealed partial class ApprovalResumer : IDisposable
+public sealed partial class ApprovalResumer : IHostedService, IDisposable
 {
     public const string AlertKind = "approval.resume_failed";
 
@@ -38,8 +39,20 @@ public sealed partial class ApprovalResumer : IDisposable
         _alerts = alerts;
         _time = time;
         _logger = logger;
-        approvals.Decided += OnDecided;
-        approvals.Expired += OnExpired;
+    }
+
+    /// <summary>Subscribes to approval outcomes.</summary>
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        _approvals.Decided += OnDecided;
+        _approvals.Expired += OnExpired;
+        return Task.CompletedTask;
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken)
+    {
+        Dispose();
+        return Task.CompletedTask;
     }
 
     public void Dispose()

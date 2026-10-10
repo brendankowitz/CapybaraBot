@@ -31,9 +31,9 @@ public sealed class ApprovalAndInputTests
         var escalation = new FakeEscalation(answer);
         var broker = new EscalatingUserInputBroker(
             new Lazy<A2ACoordinator>(() => fixture!.Coordinator),
-            escalation,
             new CopilotRuntimeOptions { UserEscalationTimeout = TimeSpan.FromMinutes(1) },
-            NullLogger<EscalatingUserInputBroker>.Instance);
+            NullLogger<EscalatingUserInputBroker>.Instance,
+            escalation);
         fixture = new RuntimeFixture(userInput: broker, fleet: [Ea, Research]);
         return (fixture, escalation);
     }
@@ -91,6 +91,18 @@ public sealed class ApprovalAndInputTests
     }
 
     [Fact]
+    public async Task Without_a_phone_channel_the_root_goes_unanswered_but_sub_agents_still_bubble_up()
+    {
+        RuntimeFixture? fixture = null;
+        var broker = new EscalatingUserInputBroker(new Lazy<A2ACoordinator>(() => fixture!.Coordinator), new CopilotRuntimeOptions(), NullLogger<EscalatingUserInputBroker>.Instance);
+        using var f = fixture = new RuntimeFixture(userInput: broker, fleet: [Ea, Research]);
+        var (_, session) = await DelegateAsync(f);
+
+        Assert.Null(await broker.AskAsync(f.Session(Ea), "Which day?", [], Ct));
+        Assert.Equal(EscalatingUserInputBroker.QuestionPassedUp, await broker.AskAsync(session, "Which floor?", [], Ct));
+    }
+
+    [Fact]
     public async Task Dry_runs_and_consults_never_ask_anyone()
     {
         var (f, escalation) = Fleet();
@@ -112,6 +124,7 @@ public sealed class ApprovalAndInputTests
         var (f, _) = Fleet();
         using var __ = f;
         using var resumer = new ApprovalResumer(f.Approvals, f.Inbox, f.Alerts, f.Time, NullLogger<ApprovalResumer>.Instance);
+        await resumer.StartAsync(Ct);
         var (taskId, session) = await DelegateAsync(f);
         await DrainAsync(f, Research.Id);
         var request = f.Approvals.Request(Research.Id, session.SessionId, "email_send", "hash", "preview", RiskLevel.High, MessageOrigin.Agent);
@@ -131,6 +144,7 @@ public sealed class ApprovalAndInputTests
         var (f, _) = Fleet();
         using var __ = f;
         using var resumer = new ApprovalResumer(f.Approvals, f.Inbox, f.Alerts, f.Time, NullLogger<ApprovalResumer>.Instance);
+        await resumer.StartAsync(Ct);
         f.Approvals.Request(Ea.Id, SessionIds.Main(Ea.Id), "email_send", "hash", "preview", RiskLevel.High, MessageOrigin.System);
 
         f.Time.Advance(TimeSpan.FromDays(2));
@@ -147,6 +161,7 @@ public sealed class ApprovalAndInputTests
         var (f, _) = Fleet();
         using var __ = f;
         using var resumer = new ApprovalResumer(f.Approvals, f.Inbox, f.Alerts, f.Time, NullLogger<ApprovalResumer>.Instance);
+        await resumer.StartAsync(Ct);
         var request = f.Approvals.Request(Ea.Id, SessionIds.Consult(Ea.Id, Guid.NewGuid()), "email_send", "hash", "preview", RiskLevel.High, MessageOrigin.Agent);
 
         f.Approvals.Decide(request.Id, request.Nonce, ApprovalDecision.AllowOnce, MessageOrigin.User);
@@ -160,6 +175,7 @@ public sealed class ApprovalAndInputTests
         var (f, _) = Fleet();
         using var __ = f;
         using var resumer = new ApprovalResumer(f.Approvals, f.Inbox, f.Alerts, f.Time, NullLogger<ApprovalResumer>.Instance);
+        await resumer.StartAsync(Ct);
         var routineSession = SessionIds.Task(Ea.Id, "routine-run-7");
         var request = f.Approvals.Request(Ea.Id, routineSession, "email_send", "hash", "preview", RiskLevel.High, MessageOrigin.System);
         f.Approvals.Decide(request.Id, request.Nonce, ApprovalDecision.AllowOnce, MessageOrigin.User);
