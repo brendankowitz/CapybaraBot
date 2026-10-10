@@ -29,6 +29,26 @@ internal static class YamlEditor
         return text.EndsWith("...\n", StringComparison.Ordinal) ? text[..^4] : text;
     }
 
+    /// <summary>
+    /// Serializes <paramref name="root"/>, keeping the leading comment block of <paramref name="original"/>. The node
+    /// model drops comments, and the header is where the user documents a file.
+    /// </summary>
+    public static string SerializeWithHeader(string original, YamlNode root)
+    {
+        var header = new StringBuilder();
+        foreach (var line in original.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
+        {
+            if (!line.TrimStart().StartsWith('#'))
+            {
+                break;
+            }
+
+            header.Append(line).Append('\n');
+        }
+
+        return header + Serialize(root);
+    }
+
     public static string? GetScalar(YamlMappingNode map, string key) =>
         map.Children.TryGetValue(new YamlScalarNode(key), out var value) && value is YamlScalarNode scalar ? scalar.Value : null;
 
@@ -40,6 +60,18 @@ internal static class YamlEditor
     /// <summary>Structural equality of two optional nodes (by canonical serialization).</summary>
     public static bool NodesEqual(YamlNode? a, YamlNode? b) =>
         (a is null && b is null) || (a is not null && b is not null && Serialize(a) == Serialize(b));
+
+    /// <summary>Like <see cref="NodesEqual"/>, but an absent key, an empty scalar and an empty collection are all equal.</summary>
+    public static bool EquivalentOrEmpty(YamlNode? a, YamlNode? b) => (IsEmpty(a) && IsEmpty(b)) || NodesEqual(a, b);
+
+    private static bool IsEmpty(YamlNode? node) => node switch
+    {
+        null => true,
+        YamlScalarNode scalar => string.IsNullOrEmpty(scalar.Value) || scalar.Value is "~" or "null",
+        YamlSequenceNode sequence => sequence.Children.Count == 0,
+        YamlMappingNode mapping => mapping.Children.Count == 0,
+        _ => false,
+    };
 
     /// <summary>Parses a routines.yaml sequence; an empty file is an empty sequence.</summary>
     public static YamlSequenceNode ParseSequence(string text) =>
