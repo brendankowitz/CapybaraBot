@@ -755,18 +755,12 @@ public sealed partial class WikiStore : IMemoryStore, IDisposable
         return pages;
     }
 
-    /// <summary>Keeps the prior version of a page in history. Text that does not parse is kept verbatim, so a quarantined page is never unrecoverable.</summary>
-    private async Task SnapshotAsync(MemoryPath path, string current, DateTimeOffset validTo, CancellationToken cancellationToken)
-    {
-        if (FrontmatterSerializer.TryParse(current, out var page))
-        {
-            await WriteHistoryAsync(path, new MemoryPage(path, page.Metadata, page.Body), validTo, cancellationToken);
-        }
-        else
-        {
-            await WriteHistoryFileAsync(path, current, validTo, cancellationToken);
-        }
-    }
+    /// <summary>
+    /// Keeps the prior version of a page in history, byte for byte. The raw text is never parsed and re-serialized:
+    /// that would drop frontmatter keys the serializer does not model, so a quarantined page could not be recovered exactly.
+    /// </summary>
+    private Task SnapshotAsync(MemoryPath path, string current, DateTimeOffset validTo, CancellationToken cancellationToken) =>
+        WriteHistoryFileAsync(path, current, validTo, cancellationToken);
 
     private async Task WriteHistoryAsync(MemoryPath path, MemoryPage page, DateTimeOffset validTo, CancellationToken cancellationToken)
     {
