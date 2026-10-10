@@ -213,6 +213,7 @@ public sealed class A2ACoordinator : IDisposable
             OutputSchema = outputSchema,
             Boundaries = boundaries,
             Envelope = child,
+            RequesterEnvelope = auth.ParentRemainder,
             CreatedAt = now,
             UpdatedAt = now,
         };
@@ -332,7 +333,7 @@ public sealed class A2ACoordinator : IDisposable
                 From = owner,
                 Origin = MessageOrigin.Agent,
                 Body = $"[task {task.Id} needs input] {question}",
-                Envelope = task.Envelope,
+                Envelope = RequesterNoticeEnvelope(task, taint),
                 Taint = taint,
                 CreatedAt = now,
                 TaskId = task.Id,
@@ -460,7 +461,7 @@ public sealed class A2ACoordinator : IDisposable
                 Origin = MessageOrigin.Agent,
                 Body = $"[task {task.Id} completed] {artifacts.Count} artifact(s); {unverified.Count} unverified item(s).",
                 Attachments = artifacts,
-                Envelope = task.Envelope,
+                Envelope = RequesterNoticeEnvelope(task, taint),
                 Taint = taint,
                 CreatedAt = now,
                 TaskId = task.Id,
@@ -612,7 +613,7 @@ public sealed class A2ACoordinator : IDisposable
                 From = task.Owner,
                 Origin = MessageOrigin.System,
                 Body = $"[task {task.Id} failed] The task was stopped because {reason}.",
-                Envelope = task.Envelope,
+                Envelope = RequesterNoticeEnvelope(task, task.Envelope.Taint),
                 Taint = task.Envelope.Taint,
                 CreatedAt = now,
                 TaskId = task.Id,
@@ -623,6 +624,14 @@ public sealed class A2ACoordinator : IDisposable
         await _audit.AppendAsync(new AuditRecord("a2a.task", "failed", task.Owner, SessionIds.Task(task.Owner, task.Id), Detail: $"task {task.Id}: {reason}", TraceId: task.Envelope.TraceId), CancellationToken.None);
         return failed;
     }
+
+    /// <summary>
+    /// A notice to the requester continues the requester's chain, within what the requester had left once it carved the
+    /// task's budget — never the task's own envelope, which may be spent (that is often why the task failed). It carries
+    /// the taint of what the task read.
+    /// </summary>
+    private static Envelope RequesterNoticeEnvelope(FleetTask task, Taint taint) =>
+        (task.RequesterEnvelope ?? task.Envelope) with { Taint = taint };
 
     /// <summary>Model-supplied ids that are not task ids address nothing.</summary>
     private async ValueTask<FleetTask?> LoadTaskAsync(string taskId, CancellationToken cancellationToken) =>

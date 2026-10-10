@@ -3,7 +3,6 @@ using Capybara.Channels;
 using Capybara.Contracts.Agents;
 using Capybara.Contracts.Messaging;
 using Capybara.Orchestration.Coordination;
-using Capybara.Orchestration.Envelopes;
 using Capybara.Runtime.Copilot.Configuration;
 using Capybara.Runtime.Copilot.Hooks;
 using Capybara.Runtime.Copilot.Sessions;
@@ -40,7 +39,7 @@ public sealed class EnvelopeContinuationTests
             Taint = Taint.Tainted,
         };
 
-        var continued = EnvelopeFactory.ContinueFrom(incoming, B.Id, Cap);
+        var continued = f.Envelopes.ContinueFrom(incoming, B.Id, Cap);
 
         Assert.Equal(1, continued.Depth);
         Assert.Equal([B.Id], continued.HopPath);
@@ -49,7 +48,7 @@ public sealed class EnvelopeContinuationTests
         Assert.Equal(Taint.Tainted, continued.Taint);
         Assert.Equal("user:brendan", continued.OriginPrincipal);
         Assert.Equal(new Budget(2m, 20, TimeSpan.FromSeconds(90)), continued.Budget);
-        Assert.Equal(1m, EnvelopeFactory.ContinueFrom(incoming with { Budget = new Budget(50m, 20, TimeSpan.FromMinutes(1)) }, B.Id, Cap with { Credits = 1m }).Budget.Credits);
+        Assert.Equal(1m, f.Envelopes.ContinueFrom(incoming with { Budget = new Budget(50m, 20, TimeSpan.FromMinutes(1)) }, B.Id, Cap with { Credits = 1m }).Budget.Credits);
     }
 
     [Fact]
@@ -60,11 +59,11 @@ public sealed class EnvelopeContinuationTests
 
         var toB = await f.Coordinator.SendMessageAsync(A.Id, SessionIds.Main(A.Id), root, B.Id, "hi B", Ct);
         Assert.True(toB.Success, toB.Error);
-        var atB = EnvelopeFactory.ContinueFrom(Assert.Single(await f.Inbox.ListAsync(B.Id, Ct)).Envelope!, B.Id, Cap);
+        var atB = f.Envelopes.ContinueFrom(Assert.Single(await f.Inbox.ListAsync(B.Id, Ct)).Envelope!, B.Id, Cap);
 
         var toC = await f.Coordinator.SendMessageAsync(B.Id, SessionIds.Main(B.Id), atB, C.Id, "hi C", Ct);
         Assert.True(toC.Success, toC.Error);
-        var atC = EnvelopeFactory.ContinueFrom(Assert.Single(await f.Inbox.ListAsync(C.Id, Ct)).Envelope!, C.Id, Cap);
+        var atC = f.Envelopes.ContinueFrom(Assert.Single(await f.Inbox.ListAsync(C.Id, Ct)).Envelope!, C.Id, Cap);
 
         var toD = await f.Coordinator.SendMessageAsync(C.Id, SessionIds.Main(C.Id), atC, D.Id, "hi D", Ct);
 
@@ -85,7 +84,7 @@ public sealed class EnvelopeContinuationTests
         using var f = new RuntimeFixture(fleet: [A, B, C, D]);
         var root = f.Envelopes.CreateRoot("user", A.Id, Cap, TimeSpan.FromMinutes(20));
         await f.Coordinator.SendMessageAsync(A.Id, SessionIds.Main(A.Id), root, B.Id, "hi B", Ct);
-        var atB = EnvelopeFactory.ContinueFrom(Assert.Single(await f.Inbox.ListAsync(B.Id, Ct)).Envelope!, B.Id, Cap);
+        var atB = f.Envelopes.ContinueFrom(Assert.Single(await f.Inbox.ListAsync(B.Id, Ct)).Envelope!, B.Id, Cap);
 
         // The message carried the default 2-credit budget; B's turn continues with exactly that.
         Assert.Equal(new A2AOptions().DefaultConsultBudget.Credits, atB.Budget.Credits);

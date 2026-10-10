@@ -452,7 +452,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         var cap = request.Budget ?? new Budget(_agent.Budget.SessionMaxCredits, MainTurnToolCalls, _options.TurnTimeout);
         if (request.Envelope is { } incoming)
         {
-            var continued = EnvelopeFactory.ContinueFrom(incoming, _agent.Id, cap);
+            var continued = _envelopes.ContinueFrom(incoming, _agent.Id, cap);
             return (continued, continued.Budget.Credits);
         }
 

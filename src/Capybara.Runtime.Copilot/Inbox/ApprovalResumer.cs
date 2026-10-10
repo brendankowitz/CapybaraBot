@@ -108,13 +108,14 @@ public sealed partial class ApprovalResumer : IHostedService, IDisposable
     }
 
     /// <summary>
-    /// Without a recorded turn context (it could not be stored), a turn that a person or the host started resumes as a
-    /// fresh root as before; any other resumes fail closed: at maximum depth (no agent-to-agent tools), tainted, and
-    /// rooted in the original origin, so it can never reach the user's phone.
+    /// Without a recorded turn context (it could not be stored), only a turn the user started — always a fresh root —
+    /// resumes as one. Any other fails closed: a host-started turn may have been a notice deep in an agent's chain, and
+    /// nothing now says which. It resumes at maximum depth (no agent-to-agent tools), tainted, and rooted in the original
+    /// origin, so it can never reach the user's phone.
     /// </summary>
     private Envelope? RestrictedEnvelope(ApprovalRequest request)
     {
-        if (request.Origin is MessageOrigin.User or MessageOrigin.System)
+        if (request.Origin == MessageOrigin.User)
         {
             return null;
         }

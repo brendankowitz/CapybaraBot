@@ -42,20 +42,29 @@ public sealed class EnvelopeFactory(TimeProvider time)
     }
 
     /// <summary>
-    /// The envelope of a turn that handles another agent's message (FR-A2A-05): it continues the sender's chain — same
-    /// trace, root task, parent task, depth, deadline, taint and principal — within the budget carved for the hop, never
-    /// more than <paramref name="cap"/>. The hop path restarts at <paramref name="self"/> so the receiver can reply to
-    /// the sender; the depth limit and the per-pair exchange limit (keyed by the root task) still bound the chain.
+    /// The envelope of a turn that continues a chain (FR-A2A-05) — another agent's message, a notice about a task, or a
+    /// resume after an approval: same trace, root task, parent task, depth, deadline, taint and principal, within the
+    /// budget carved for the hop, never more than <paramref name="cap"/>. The hop path restarts at
+    /// <paramref name="self"/> so the receiver can reply to the sender; the depth limit and the per-pair exchange limit
+    /// (keyed by the root task) still bound the chain.
     /// </summary>
-    public static Envelope ContinueFrom(Envelope incoming, AgentId self, Budget cap)
+    /// <remarks>
+    /// The deadline is a turn's time box. When the chain is <paramref name="self"/>'s own root that a person or the host
+    /// started (depth 0) — a resume after the user decided an approval, or the result of a task it delegated — the turn
+    /// gets a fresh one, <paramref name="cap"/>'s wall clock from now: the original turn's deadline says nothing about
+    /// how long the user took to decide or the task took to run. Budget, depth and root origin are kept.
+    /// </remarks>
+    public Envelope ContinueFrom(Envelope incoming, AgentId self, Budget cap)
     {
         ArgumentNullException.ThrowIfNull(incoming);
         ArgumentNullException.ThrowIfNull(cap);
         var budget = incoming.Budget;
+        var ownRoot = incoming is { Depth: 0, RootOrigin: MessageOrigin.User or MessageOrigin.System, HopPath: [var root] } && root == self;
         return incoming with
         {
             HopPath = [self],
             Budget = new Budget(Math.Min(budget.Credits, cap.Credits), Math.Min(budget.ToolCalls, cap.ToolCalls), budget.Wallclock < cap.Wallclock ? budget.Wallclock : cap.Wallclock),
+            Deadline = ownRoot ? time.GetUtcNow() + cap.Wallclock : incoming.Deadline,
         };
     }
 

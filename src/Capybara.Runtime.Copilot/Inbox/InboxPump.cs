@@ -41,6 +41,9 @@ public sealed partial class InboxPump
 
     public const string QuarantineAlertKind = "inbox.quarantined";
 
+    /// <summary>Alert kind raised when a task turn's spend could not be debited from the task's budget.</summary>
+    public const string SpendUnrecordedAlertKind = "inbox.spend_unrecorded";
+
     private readonly IAgentRuntime _runtime;
     private readonly IInboxStore _inbox;
     private readonly A2ACoordinator _coordinator;
@@ -243,18 +246,18 @@ public sealed partial class InboxPump
             steered = await EndTurnAsync();
         }
 
-        await RecordSpendAsync(message, plan, result);
-
         switch (result.Status)
         {
             case TurnStatus.Completed or TurnStatus.LimitExceeded:
                 // The turn is persisted: only now may the message leave the inbox (NFR-02). A turn stopped at its own
                 // credit limit was handled as far as its budget allowed; rerunning it would only overspend again.
+                // Acknowledged before anything else can fail: a handled message never runs again.
                 if (IsUserDm(message))
                 {
                     // A user turn answers every user message in it.
                     await AcknowledgeAsync([message.Id, .. steered.Select(dm => dm.Id)]);
                     Forget(message.Id);
+                    await RecordSpendAsync(message, plan, result);
                     await AfterTurnAsync(plan, result);
                     Raise(new InboxTurnCompletedEventArgs(Agent, message, result, steered));
                 }
@@ -262,6 +265,7 @@ public sealed partial class InboxPump
                 {
                     await AcknowledgeAsync([message.Id]);
                     Forget(message.Id);
+                    await RecordSpendAsync(message, plan, result);
                     await AfterTurnAsync(plan, result);
                     Raise(new InboxTurnCompletedEventArgs(Agent, message, result, []));
                     if (steered.Count > 0)
@@ -273,11 +277,13 @@ public sealed partial class InboxPump
                 break;
 
             case TurnStatus.Blocked or TurnStatus.OverBudget or TurnStatus.Throttled:
+                await RecordSpendAsync(message, plan, result);
                 LogBlocked(_logger, Agent.Value, result.Error);
                 Defer(message.Id, _options.BlockedPollInterval);
                 break;
 
             default:
+                await RecordSpendAsync(message, plan, result);
                 await FailAsync(message, result.Error);
                 break;
         }
@@ -369,11 +375,19 @@ public sealed partial class InboxPump
             }
         }
 
-        var envelope = target.Task is null ? Remaining(message) : null;
-        if (envelope is { Budget.Credits: <= 0 })
+        Envelope? envelope = null;
+        if (target.Task is null && message.Envelope is { } incoming)
         {
-            LogBudgetSpent(_logger, message.Id, Agent.Value);
-            return null;
+            // Only this pump's own failed attempts can use the message up; a message that arrives with little or nothing
+            // left still gets its turn, under that limit.
+            var spent = Spent(message.Id);
+            if (spent > 0 && incoming.Budget.Credits - spent <= 0)
+            {
+                LogBudgetSpent(_logger, message.Id, Agent.Value);
+                return null;
+            }
+
+            envelope = spent == 0 ? incoming : incoming with { Budget = incoming.Budget with { Credits = incoming.Budget.Credits - spent } };
         }
 
         var prompt = message.Origin switch
@@ -442,7 +456,9 @@ public sealed partial class InboxPump
     /// <summary>
     /// Every attempt's spend comes out of the budget carved for the work (FR-A2A-05), whatever the outcome, so retries
     /// cannot multiply it: a task's turns are debited from the task; a chained message that will be retried runs its next
-    /// attempt with what is left of its envelope.
+    /// attempt with what is left of its envelope. Never throws: the turn has happened either way, and a debit the task
+    /// store refuses must not make the pump treat a handled message as failed and run it again. The ledger still holds
+    /// the spend against the agent's daily and monthly caps; the user is alerted that the task's own budget missed it.
     /// </summary>
     private async Task RecordSpendAsync(FleetMessage message, TurnPlan plan, TurnResult result)
     {
@@ -454,7 +470,17 @@ public sealed partial class InboxPump
 
         if (plan.Request.Target.Task is { } task)
         {
-            await _coordinator.RecordTaskSpendAsync(Agent, task.Id, credits, CancellationToken.None);
+            try
+            {
+                await _coordinator.RecordTaskSpendAsync(Agent, task.Id, credits, CancellationToken.None);
+            }
+#pragma warning disable CA1031 // See above: logged and alerted, never fatal to the pass.
+            catch (Exception ex)
+#pragma warning restore CA1031
+            {
+                LogSpendUnrecorded(_logger, ex, credits, task.Id, Agent.Value);
+                await PublishAsync(new Alert(SpendUnrecordedAlertKind, AlertSeverity.Warning, $"{credits:0.##} credits {Agent} spent on task {task.Id} could not be debited from the task's budget.", _time.GetUtcNow(), Agent.Value));
+            }
         }
         else if (message.Envelope is not null && !Handled(result))
         {
@@ -465,21 +491,13 @@ public sealed partial class InboxPump
         }
     }
 
-    /// <summary>The message's envelope less what failed attempts spent; <see langword="null"/> when that is nothing.</summary>
-    private Envelope? Remaining(FleetMessage message)
+    /// <summary>What failed attempts at <paramref name="messageId"/> have spent.</summary>
+    private decimal Spent(string messageId)
     {
-        if (message.Envelope is not { } envelope)
-        {
-            return null;
-        }
-
-        decimal spent;
         lock (_gate)
         {
-            spent = _spent.GetValueOrDefault(message.Id);
+            return _spent.GetValueOrDefault(messageId);
         }
-
-        return spent == 0 ? envelope : envelope with { Budget = envelope.Budget with { Credits = envelope.Budget.Credits - spent } };
     }
 
     /// <summary>
@@ -788,6 +806,9 @@ public sealed partial class InboxPump
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "The reply turn for user messages that joined background work of {Agent} failed ({Error}); they will run as their own turns")]
     private static partial void LogReplyFailed(ILogger logger, string agent, string? error);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "{Credits} credits spent on task {TaskId} by {Agent} could not be debited from the task's budget")]
+    private static partial void LogSpendUnrecorded(ILogger logger, Exception exception, decimal credits, string taskId, string agent);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Post-turn housekeeping for {Agent} failed")]
     private static partial void LogHousekeepingFailed(ILogger logger, Exception exception, string agent);

@@ -1,6 +1,9 @@
 using Capybara.Contracts.Agents;
 using Capybara.Contracts.Messaging;
 using Capybara.Contracts.Tasks;
+using Capybara.Orchestration.Coordination;
+using Capybara.Orchestration.Tasks;
+using Capybara.Orchestration.Thread;
 using Capybara.Runtime.Copilot.Hosting;
 using Capybara.Runtime.Copilot.Inbox;
 using Capybara.Runtime.Copilot.Sessions;
@@ -78,5 +81,62 @@ public sealed class RetrySpendTests
 
         Assert.Equal([2m, 1.2m, 0.4m], runtime.Requests.Select(r => r.Envelope!.Budget.Credits));
         Assert.DoesNotContain(f.Alerts.Recent, a => a.Kind == InboxPump.DeadLetterAlertKind);
+    }
+
+    [Fact]
+    public async Task A_chained_message_that_arrives_with_nothing_left_still_gets_its_turn()
+    {
+        // Review round 3, I1: only this pump's own failed attempts may use a message up.
+        using var f = new RuntimeFixture(fleet: [Ea, Research]);
+        var spent = f.Envelopes.CreateRoot("user", Research.Id, new Budget(0m, 10, TimeSpan.FromMinutes(10)), TimeSpan.FromMinutes(10), rootOrigin: MessageOrigin.User) with { Depth = 1 };
+        await f.Inbox.EnqueueAsync(new FleetMessage { To = Ea.Id, From = Research.Id, Origin = MessageOrigin.Agent, Body = "fyi", Envelope = spent, CreatedAt = f.Time.GetUtcNow() }, Ct);
+        var runtime = new FakeAgentRuntime(Ea.Id);
+
+        await RunUntilAsync(
+            new InboxPump(runtime, f.Inbox, f.Coordinator, f.Alerts, Fast, TimeProvider.System, NullLogger<InboxPump>.Instance),
+            async () => await f.Inbox.CountAsync(Ea.Id, Ct) == 0,
+            "handled");
+
+        Assert.Equal(0m, Assert.Single(runtime.Requests).Envelope!.Budget.Credits);
+    }
+
+    [Fact]
+    public async Task A_handled_task_turn_whose_debit_fails_is_acknowledged_once_and_alerted()
+    {
+        // Review round 3, I3: a task-store fault while debiting used to fail a completed turn, which then ran again.
+        using var f = new RuntimeFixture(fleet: [Ea, Research]);
+        var store = new FaultyTaskStore(f.Tasks);
+        using var coordinator = new A2ACoordinator(f.Registry, f.Envelopes, f.Inbox, store, new FleetThread(), f.Taint, f.KillSwitch, f.Audit, f.Consults, new A2AOptions(), f.Time, f.Sessions);
+        var root = f.Envelopes.CreateRoot("user", Ea.Id, new Budget(10m, 100, TimeSpan.FromMinutes(10)), TimeSpan.FromMinutes(10));
+        var taskId = (await coordinator.DelegateTaskAsync(Ea.Id, SessionIds.Main(Ea.Id), root, Research.Id, "x", null, [], new Budget(4m, 10, TimeSpan.FromMinutes(5)), Ct)).Reference!;
+        var runtime = new FakeAgentRuntime(Research.Id)
+        {
+            Turn = (_, _) =>
+            {
+                store.FailSaves = true;
+                return Task.FromResult(TurnResult.Completed("done", new TurnEvidence(1m, "auto", [], [], [], [])));
+            },
+        };
+
+        await RunUntilAsync(
+            new InboxPump(runtime, f.Inbox, coordinator, f.Alerts, Fast, TimeProvider.System, NullLogger<InboxPump>.Instance),
+            async () => await f.Inbox.CountAsync(Research.Id, Ct) == 0 && f.Alerts.Recent.Any(a => a.Kind == InboxPump.SpendUnrecordedAlertKind),
+            "acknowledged and alerted");
+        await Task.Delay(100, Ct);
+
+        Assert.Single(runtime.Requests);
+        Assert.Contains(taskId, Assert.Single(f.Alerts.Recent, a => a.Kind == InboxPump.SpendUnrecordedAlertKind).Message, StringComparison.Ordinal);
+    }
+
+    private sealed class FaultyTaskStore(ITaskStore inner) : ITaskStore
+    {
+        public volatile bool FailSaves;
+
+        public ValueTask SaveAsync(FleetTask task, CancellationToken cancellationToken = default) =>
+            FailSaves ? throw new IOException("disk full") : inner.SaveAsync(task, cancellationToken);
+
+        public ValueTask<FleetTask?> GetAsync(string taskId, CancellationToken cancellationToken = default) => inner.GetAsync(taskId, cancellationToken);
+
+        public IAsyncEnumerable<FleetTask> ListAsync(CancellationToken cancellationToken = default) => inner.ListAsync(cancellationToken);
     }
 }

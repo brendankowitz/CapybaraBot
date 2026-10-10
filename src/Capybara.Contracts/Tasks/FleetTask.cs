@@ -26,6 +26,13 @@ public sealed record FleetTask
 
     public required Envelope Envelope { get; init; }
 
+    /// <summary>
+    /// The requester's envelope once the task's budget was carved out of it. Notices to the requester (a question, the
+    /// result, a failure) continue the requester's chain under it, not under the task's own, possibly spent, envelope
+    /// (FR-A2A-05). <see langword="null"/> on tasks recorded before it was kept: those use <see cref="Envelope"/>.
+    /// </summary>
+    public Envelope? RequesterEnvelope { get; init; }
+
     public FleetTaskState State { get; init; } = FleetTaskState.Submitted;
 
     /// <summary>The clarification question when <see cref="State"/> is <see cref="FleetTaskState.InputRequired"/>.</summary>
