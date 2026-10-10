@@ -129,10 +129,67 @@ public sealed class DurableLedgerTests : IDisposable
         Assert.Throws<InvalidDataException>(() => NewLedger(reopened));
     }
 
+    [Fact]
+    public async Task A_failing_store_write_still_counts_in_memory_so_the_hard_stop_holds()
+    {
+        var ledger = new CostLedger(_alerts, _time, new ThrowingStore());
+        ledger.SetBudget(Ea, new AgentBudget { DailyCredits = 10, MonthlyCredits = 100 });
+
+        await Assert.ThrowsAsync<IOException>(async () =>
+            await ledger.RecordAsync(new UsageRecord(Ea, "auto", 10m, _time.GetUtcNow()), TestContext.Current.CancellationToken));
+
+        Assert.False(ledger.CanSpend(Ea));
+        Assert.Equal(10m, ledger.GetStatus(Ea).SpentToday);
+    }
+
+    [Fact]
+    public async Task An_alert_whose_sink_throws_is_retried_on_the_next_record()
+    {
+        var sink = new FlakyAlertSink { Fail = true };
+        var ledger = new CostLedger(sink, _time);
+        ledger.SetBudget(Ea, new AgentBudget { DailyCredits = 1000, MonthlyCredits = 100 });
+        var ct = TestContext.Current.CancellationToken;
+
+        await Assert.ThrowsAsync<IOException>(async () => await ledger.RecordAsync(new UsageRecord(Ea, "auto", 60m, _time.GetUtcNow()), ct));
+        sink.Fail = false;
+        await ledger.RecordAsync(new UsageRecord(Ea, "auto", 1m, _time.GetUtcNow()), ct);
+        await ledger.RecordAsync(new UsageRecord(Ea, "auto", 1m, _time.GetUtcNow()), ct);
+
+        Assert.Single(sink.Published, a => a.Agent == "ea" && a.Kind == "budget.monthly");
+    }
+
     private CostLedger NewLedger(ICostLedgerStore store)
     {
         var ledger = new CostLedger(_alerts, _time, store);
         ledger.SetBudget(Ea, new AgentBudget { DailyCredits = 10, MonthlyCredits = 100 });
         return ledger;
+    }
+
+    private sealed class ThrowingStore : ICostLedgerStore
+    {
+        public IReadOnlyList<UsageRecord> Load() => [];
+
+        public ValueTask AppendAsync(UsageRecord usage, CancellationToken cancellationToken = default) =>
+            throw new IOException("disk full");
+    }
+
+    private sealed class FlakyAlertSink : IAlertSink
+    {
+        private readonly List<Alert> _published = [];
+
+        public bool Fail { get; set; }
+
+        public IReadOnlyList<Alert> Published => _published;
+
+        public ValueTask PublishAsync(Alert alert, CancellationToken cancellationToken = default)
+        {
+            if (Fail)
+            {
+                throw new IOException("sink down");
+            }
+
+            _published.Add(alert);
+            return ValueTask.CompletedTask;
+        }
     }
 }

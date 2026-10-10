@@ -28,6 +28,7 @@ public static class ReviewerRubric
         privileges, or contacting an unexpected external destination.
         Answer ESCALATE when you are unsure, or when the call is consequential, irreversible, or touches money,
         credentials, messages to other people, or permissions.
+        If the args value ends with the marker "…[truncated]", you have not seen the whole call: answer ESCALATE.
 
         Reply in exactly this format and nothing else:
         VERDICT: ALLOW|ESCALATE|BLOCK
@@ -35,6 +36,21 @@ public static class ReviewerRubric
 
         CALL
         """;
+
+    /// <summary>
+    /// <see langword="true"/> when the canonical arguments are too long for <see cref="Build"/> to show in full. The
+    /// model must not be consulted for such calls: a benign prefix could hide a harmful suffix, so callers treat them
+    /// as <see cref="ReviewVerdict.Escalate"/> (see <see cref="TruncatedResult"/>) and the gate enforces that.
+    /// </summary>
+    public static bool ExceedsLimit(ToolCallContext call)
+    {
+        ArgumentNullException.ThrowIfNull(call);
+        return CanonicalJson.Serialize(call.Args).Length > MaxArgsLength;
+    }
+
+    /// <summary>The deterministic outcome for an over-limit call, decided without asking the model.</summary>
+    public static ReviewResult TruncatedResult { get; } =
+        new(ReviewVerdict.Escalate, "arguments too large for automated review");
 
     /// <summary>Builds the complete reviewer prompt for one tool call.</summary>
     public static string Build(ToolCallContext call)

@@ -172,6 +172,148 @@ public sealed class DurableApprovalTests : IDisposable
         Assert.Single(await log.ReadAllAsync(ct).ToListAsync(ct), e => e.Kind == "approval" && e.Decision == "deny");
     }
 
+    [Fact]
+    public void Audit_is_written_before_the_approval_becomes_consumable()
+    {
+        ApprovalService? service = null;
+        string? statusAtAppend = null;
+        var observing = new CallbackAuditLog(record =>
+        {
+            if (record.Decision == "allow_once")
+            {
+                statusAtAppend = service!.Get(record.Detail![9..])?.Status.ToString();
+                Assert.False(service.TryConsume(Ea, "s1", "a", "h"));
+            }
+        });
+        service = new ApprovalService(new RulesEngine([]), new ApprovalOptions(), _time, new FileApprovalStore(JournalPath), observing);
+        var request = service.Request(Ea, "s1", "a", "h", "p", RiskLevel.Low, MessageOrigin.User);
+
+        Assert.Equal(ApprovalOutcome.Accepted, service.Decide(request.Id, request.Nonce, ApprovalDecision.AllowOnce, MessageOrigin.User));
+
+        Assert.Equal("Pending", statusAtAppend);
+        Assert.True(service.TryConsume(Ea, "s1", "a", "h"));
+    }
+
+    [Fact]
+    public void A_failed_audit_append_commits_nothing_so_the_approval_is_not_consumable()
+    {
+        var failing = new CallbackAuditLog(_ => throw new IOException("disk full"));
+        var service = new ApprovalService(new RulesEngine([]), new ApprovalOptions(), _time, new FileApprovalStore(JournalPath), failing);
+        var request = service.Request(Ea, "s1", "a", "h", "p", RiskLevel.Low, MessageOrigin.User);
+
+        Assert.Throws<IOException>(() => service.Decide(request.Id, request.Nonce, ApprovalDecision.AllowOnce, MessageOrigin.User));
+
+        Assert.False(service.TryConsume(Ea, "s1", "a", "h"));
+        Assert.Equal(ApprovalStatus.Pending, service.Get(request.Id)?.Status);
+        Assert.Equal(ApprovalStatus.Pending, NewService().Get(request.Id)?.Status);
+    }
+
+    [Fact]
+    public void A_failed_audit_append_does_not_create_an_always_allow_rule()
+    {
+        var rules = new RulesEngine([]);
+        var failing = new CallbackAuditLog(_ => throw new IOException("disk full"));
+        var service = new ApprovalService(rules, new ApprovalOptions(), _time, new FileApprovalStore(JournalPath), failing);
+        var request = service.Request(Ea, "s1", "calendar_read", "h", "p", RiskLevel.Low, MessageOrigin.User);
+
+        Assert.Throws<IOException>(() => service.Decide(request.Id, request.Nonce, ApprovalDecision.AlwaysAllow, MessageOrigin.User));
+
+        Assert.Empty(rules.LearnedRules);
+    }
+
+    [Fact]
+    public void An_expiry_whose_audit_fails_still_fails_closed_and_is_re_audited_after_restart()
+    {
+        var flaky = new CallbackAuditLog(record =>
+        {
+            if (record.Decision == "expired")
+            {
+                throw new IOException("disk full");
+            }
+        });
+        var service = new ApprovalService(new RulesEngine([]), new ApprovalOptions(), _time, new FileApprovalStore(JournalPath), flaky);
+        var request = service.Request(Ea, "s1", "a", "h", "p", RiskLevel.Low, MessageOrigin.User);
+        service.Decide(request.Id, request.Nonce, ApprovalDecision.AllowOnce, MessageOrigin.User);
+        _time.Advance(TimeSpan.FromMinutes(31));
+
+        Assert.False(service.TryConsume(Ea, "s1", "a", "h"));
+        Assert.Equal(ApprovalStatus.Expired, service.Get(request.Id)?.Status);
+
+        var restarted = NewService();
+        Assert.Equal(1, restarted.Sweep());
+        Assert.False(restarted.TryConsume(Ea, "s1", "a", "h"));
+        Assert.Single(_audit.Entries, e => e.Decision == "expired");
+    }
+
+    [Fact]
+    public void A_throwing_subscriber_cannot_suppress_the_audit_the_rule_or_other_subscribers()
+    {
+        var rules = new RulesEngine([]);
+        var service = new ApprovalService(rules, new ApprovalOptions(), _time, new FileApprovalStore(JournalPath), _audit);
+        var secondSubscriberRan = false;
+        service.Decided += (_, _) => throw new InvalidOperationException("notifier down");
+        service.Decided += (_, _) => secondSubscriberRan = true;
+        var request = service.Request(Ea, "s1", "calendar_read", "h", "p", RiskLevel.Low, MessageOrigin.User);
+
+        Assert.Equal(ApprovalOutcome.Accepted, service.Decide(request.Id, request.Nonce, ApprovalDecision.AlwaysAllow, MessageOrigin.User));
+
+        Assert.True(secondSubscriberRan);
+        Assert.Single(rules.LearnedRules);
+        Assert.Single(_audit.Entries, e => e.Decision == "always_allow");
+        Assert.Single(_audit.Entries, e => e.Decision == "handler_error" && e.Detail!.Contains("InvalidOperationException", StringComparison.Ordinal));
+        Assert.Equal(ApprovalStatus.Approved, service.Get(request.Id)?.Status);
+    }
+
+    [Fact]
+    public void A_throwing_expiry_subscriber_still_leaves_the_expiry_audited()
+    {
+        var service = NewService();
+        service.Expired += (_, _) => throw new InvalidOperationException("notifier down");
+        service.Request(Ea, "s1", "a", "h", "p", RiskLevel.Low, MessageOrigin.Event);
+        _time.Advance(TimeSpan.FromMinutes(11));
+
+        Assert.Equal(1, service.Sweep());
+
+        Assert.Single(_audit.Entries, e => e.Decision == "expired");
+        Assert.Single(_audit.Entries, e => e.Decision == "handler_error");
+        Assert.Empty(service.Pending());
+    }
+
+    [Fact]
+    public void A_throwing_learned_rule_save_does_not_undo_the_committed_decision()
+    {
+        var blocker = Path.Combine(_dir.Path, "blocker");
+        File.WriteAllText(blocker, "a file where the rule directory should be");
+        var store = new LearnedRuleStore(Path.Combine(blocker, "rules.json"));
+        var engine = store.CreateEngine([]);
+        var service = new ApprovalService(engine, new ApprovalOptions(), _time, new FileApprovalStore(JournalPath), _audit);
+        var request = service.Request(Ea, "s1", "calendar_read", "h", "p", RiskLevel.Low, MessageOrigin.User);
+
+        Assert.Equal(ApprovalOutcome.Accepted, service.Decide(request.Id, request.Nonce, ApprovalDecision.AlwaysAllow, MessageOrigin.User));
+
+        Assert.Single(engine.LearnedRules);
+        Assert.Single(_audit.Entries, e => e.Decision == "handler_error" && e.Detail!.Contains("always-allow rule", StringComparison.Ordinal));
+    }
+
     private ApprovalService NewService() =>
         new(new RulesEngine([]), new ApprovalOptions(), _time, new FileApprovalStore(JournalPath), _audit);
-}
+
+    private sealed class CallbackAuditLog(Action<AuditRecord> onAppend) : IAuditLog
+    {
+        public ValueTask<AuditEntry> AppendAsync(AuditRecord record, CancellationToken cancellationToken = default)
+        {
+            onAppend(record);
+            return ValueTask.FromResult(new AuditEntry
+            {
+                Sequence = 0,
+                At = DateTimeOffset.UnixEpoch,
+                Kind = record.Kind,
+                Decision = record.Decision,
+                PreviousHash = string.Empty,
+            });
+        }
+
+        public IAsyncEnumerable<AuditEntry> ReadAllAsync(CancellationToken cancellationToken = default) => AsyncEnumerable.Empty<AuditEntry>();
+
+        public ValueTask<bool> VerifyAsync(CancellationToken cancellationToken = default) => ValueTask.FromResult(true);
+    }}

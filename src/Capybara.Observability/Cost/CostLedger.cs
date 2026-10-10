@@ -10,7 +10,7 @@ namespace Capybara.Observability.Cost;
 /// threshold (50%, 80%, 100%) per month. With an <see cref="ICostLedgerStore"/> the ledger replays its history at
 /// construction, so spend and the hard stop survive a restart; threshold alerts already crossed before the restart are
 /// not re-sent. If persisting a record fails, it still counts in memory (the hard stop must hold) and the failure
-/// propagates to the caller.
+/// propagates to the caller. An alert whose sink throws is retried on a later record.
 /// </summary>
 public sealed class CostLedger
 {
@@ -157,9 +157,21 @@ public sealed class CostLedger
 
     private async ValueTask PublishOnceAsync(string key, Alert alert, CancellationToken cancellationToken)
     {
-        if (_firedThresholds.TryAdd(key, 0))
+        if (!_firedThresholds.TryAdd(key, 0))
+        {
+            return;
+        }
+
+        // Claimed before publishing so concurrent records send it once; released if the sink fails so the next
+        // record retries instead of losing the alert.
+        try
         {
             await _alerts.PublishAsync(alert, cancellationToken);
+        }
+        catch
+        {
+            _firedThresholds.TryRemove(key, out _);
+            throw;
         }
     }
 }

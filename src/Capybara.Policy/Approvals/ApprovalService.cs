@@ -1,3 +1,4 @@
+using System.Diagnostics.Metrics;
 using System.Security.Cryptography;
 using System.Text;
 using Capybara.Contracts.Agents;
@@ -13,15 +14,34 @@ namespace Capybara.Policy.Approvals;
 /// Issues and settles approvals (FR-SAF-04): 128-bit nonce, canonical args hash, TTL, single use, fail closed on expiry.
 /// </summary>
 /// <remarks>
+/// <para>
 /// With an <see cref="IApprovalStore"/> every state change is journaled and pending approvals are reloaded at
 /// construction; approvals that outlived their TTL while the process was down expire on first touch, so they fail
-/// closed. With an <see cref="IAuditLog"/> every decision and expiry is appended to the audit trail (FR-SAF-09).
-/// State transitions are serialized by one lock; events are raised and audit entries written after it is released.
-/// The public API is synchronous, so audit appends block the caller; this is acceptable because the host has no
-/// synchronization context and the audit log appends a single short line.
+/// closed.
+/// </para>
+/// <para>
+/// With an <see cref="IAuditLog"/> (FR-SAF-09) a decision is appended to the audit trail <em>before</em> the state change
+/// that makes the approval consumable, all under the service lock. If the append fails, <see cref="Decide"/> throws and
+/// nothing is committed, so an approval can never be used without its audit record. Expiry only ever makes an approval
+/// less usable, so it fails closed instead: the approval expires in memory even when its audit append fails, and is then
+/// left unjournaled so it expires, and is audited, again after a restart (an expiry can therefore be audited twice,
+/// never zero times). The public API is synchronous, so audit appends block the caller; the host has no
+/// synchronization context and the audit log appends one short line.
+/// </para>
+/// <para>
+/// Events and the "Always allow" rule are applied after the commit. A throwing subscriber cannot suppress the rule,
+/// the other subscribers or the audit record: the failure is counted (<c>capybara.approvals.handler_failures</c>) and
+/// recorded best-effort in the audit log as <c>handler_error</c>.
+/// </para>
 /// </remarks>
 public sealed class ApprovalService
 {
+    private static readonly Counter<long> HandlerFailures =
+        CapybaraTelemetry.Meter.CreateCounter<long>("capybara.approvals.handler_failures", description: "Approval event handlers or learned-rule saves that threw.");
+
+    private static readonly Counter<long> ExpiryAuditFailures =
+        CapybaraTelemetry.Meter.CreateCounter<long>("capybara.approvals.expiry_audit_failures", description: "Approval expiries that could not be written to the audit log.");
+
     private readonly RulesEngine _rules;
     private readonly ApprovalOptions _options;
     private readonly TimeProvider _time;
@@ -113,7 +133,7 @@ public sealed class ApprovalService
             Put(request);
         }
 
-        Requested?.Invoke(this, request);
+        Raise(Requested, "Requested", request);
         return request;
     }
 
@@ -143,7 +163,10 @@ public sealed class ApprovalService
         return pending;
     }
 
-    /// <summary>Settle an approval. The nonce must match and the decider must be the human principal.</summary>
+    /// <summary>
+    /// Settle an approval. The nonce must match and the decider must be the human principal.
+    /// </summary>
+    /// <exception cref="Exception">The audit append failed. Nothing was committed: the approval is unchanged and not consumable.</exception>
     public ApprovalOutcome Decide(string id, string nonce, ApprovalDecision decision, MessageOrigin decidedBy)
     {
         if (decidedBy != MessageOrigin.User)
@@ -154,12 +177,18 @@ public sealed class ApprovalService
         var expired = new List<ApprovalRequest>();
         ApprovalRequest? settled;
         ApprovalOutcome outcome;
-        lock (_gate)
+        try
         {
-            outcome = DecideLocked(id, nonce, decision, expired, out settled);
+            lock (_gate)
+            {
+                outcome = DecideLocked(id, nonce, decision, expired, out settled);
+            }
+        }
+        finally
+        {
+            PublishExpired(expired);
         }
 
-        PublishExpired(expired);
         if (settled is null)
         {
             return outcome;
@@ -171,25 +200,18 @@ public sealed class ApprovalService
             activity?.SetTag("capybara.approval.decision", decision.ToString());
         }
 
-        Decided?.Invoke(this, settled);
-        Audit(settled, decision switch
-        {
-            ApprovalDecision.AllowOnce => "allow_once",
-            ApprovalDecision.AlwaysAllow => "always_allow",
-            _ => "deny",
-        });
-
         if (decision == ApprovalDecision.AlwaysAllow)
         {
-            _rules.Add(new PolicyRule
+            Guard("always-allow rule", settled, () => _rules.Add(new PolicyRule
             {
                 Effect = RuleEffect.Allow,
                 Agent = settled.Agent.Value,
                 Tool = settled.Tool,
                 Reason = $"always-allow from approval {id}",
-            });
+            }));
         }
 
+        Raise(Decided, "Decided", settled);
         return ApprovalOutcome.Accepted;
     }
 
@@ -200,28 +222,41 @@ public sealed class ApprovalService
     {
         var expired = new List<ApprovalRequest>();
         var consumed = false;
-        lock (_gate)
+        try
         {
-            foreach (var candidate in _approvals.Values.ToList())
+            lock (_gate)
             {
-                if (candidate.Agent != agent || candidate.SessionId != sessionId || candidate.Tool != tool || candidate.ArgsHash != argsHash)
+                foreach (var candidate in _approvals.Values.ToList())
                 {
-                    continue;
-                }
+                    if (candidate.Agent != agent || candidate.SessionId != sessionId || candidate.Tool != tool || candidate.ArgsHash != argsHash)
+                    {
+                        continue;
+                    }
 
-                var current = ExpireIfDue(candidate, expired);
-                if (current.Status == ApprovalStatus.Approved)
-                {
-                    Put(current with { Status = ApprovalStatus.Consumed });
-                    consumed = true;
-                    break;
+                    var current = ExpireIfDue(candidate, expired);
+                    if (current.Status == ApprovalStatus.Approved)
+                    {
+                        Put(current with { Status = ApprovalStatus.Consumed });
+                        consumed = true;
+                        break;
+                    }
                 }
             }
         }
+        finally
+        {
+            PublishExpired(expired);
+        }
 
-        PublishExpired(expired);
         return consumed;
     }
+
+    private static string AuditDecision(ApprovalDecision decision) => decision switch
+    {
+        ApprovalDecision.AllowOnce => "allow_once",
+        ApprovalDecision.AlwaysAllow => "always_allow",
+        _ => "deny",
+    };
 
     private ApprovalOutcome DecideLocked(
         string id,
@@ -257,8 +292,10 @@ public sealed class ApprovalService
             return ApprovalOutcome.AlwaysNotPermitted;
         }
 
-        settled = current with { Status = decision == ApprovalDecision.Deny ? ApprovalStatus.Denied : ApprovalStatus.Approved };
-        Put(settled);
+        var next = current with { Status = decision == ApprovalDecision.Deny ? ApprovalStatus.Denied : ApprovalStatus.Approved };
+        AppendAudit(next, AuditDecision(decision));
+        Put(next);
+        settled = next;
         return ApprovalOutcome.Accepted;
     }
 
@@ -269,7 +306,10 @@ public sealed class ApprovalService
         _approvals[request.Id] = request;
     }
 
-    /// <summary>Must be called under the gate. Collects each newly expired approval for publishing.</summary>
+    /// <summary>
+    /// Must be called under the gate. Expires a due approval, collecting it for publishing. Fails closed: the
+    /// in-memory state changes even if the audit append or the journal write fails.
+    /// </summary>
     private ApprovalRequest ExpireIfDue(ApprovalRequest request, List<ApprovalRequest> expired)
     {
         if (request.Status is not (ApprovalStatus.Pending or ApprovalStatus.Approved) || _time.GetUtcNow() < request.ExpiresAt)
@@ -278,8 +318,35 @@ public sealed class ApprovalService
         }
 
         var expiredRequest = request with { Status = ApprovalStatus.Expired };
-        Put(expiredRequest);
+        var durable = true;
+        try
+        {
+            AppendAudit(expiredRequest, "expired");
+        }
+#pragma warning disable CA1031 // Expiry must still take effect; the unjournaled approval is re-expired and re-audited after a restart.
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            ExpiryAuditFailures.Add(1, new KeyValuePair<string, object?>("agent", request.Agent.Value));
+            durable = false;
+        }
+
+        _approvals[expiredRequest.Id] = expiredRequest;
         expired.Add(expiredRequest);
+        if (durable)
+        {
+            try
+            {
+                _store?.Save(expiredRequest);
+            }
+#pragma warning disable CA1031 // Already expired in memory; the stale journal entry expires again on reload.
+            catch (Exception)
+#pragma warning restore CA1031
+            {
+                ExpiryAuditFailures.Add(1, new KeyValuePair<string, object?>("agent", request.Agent.Value));
+            }
+        }
+
         return expiredRequest;
     }
 
@@ -288,12 +355,12 @@ public sealed class ApprovalService
         foreach (var request in expired)
         {
             CapybaraTelemetry.ApprovalsExpired.Add(1, new KeyValuePair<string, object?>("agent", request.Agent.Value));
-            Expired?.Invoke(this, request);
-            Audit(request, "expired");
+            Raise(Expired, "Expired", request);
         }
     }
 
-    private void Audit(ApprovalRequest request, string decision) =>
+    /// <summary>Appends an audit record synchronously; throws when the append fails.</summary>
+    private void AppendAudit(ApprovalRequest request, string decision, string? detail = null) =>
         _audit?.AppendAsync(
                 new AuditRecord(
                     "approval",
@@ -302,9 +369,46 @@ public sealed class ApprovalService
                     request.SessionId,
                     request.Tool,
                     request.ArgsHash,
-                    $"approval {request.Id}"),
+                    detail ?? $"approval {request.Id}"),
                 CancellationToken.None)
             .AsTask()
             .GetAwaiter()
             .GetResult();
+
+    /// <summary>Invokes each subscriber separately so one that throws cannot stop the others or the caller.</summary>
+    private void Raise(EventHandler<ApprovalRequest>? handler, string name, ApprovalRequest request)
+    {
+        if (handler is null)
+        {
+            return;
+        }
+
+        foreach (var subscriber in handler.GetInvocationList().Cast<EventHandler<ApprovalRequest>>())
+        {
+            Guard($"{name} handler", request, () => subscriber(this, request));
+        }
+    }
+
+    private void Guard(string what, ApprovalRequest request, Action action)
+    {
+        try
+        {
+            action();
+        }
+#pragma warning disable CA1031 // Notification and rule-persistence failures must not undo or hide a committed decision.
+        catch (Exception ex)
+#pragma warning restore CA1031
+        {
+            HandlerFailures.Add(1, new KeyValuePair<string, object?>("agent", request.Agent.Value));
+            try
+            {
+                AppendAudit(request, "handler_error", $"approval {request.Id}: {what} threw {ex.GetType().Name}");
+            }
+#pragma warning disable CA1031 // Best effort: the audit log is what is failing.
+            catch (Exception)
+#pragma warning restore CA1031
+            {
+            }
+        }
+    }
 }

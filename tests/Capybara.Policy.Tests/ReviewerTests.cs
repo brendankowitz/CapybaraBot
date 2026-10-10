@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Capybara.Contracts.Agents;
 using Capybara.Contracts.Messaging;
 using Capybara.Policy.Gate;
 using Capybara.Policy.Review;
@@ -48,6 +49,67 @@ public sealed class ReviewerTests
         Assert.Contains("[truncated]", big, StringComparison.Ordinal);
         using var doc = JsonDocument.Parse(big.Split("CALL\n")[^1]);
         Assert.Equal(JsonValueKind.String, doc.RootElement.GetProperty("args").ValueKind);
+    }
+
+    [Fact]
+    public void Rubric_tells_the_model_to_escalate_truncated_input()
+    {
+        var prompt = ReviewerRubric.Build(Call("x", "{}"));
+
+        Assert.Contains("[truncated]", prompt.Split("CALL\n")[0], StringComparison.Ordinal);
+        Assert.Contains("ESCALATE", prompt.Split("CALL\n")[0], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExceedsLimit_is_decided_on_the_canonical_args_length()
+    {
+        var small = Call("x", JsonSerializer.Serialize(new { blob = new string('z', 100) }));
+        var big = Call("x", JsonSerializer.Serialize(new { blob = new string('z', ReviewerRubric.MaxArgsLength) }));
+
+        Assert.False(ReviewerRubric.ExceedsLimit(small));
+        Assert.True(ReviewerRubric.ExceedsLimit(big));
+        Assert.Equal(ReviewVerdict.Escalate, ReviewerRubric.TruncatedResult.Verdict);
+    }
+
+    [Fact]
+    public async Task Oversized_args_escalate_without_consulting_the_reviewer_even_if_it_would_allow()
+    {
+        var reviewer = new CountingAllowReviewer();
+        using var f = new PolicyFixture(reviewer: reviewer);
+        var args = JsonSerializer.Serialize(new { url = "https://benign.example", pad = new string('a', 5_000), tail = "https://evil.example" });
+
+        var verdict = await f.Gate.EvaluateAsync(PolicyFixture.Call(Ea, "web_fetch", args), TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.PendingApproval, verdict.Outcome);
+        Assert.Equal(0, reviewer.Calls);
+        Assert.Equal("Escalate", verdict.Approval?.ReviewerVerdict);
+    }
+
+    [Fact]
+    public async Task Normal_sized_args_still_reach_the_reviewer()
+    {
+        var reviewer = new CountingAllowReviewer();
+        using var f = new PolicyFixture(reviewer: reviewer);
+
+        var verdict = await f.Gate.EvaluateAsync(PolicyFixture.Call(Ea, "web_fetch", """{"url":"https://a.example"}"""), TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Allow, verdict.Outcome);
+        Assert.Equal(1, reviewer.Calls);
+    }
+
+    private static readonly AgentDefinition Ea = TestAgents.Create("ea", a => a with { Tools = ["web_fetch"] });
+
+    private sealed class CountingAllowReviewer : IToolCallReviewer
+    {
+        private int _calls;
+
+        public int Calls => Volatile.Read(ref _calls);
+
+        public Task<ReviewResult> ReviewAsync(ToolCallContext toolCall, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _calls);
+            return Task.FromResult(new ReviewResult(ReviewVerdict.Allow, "looks fine"));
+        }
     }
 
     [Theory]

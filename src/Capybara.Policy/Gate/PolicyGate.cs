@@ -115,7 +115,10 @@ public sealed class PolicyGate(
         // Layer 4: reviewer for unresolved calls. It can block or escalate, never bypass layers 1–3.
         if (reviewer is not null)
         {
-            var review = await reviewer.ReviewAsync(call, cancellationToken);
+            // Over-limit args are never shown to the model in full, so it cannot vouch for them: escalate deterministically.
+            var review = ReviewerRubric.ExceedsLimit(call)
+                ? ReviewerRubric.TruncatedResult
+                : await reviewer.ReviewAsync(call, cancellationToken);
             return review.Verdict switch
             {
                 ReviewVerdict.Allow when !tainted => GateVerdict.Allow("reviewer", review.Rationale),

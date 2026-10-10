@@ -84,6 +84,93 @@ public sealed class QuotaMonitorTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
     }
 
+    [Fact]
+    public async Task A_timeout_surfacing_as_TaskCanceledException_does_not_stop_the_monitor()
+    {
+        var monitor = new QuotaMonitor(_source, _alerts, _time);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        _source.FailWith = new TaskCanceledException("http timeout");
+        var run = monitor.RunAsync(TimeSpan.FromMinutes(1), cts.Token);
+
+        await WaitForAsync(() => _source.Calls >= 1);
+        await WaitForAsync(() => _alerts.Recent.Any(a => a.Kind == "quota.poll_failed"));
+        _source.FailWith = null;
+        _source.Next = new QuotaSnapshot(550m, 1000m);
+        _time.Advance(TimeSpan.FromMinutes(1));
+        await WaitForAsync(() => _alerts.Recent.Any(a => a.Kind == "quota.threshold"));
+        Assert.False(run.IsCompleted);
+
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+    }
+
+    [Fact]
+    public async Task A_failing_sink_while_reporting_a_failure_does_not_stop_the_monitor()
+    {
+        var sink = new FlakySink();
+        var monitor = new QuotaMonitor(_source, sink, _time);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        _source.FailWith = new InvalidOperationException("boom");
+        sink.Fail = true;
+        var run = monitor.RunAsync(TimeSpan.FromMinutes(1), cts.Token);
+
+        await WaitForAsync(() => sink.Attempts >= 1);
+        sink.Fail = false;
+        _time.Advance(TimeSpan.FromMinutes(1));
+        await WaitForAsync(() => sink.Published.Any(a => a.Kind == "quota.poll_failed"));
+        Assert.False(run.IsCompleted);
+
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+    }
+
+    [Fact]
+    public async Task A_new_period_without_a_reset_timestamp_re_arms_when_usage_drops()
+    {
+        var monitor = new QuotaMonitor(_source, _alerts, _time);
+        var ct = TestContext.Current.CancellationToken;
+
+        foreach (var used in new[] { 600m, 700m, 50m, 520m })
+        {
+            _source.Next = new QuotaSnapshot(used, 1000m);
+            await monitor.PollAsync(ct);
+        }
+
+        Assert.Equal(2, _alerts.Recent.Count(a => a.Kind == "quota.threshold"));
+    }
+
+    [Fact]
+    public async Task A_jittering_reset_timestamp_does_not_re_fire_alerts()
+    {
+        var monitor = new QuotaMonitor(_source, _alerts, _time);
+        var ct = TestContext.Current.CancellationToken;
+        var resets = _time.GetUtcNow().AddDays(20);
+
+        for (var i = 0; i < 6; i++)
+        {
+            _source.Next = new QuotaSnapshot(600m + i, 1000m, resets.AddSeconds(i % 2 == 0 ? i : -i).AddHours(i));
+            await monitor.PollAsync(ct);
+        }
+
+        Assert.Single(_alerts.Recent, a => a.Kind == "quota.threshold");
+    }
+
+    [Fact]
+    public async Task A_sink_failure_leaves_the_threshold_unmarked_so_the_next_poll_retries()
+    {
+        var sink = new FlakySink { Fail = true };
+        var monitor = new QuotaMonitor(_source, sink, _time);
+        var ct = TestContext.Current.CancellationToken;
+        _source.Next = new QuotaSnapshot(600m, 1000m);
+
+        await Assert.ThrowsAsync<IOException>(() => monitor.PollAsync(ct));
+        sink.Fail = false;
+        await monitor.PollAsync(ct);
+        await monitor.PollAsync(ct);
+
+        Assert.Single(sink.Published, a => a.Kind == "quota.threshold");
+    }
+
     private static async Task WaitForAsync(Func<bool> condition)
     {
         var deadline = DateTime.UtcNow.AddSeconds(10);
@@ -91,6 +178,43 @@ public sealed class QuotaMonitorTests
         {
             Assert.True(DateTime.UtcNow < deadline, "timed out waiting for the monitor");
             await Task.Delay(5, TestContext.Current.CancellationToken);
+        }
+    }
+
+    private sealed class FlakySink : IAlertSink
+    {
+        private readonly List<Alert> _published = [];
+        private int _attempts;
+
+        public bool Fail { get; set; }
+
+        public int Attempts => Volatile.Read(ref _attempts);
+
+        public IReadOnlyList<Alert> Published
+        {
+            get
+            {
+                lock (_published)
+                {
+                    return [.. _published];
+                }
+            }
+        }
+
+        public ValueTask PublishAsync(Alert alert, CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _attempts);
+            if (Fail)
+            {
+                throw new IOException("sink down");
+            }
+
+            lock (_published)
+            {
+                _published.Add(alert);
+            }
+
+            return ValueTask.CompletedTask;
         }
     }
 
@@ -102,11 +226,18 @@ public sealed class QuotaMonitorTests
 
         public bool Fail { get; set; }
 
+        public Exception? FailWith { get; set; }
+
         public int Calls => Volatile.Read(ref _calls);
 
         public Task<QuotaSnapshot> GetQuotaAsync(CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref _calls);
+            if (FailWith is { } failure)
+            {
+                throw failure;
+            }
+
             return Fail ? throw new InvalidOperationException("boom") : Task.FromResult(Next);
         }
     }

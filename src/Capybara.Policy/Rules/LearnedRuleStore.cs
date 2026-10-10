@@ -56,7 +56,12 @@ public sealed class LearnedRuleStore(string path)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
             var temp = path + ".tmp";
-            File.WriteAllText(temp, JsonSerializer.Serialize(rules, Json));
+            using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                stream.Write(System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(rules, Json)));
+                stream.Flush(flushToDisk: true);
+            }
+
             File.Move(temp, path, overwrite: true);
         }
     }
