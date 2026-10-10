@@ -40,6 +40,9 @@ public sealed class BrokerHostOptions
     /// <summary>systemd credential holding the shared broker API key.</summary>
     public string ApiKeyCredential { get; set; } = "broker-api-key";
 
+    /// <summary>Development and test override for the shared key; production reads <see cref="ApiKeyCredential"/>.</summary>
+    public string? ApiKey { get; set; }
+
     public TimeSpan TokenExpiryLeadTime { get; set; } = TimeSpan.FromDays(3);
 }
 

@@ -24,6 +24,12 @@ public sealed record ApprovalRequest
 
     public required string Preview { get; init; }
 
+    /// <summary>
+    /// The full canonical JSON of the arguments (the text <see cref="ArgsHash"/> is computed over), so a reviewer sees
+    /// what <see cref="Preview"/> may have cut off. <see langword="null"/> for approvals recorded before it was kept.
+    /// </summary>
+    public string? ArgsJson { get; init; }
+
     public RiskLevel Risk { get; init; }
 
     public string? ReviewerVerdict { get; init; }

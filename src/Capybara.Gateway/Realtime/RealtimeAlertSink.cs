@@ -1,3 +1,4 @@
+using Capybara.Gateway.Endpoints;
 using Capybara.Observability.Alerts;
 
 namespace Capybara.Gateway.Realtime;
@@ -11,7 +12,7 @@ public sealed partial class RealtimeAlertSink(IAlertSink inner, ICapybaraEvents 
         await inner.PublishAsync(alert, cancellationToken);
         try
         {
-            await events.PublishAlertAsync(alert, cancellationToken);
+            await events.PublishAlertAsync(alert.ToDto(), cancellationToken);
         }
 #pragma warning disable CA1031 // Clients reload alerts from the durable sink; a dropped broadcast is cosmetic.
         catch (Exception ex) when (ex is not OperationCanceledException)

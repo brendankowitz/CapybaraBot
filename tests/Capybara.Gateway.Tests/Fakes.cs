@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Json;
 using Capybara.Channels;
+using Capybara.Client;
 using Capybara.Connections.Broker;
 using Capybara.Connections.Health;
 using Capybara.Connections.Model;
@@ -67,17 +68,19 @@ public sealed class RecordingEvents : ICapybaraEvents
         return Record("AgentStatusChanged", new AgentActivitySnapshot(agentId, state, unread));
     }
 
-    public Task PublishThreadEntryAsync(object entry, CancellationToken cancellationToken = default) => Record("ThreadEntry", entry);
+    public Task PublishThreadEntryAsync(ThreadEntryDto entry, CancellationToken cancellationToken = default) => Record("ThreadEntry", entry);
 
-    public Task PublishApprovalRequestedAsync(object approval, CancellationToken cancellationToken = default) => Record("ApprovalRequested", approval);
+    public Task PublishApprovalRequestedAsync(ApprovalDto approval, CancellationToken cancellationToken = default) => Record("ApprovalRequested", approval);
 
     public Task PublishApprovalResolvedAsync(string id, CancellationToken cancellationToken = default) => Record("ApprovalResolved", id);
 
-    public Task PublishAlertAsync(object alert, CancellationToken cancellationToken = default) => Record("Alert", alert);
+    public Task PublishQuestionRequestedAsync(QuestionDto question, CancellationToken cancellationToken = default) => Record("QuestionRequested", question);
+
+    public Task PublishAlertAsync(AlertDto alert, CancellationToken cancellationToken = default) => Record("Alert", alert);
 
     public Task PublishKillSwitchChangedAsync(bool engaged, CancellationToken cancellationToken = default) => Record("KillSwitchChanged", engaged);
 
-    public Task PublishProposalAsync(object proposal, CancellationToken cancellationToken = default) => Record("ProposalCreated", proposal);
+    public Task PublishProposalAsync(ProposalDto proposal, CancellationToken cancellationToken = default) => Record("ProposalCreated", proposal);
 
     private Task Record(string name, object? payload)
     {

@@ -7,8 +7,14 @@ using Capybara.Connections.DependencyInjection;
 using Capybara.Connections.Health;
 using Capybara.Contracts.Agents;
 using Capybara.Contracts.Storage;
+using Capybara.Gateway.Chat;
 using Capybara.Gateway.Configuration;
+using Capybara.Gateway.ConnectionControl;
+using Capybara.Gateway.Endpoints;
+using Capybara.Gateway.Events;
 using Capybara.Gateway.Realtime;
+using Capybara.Gateway.Security;
+using Capybara.Gateway.Settings;
 using Capybara.Gateway.Wiring;
 using Capybara.Hosting.Agents;
 using Capybara.Hosting.DependencyInjection;
@@ -160,11 +166,15 @@ public static class CapybaraServiceCollectionExtensions
             services.AddSingleton<KillSwitchCoordinator>();
             services.AddHostedService(sp => sp.GetRequiredService<KillSwitchCoordinator>());
             services.AddHostedService<EventBridge>();
+
+            // The chat records replies from the inbox pumps, so it too must listen before they start (FR-CLI-02).
+            services.AddSingleton(new ChatHistory(state.Chat));
+            services.AddHostedService<ChatHistoryRecorder>();
         }
 
         AddRuntime(services, configuration, runtime, hosting, host, state);
 
-        return new CoreSettings(host, state, fleet, new RuntimeSettings(autoStart));
+        return new CoreSettings(host, state, fleet, new RuntimeSettings(autoStart), warnings);
     }
 
     private static void AddPolicy(IServiceCollection services, CapybaraConfiguration fleet, StateLayout state, IConfiguration configuration, CapybaraHostOptions host)
@@ -273,6 +283,7 @@ public static class CapybaraServiceCollectionExtensions
         {
             BaseAddress = broker.BaseAddress,
             UnixSocketPath = broker.UnixSocketPath,
+            ApiKey = broker.ApiKey,
             ApiKeyFile = SystemdCredentials.PathOf(broker.ApiKeyCredential),
             TokenExpiryLeadTime = broker.TokenExpiryLeadTime,
         });
@@ -300,6 +311,11 @@ public static class CapybaraServiceCollectionExtensions
 
     private static void AddGateway(IServiceCollection services, IConfiguration configuration, CoreSettings core)
     {
+        // The broker's key authenticates exactly one route: its consent requests (FR-CON-08).
+        var broker = configuration.GetSection(BrokerHostOptions.SectionName).Get<BrokerHostOptions>() ?? new BrokerHostOptions();
+        services.AddSingleton(broker);
+        services.AddSingleton(new BrokerCallerKey(broker.ApiKey is { Length: > 0 } key ? key : SystemdCredentials.Read(broker.ApiKeyCredential)));
+
         AddChannels(services, configuration, core);
 
         // Order of the hosted services below is start order: config sync loads routines before the scheduler starts.
@@ -308,6 +324,9 @@ public static class CapybaraServiceCollectionExtensions
         AddScheduling(services, configuration, core.State);
 
         services.AddHostedService<ApprovalSweepService>();
+
+        // Webhook events are verified on the request and routed off it (FR-RTN-07).
+        AddEventIngress(services, configuration, core);
 
         // Account quota (FR-OBS-02): read through a running agent CLI, so only when runtimes start.
         services.AddSingleton<IQuotaSource, CopilotQuotaSource>();
@@ -324,6 +343,7 @@ public static class CapybaraServiceCollectionExtensions
         services.AddSingleton<IAgentLifecycleObserver, StopRuntimeObserver>();
         services.AddSingleton<IAgentLifecycleObserver, ClearAgentMemoryObserver>();
         services.AddSingleton<IAgentLifecycleObserver, RemoveLearnedRulesObserver>();
+        services.AddSingleton<IAgentLifecycleObserver, ClearChatHistoryObserver>();
         services.AddSingleton<IAgentLifecycleObserver>(sp => sp.GetRequiredService<ProposalService>());
         services.AddSingleton(sp => new AgentLifecycleService(
             sp.GetRequiredService<CapybaraConfigurationHost>(),
@@ -331,6 +351,32 @@ public static class CapybaraServiceCollectionExtensions
             sp.GetServices<IAgentLifecycleObserver>(),
             sp.GetRequiredService<IAuditLog>(),
             sp.GetRequiredService<TimeProvider>()));
+
+        // Connections as the user controls them from the desktop (FR-CON-07, FR-CON-08).
+        services.AddSingleton(sp => new ConnectionSwitches(sp.GetRequiredService<RulesEngine>(), sp.GetRequiredService<LearnedRuleStore>()));
+        services.AddSingleton<PendingConsents>();
+    }
+
+    private static void AddEventIngress(IServiceCollection services, IConfiguration configuration, CoreSettings core)
+    {
+        var options = configuration.GetSection(EventIngressOptions.SectionName).Get<EventIngressOptions>() ?? new EventIngressOptions();
+        var secrets = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        foreach (var (source, settings) in options.Sources)
+        {
+            var secret = settings.Secret is { Length: > 0 } inline ? inline : SystemdCredentials.Read(settings.SecretCredential);
+            if (string.IsNullOrEmpty(secret))
+            {
+                // Without a secret nothing could verify the source's events: refuse them all.
+                core.Warnings.Add($"{EventIngressOptions.SectionName}:Sources:{source} has no readable secret; its events are refused.");
+                continue;
+            }
+
+            secrets[source] = System.Text.Encoding.UTF8.GetBytes(secret);
+        }
+
+        services.AddSingleton(new EventIngressSecrets(secrets));
+        services.AddSingleton<EventIngressWorker>();
+        services.AddHostedService(sp => sp.GetRequiredService<EventIngressWorker>());
     }
 
     private static void AddChannels(IServiceCollection services, IConfiguration configuration, CoreSettings core)
@@ -340,6 +386,14 @@ public static class CapybaraServiceCollectionExtensions
         {
             QuietHours = new QuietHoursOptions { Enabled = settings.QuietHours.Enabled, StartsAt = settings.QuietHours.StartsAt, EndsAt = settings.QuietHours.EndsAt },
         };
+
+        // What the user chose in the PWA outranks the config defaults (FR-CLI-07).
+        options = NotificationSettings.ApplySaved(options, core.State.NotificationSettings);
+        services.AddSingleton(sp => new NotificationSettings(core.State.NotificationSettings, sp.GetRequiredService<NotificationRouter>(), sp.GetRequiredService<AgentRegistry>()));
+
+        // One escalation instance serves the runtime (IUserEscalation) and the questions page (FR-A2A-07).
+        services.AddSingleton<PhoneUserEscalation>();
+        services.AddSingleton<IUserEscalation>(sp => sp.GetRequiredService<PhoneUserEscalation>());
 
         // Alerts: durable first, then live in the clients, then (Warning and up) to the phone. The router reports its
         // own delivery failures to the non-notifying sink, so a dead channel cannot loop.
@@ -368,6 +422,7 @@ public static class CapybaraServiceCollectionExtensions
         if (settings.WebPush.PublicKey is { Length: > 0 } publicKey && SystemdCredentials.Read(settings.WebPush.PrivateKeyCredential) is { } privateKey)
         {
             var vapid = new WebPushVapidOptions(settings.WebPush.Subject, publicKey, privateKey);
+            services.AddSingleton(new WebPushPublicKey(publicKey));
             // Push endpoint URLs are capability paths: never log them.
             services.AddHttpClient("capybara-webpush").RemoveAllLoggers();
             services.AddSingleton<INotificationChannel>(sp => new WebPushChannel(
@@ -459,7 +514,7 @@ public static class CapybaraServiceCollectionExtensions
         }
     }
 
-    private sealed record CoreSettings(CapybaraHostOptions Host, StateLayout State, CapybaraConfiguration Fleet, RuntimeSettings Runtime);
+    private sealed record CoreSettings(CapybaraHostOptions Host, StateLayout State, CapybaraConfiguration Fleet, RuntimeSettings Runtime, CompositionWarnings Warnings);
 
     private sealed record RuntimeSettings(bool AutoStartRequested);
 }

@@ -82,7 +82,7 @@ public sealed class WiringTests
         // FR-AGT-07: cleanup order, ending with the very ProposalService singleton the endpoints use.
         var observers = factory.Services.GetServices<IAgentLifecycleObserver>().ToList();
         Assert.Equal(
-            [typeof(RevokeBrokerGrantsObserver), typeof(UnscheduleRoutinesObserver), typeof(StopRuntimeObserver), typeof(ClearAgentMemoryObserver), typeof(RemoveLearnedRulesObserver), typeof(ProposalService)],
+            [typeof(RevokeBrokerGrantsObserver), typeof(UnscheduleRoutinesObserver), typeof(StopRuntimeObserver), typeof(ClearAgentMemoryObserver), typeof(RemoveLearnedRulesObserver), typeof(Chat.ClearChatHistoryObserver), typeof(ProposalService)],
             observers.Select(o => o.GetType()));
         Assert.Same(factory.Services.GetRequiredService<ProposalService>(), observers[^1]);
     }
@@ -161,7 +161,7 @@ public sealed class WiringTests
             .Request(Ea, "session-1", "email_send", "hash", "To: someone", RiskLevel.Medium, MessageOrigin.User);
 
         await Eventually.TrueAsync(() => factory.Channel.Sent.Any(n => n.Kind == NotificationKind.Approval && n.Agent == Ea), "the approval push is sent");
-        await Eventually.TrueAsync(() => factory.Events.Published.Any(p => p.Name == "ApprovalRequested" && ReferenceEquals(p.Payload, approval)), "the approval is broadcast");
+        await Eventually.TrueAsync(() => factory.Events.Published.Any(p => p.Name == "ApprovalRequested" && p.Payload is Client.ApprovalDto dto && dto.Id == approval.Id), "the approval is broadcast");
         Assert.Equal(started, factory.Time.GetUtcNow());
         var push = factory.Channel.Sent.Single(n => n.Kind == NotificationKind.Approval);
         Assert.Contains(push.Actions, a => a.CallbackPath == NotificationFactory.ApprovalActionPath(approval.Id, approval.Nonce, ApprovalDecision.AllowOnce));

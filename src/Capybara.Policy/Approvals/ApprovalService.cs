@@ -104,7 +104,8 @@ public sealed class ApprovalService
         RiskLevel risk,
         MessageOrigin origin,
         string? reviewerVerdict = null,
-        string? reviewerRationale = null)
+        string? reviewerRationale = null,
+        string? argsJson = null)
     {
         using var activity = CapybaraTelemetry.Policy.StartActivity("approval.request");
         activity?.SetTag("capybara.agent", agent.Value);
@@ -120,6 +121,7 @@ public sealed class ApprovalService
             Tool = tool,
             ArgsHash = argsHash,
             Preview = preview,
+            ArgsJson = argsJson,
             Risk = risk,
             Origin = origin,
             ReviewerVerdict = reviewerVerdict,

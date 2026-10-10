@@ -5,6 +5,7 @@ using Capybara.Contracts.Agents;
 using Capybara.Contracts.Approvals;
 using Capybara.Contracts.Messaging;
 using Capybara.Contracts.Proposals;
+using Capybara.Gateway.Endpoints;
 using Capybara.Gateway.Realtime;
 using Capybara.Observability.Alerts;
 using Capybara.Orchestration.Proposals;
@@ -34,6 +35,7 @@ public sealed partial class EventBridge(
     RuntimeActivity activity,
     InboxPumpHostedService pumps,
     CopilotRoutineExecutor routines,
+    PhoneUserEscalation questions,
     ICapybaraEvents events,
     NotificationRouter notifications,
     AgentActivityTracker tracker,
@@ -67,6 +69,7 @@ public sealed partial class EventBridge(
         activity.EgressDenied += OnEgressDenied;
         pumps.TurnCompleted += OnInboxTurnCompleted;
         routines.Output += OnRoutineOutput;
+        questions.Asked += OnQuestionAsked;
         _activityLoop = Task.Run(RunActivityAsync, CancellationToken.None);
         return Task.CompletedTask;
     }
@@ -84,6 +87,7 @@ public sealed partial class EventBridge(
         activity.EgressDenied -= OnEgressDenied;
         pumps.TurnCompleted -= OnInboxTurnCompleted;
         routines.Output -= OnRoutineOutput;
+        questions.Asked -= OnQuestionAsked;
         _activity.Writer.TryComplete();
         await Task.WhenAll([.. _inFlight.Keys, _activityLoop]).WaitAsync(cancellationToken);
     }
@@ -92,7 +96,7 @@ public sealed partial class EventBridge(
     private void OnApprovalRequested(object? sender, ApprovalRequest approval)
     {
         Dispatch("approval push", async () => await notifications.RouteAsync(NotificationFactory.Approval(approval)));
-        Dispatch("approval broadcast", () => events.PublishApprovalRequestedAsync(approval));
+        Dispatch("approval broadcast", () => events.PublishApprovalRequestedAsync(approval.ToDto()));
         EnqueueActivity("approval pending", () => tracker.ApprovalPendingAsync(approval.Agent.Value));
     }
 
@@ -112,11 +116,11 @@ public sealed partial class EventBridge(
         });
 
     private void OnThreadAppended(object? sender, FleetThreadEntry entry) =>
-        Dispatch("thread entry", () => events.PublishThreadEntryAsync(entry));
+        Dispatch("thread entry", () => events.PublishThreadEntryAsync(entry.ToDto()));
 
     private void OnProposed(object? sender, ChangeProposal proposal)
     {
-        Dispatch("proposal broadcast", () => events.PublishProposalAsync(proposal));
+        Dispatch("proposal broadcast", () => events.PublishProposalAsync(proposal.ToDto()));
 
         // Content-free: the diff is reviewed in the PWA, never on the phone (FR-AGT-06, NFR-06).
         Dispatch("proposal push", async () => await notifications.RouteAsync(new Notification(
@@ -128,6 +132,10 @@ public sealed partial class EventBridge(
                 "/proposals",
                 IsSensitive: true)));
     }
+
+    /// <summary>The phone push for a question is sent by the escalation itself; the clients get it live here.</summary>
+    private void OnQuestionAsked(object? sender, PendingQuestion question) =>
+        Dispatch("question broadcast", () => events.PublishQuestionRequestedAsync(question.ToDto()));
 
     private void OnTurnStarted(object? sender, TurnActivityEventArgs e) =>
         EnqueueActivity("turn started", () => tracker.TurnStartedAsync(e.Agent.Value));

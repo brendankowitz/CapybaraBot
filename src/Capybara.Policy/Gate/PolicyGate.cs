@@ -142,7 +142,10 @@ public sealed class PolicyGate(
             return GateVerdict.Deny(DryRunLayer, $"dry run: would require approval ({reason})");
         }
 
-        var preview = $"{call.Agent.Id} → {call.Tool} {CanonicalJson.Serialize(call.Args)}";
+        // The preview is capped; the full canonical arguments travel with the approval so a reviewer never approves
+        // something cut off (FR-SAF-04).
+        var argsJson = CanonicalJson.Serialize(call.Args);
+        var preview = $"{call.Agent.Id} → {call.Tool} {argsJson}";
         if (preview.Length > 2_000)
         {
             preview = string.Concat(preview.AsSpan(0, 2_000), "…");
@@ -157,7 +160,8 @@ public sealed class PolicyGate(
             risk,
             call.Origin,
             review?.Verdict.ToString(),
-            review?.Rationale);
+            review?.Rationale,
+            argsJson);
 
         return new GateVerdict(GateOutcome.PendingApproval, "human", reason, request);
     }
