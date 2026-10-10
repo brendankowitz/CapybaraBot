@@ -54,6 +54,87 @@ public sealed class ApprovalsPageTests : PwaTestContext
     }
 
     [Fact]
+    public void Bidi_and_zero_width_characters_are_shown_as_tokens_everywhere_on_the_card()
+    {
+        Serve(Approval("v1", "calendar_create", new { title = "pay\u202Eenoyna", note = "a\u200Bb" }, rationale: "ok\u2066?", risk: "Low"));
+
+        var cut = RenderLoaded();
+
+        var text = cut.Find("article").TextContent;
+        Assert.DoesNotContain('\u202E', text);
+        Assert.DoesNotContain('\u200B', text);
+        Assert.DoesNotContain('\u2066', text);
+        Assert.Contains("pay⟦U+202E⟧enoyna", cut.FindAll("table.args td code")[0].TextContent, StringComparison.Ordinal);
+        Assert.Contains("a⟦U+200B⟧b", cut.FindAll("table.args td code")[1].TextContent, StringComparison.Ordinal);
+        Assert.Contains("ok⟦U+2066⟧?", cut.Find("p.reviewer").TextContent, StringComparison.Ordinal);
+        Assert.NotEmpty(cut.FindAll("p.notice"));
+        Assert.False(IsDisabled(cut, "Allow once"));
+    }
+
+    [Fact]
+    public void The_exact_arguments_block_is_revealed_when_the_server_sends_raw_characters()
+    {
+        var raw = "{\"note\":\"a\u202Eb\u200Bc\"}";
+        Serve(Approval("v6", "calendar_create", new { }, risk: "Low", argsJson: raw, preview: "ea → calendar_create"));
+
+        var cut = RenderLoaded();
+
+        var exact = cut.Find("pre.exact-args").TextContent;
+        Assert.Equal("{\"note\":\"a⟦U+202E⟧b⟦U+200B⟧c\"}", exact);
+    }
+
+    [Fact]
+    public void A_bidi_override_in_the_recipient_is_visible_and_blocks_allow()
+    {
+        Serve(Approval("v2", "email_send", new { to = "sam@example.com\u202Egro.live", subject = "Su\u202Ebject", body = "b" }, risk: "Low"));
+
+        var cut = RenderLoaded();
+
+        Assert.Equal("sam@example.com⟦U+202E⟧gro.live", cut.Find("dd.recipient").TextContent);
+        Assert.Contains("Su⟦U+202E⟧bject", cut.FindAll(".email-preview dd")[1].TextContent, StringComparison.Ordinal);
+        Assert.DoesNotContain('\u202E', cut.Find("article").TextContent);
+        Assert.True(IsDisabled(cut, "Allow once"));
+        Assert.False(IsDisabled(cut, "Deny"));
+        Assert.Contains("recipient (to)", cut.Find("p.block-reason").TextContent, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Look_alike_letters_in_a_recipient_show_their_code_points()
+    {
+        Serve(Approval("v3", "email_send", new { to = "sam@\u0456nternal.com", subject = "s", body = "b" }, risk: "Low"));
+
+        var cut = RenderLoaded();
+
+        Assert.Equal("sam@⟦U+0456⟧nternal.com", cut.Find("dd.recipient").TextContent);
+        Assert.Contains("non-ASCII", cut.Find("p.notice").TextContent, StringComparison.Ordinal);
+        Assert.False(IsDisabled(cut, "Allow once"));
+    }
+
+    [Fact]
+    public void A_zero_width_key_that_shadows_the_recipient_is_flagged_and_blocks_allow()
+    {
+        Serve(Approval("v4", "email_send", new { }, risk: "Low", preview: "ea → email_send {\"to\":\"good@example.com\",\"t\\u200Bo\":\"evil@example.net\",\"subject\":\"s\",\"body\":\"b\"}"));
+
+        var cut = RenderLoaded();
+
+        Assert.True(IsDisabled(cut, "Allow once"));
+        Assert.Contains("ambiguous", cut.Find("p.block-reason").TextContent, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain('\u200B', cut.Find("article").TextContent);
+        Assert.Contains("U+200B", cut.Find("article").TextContent, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Diff_text_is_revealed_too()
+    {
+        Serve(Approval("v5", "github_commit_file", new { patch = "--- a\n+++ b\n@@ -1 +1 @@\n-x\n+pay\u202Eenoyna" }, risk: "Medium"));
+
+        var cut = RenderLoaded();
+
+        Assert.DoesNotContain('\u202E', cut.Find("pre.diff").TextContent);
+        Assert.Contains("pay⟦U+202E⟧enoyna", cut.Find(".diff-add").TextContent, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Exact_arguments_are_always_available()
     {
         Serve(Approval("a1", "email_send", new { to = "sam@example.com", subject = "Hi", body = "<b>x</b>" }));

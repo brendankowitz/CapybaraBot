@@ -273,26 +273,6 @@ public sealed class CapybaraApiClientTests
     }
 
     [Fact]
-    public void Replies_are_the_assistant_entries_right_after_the_matching_user_message()
-    {
-        var t = DateTimeOffset.UnixEpoch;
-        ChatEntryDto[] history =
-        [
-            new(t, "user", "hello"),
-            new(t, "assistant", "old reply"),
-            new(t, "user", "hello"),
-            new(t, "assistant", "new reply 1"),
-            new(t, "assistant", "new reply 2"),
-            new(t, "user", "something else"),
-            new(t, "assistant", "unrelated"),
-        ];
-
-        Assert.Equal(["new reply 1", "new reply 2"], ChatReplies.To(history, "hello").Select(e => e.Content));
-        Assert.Empty(ChatReplies.To(history[..3], "hello"));
-        Assert.Empty(ChatReplies.To(history, "never sent"));
-    }
-
-    [Fact]
     public void Turn_summary_never_hides_a_turn_that_did_not_run()
     {
         Assert.Equal("(no reply)", new TurnResultDto("Completed").Summary);

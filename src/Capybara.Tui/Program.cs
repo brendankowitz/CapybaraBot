@@ -30,7 +30,7 @@ static async Task<int> RunAsync(ParsedCommand command, CapybaraApiClient api, st
             await ChatAsync(api, command.Arguments.Count > 0 ? command.Arguments[0] : throw new ArgumentException("chat requires an agent id."));
             return 0;
         case "approvals":
-            await ApprovalsAsync(api, command.Arguments);
+            await ApprovalsAsync(api, command.Arguments, command.Yes);
             return 0;
         case "proposals":
             await ProposalsAsync(api, SubCommand.Parse("proposals", command.Arguments));
@@ -72,7 +72,7 @@ static async Task<int> RunAsync(ParsedCommand command, CapybaraApiClient api, st
             await DashboardAsync(api, command.BaseUrl, token);
             return 0;
         default:
-            AnsiConsole.WriteLine("Usage: capybara [--base-url URL] agents|chat <agent>|approvals [decide <id> allow-once|always|deny]|proposals [show|approve|reject <id>]|memory [list [prefix]|show <path>|pending|apply <id>|discard <id>|export [--out FILE]]|routines [enable <id> [--ack CREDITS]|disable <id>|dry-run <id>]|thread|kill [--release]|budgets|audit|dashboard");
+            AnsiConsole.WriteLine("Usage: capybara [--base-url URL] agents|chat <agent>|approvals [decide <id> allow-once|always|deny [--yes]]|proposals [show|approve|reject <id>]|memory [list [prefix]|show <path>|pending|apply <id>|discard <id>|export [--out FILE]]|routines [enable <id> [--ack CREDITS]|disable <id>|dry-run <id>]|thread|kill [--release]|budgets|audit|dashboard");
             return 2;
     }
 }
@@ -88,6 +88,9 @@ static async Task ChatAsync(CapybaraApiClient api, string agent)
             return;
         }
 
+        // The last entry before sending anchors the reply lookup if the server gives the turn no message id.
+        var recent = await api.GetChatHistoryAsync(agent);
+        var before = recent.Count > 0 ? recent[^1] : null;
         var result = await api.SendTurnAsync(agent, prompt);
         if (!result.IsAccepted)
         {
@@ -96,38 +99,53 @@ static async Task ChatAsync(CapybaraApiClient api, string agent)
             continue;
         }
 
-        // Queued through the inbox: the reply lands in the chat history right after our message.
+        // Queued through the inbox: the reply lands in the chat history, correlated by message id.
         AnsiConsole.MarkupLine("[grey]Queued, waiting for the reply…[/]");
-        for (var attempt = 0; attempt < 90; attempt++)
+        var replies = await api.AwaitReplyAsync(agent, result.MessageId, before, TimeSpan.FromSeconds(2), 90);
+        if (replies.Count == 0)
         {
-            await Task.Delay(TimeSpan.FromSeconds(2));
-            var replies = ChatReplies.To(await api.GetChatHistoryAsync(agent), prompt);
-            if (replies.Count > 0)
-            {
-                foreach (var reply in replies)
-                {
-                    AnsiConsole.Write(Tables.Plain(reply.Content));
-                    AnsiConsole.WriteLine();
-                }
+            AnsiConsole.MarkupLine("[yellow]No reply yet. It will appear in the chat history when the agent finishes.[/]");
+        }
 
-                break;
-            }
+        foreach (var reply in replies)
+        {
+            AnsiConsole.Write(Tables.Plain(reply.Content));
+            AnsiConsole.WriteLine();
         }
     }
 }
 
-static async Task ApprovalsAsync(CapybaraApiClient api, IReadOnlyList<string> args)
+static async Task ApprovalsAsync(CapybaraApiClient api, IReadOnlyList<string> args, bool assumeYes)
 {
     var approvals = await api.GetApprovalsAsync();
     AnsiConsole.Write(Tables.Approvals(approvals));
     if (args.Count >= 3 && args[0] == "decide")
     {
         var approval = approvals.FirstOrDefault(a => a.Id == args[1]) ?? throw new ArgumentException($"No pending approval '{args[1]}'.");
-        await api.DecideApprovalAsync(approval.Id, approval.Nonce, ApprovalChoice.Parse(args[2]));
+
+        // Same rules as the PWA card: an unseen, ambiguous or look-alike request can only be denied, and an allow is
+        // sent only after the whole request has been shown, revealed.
+        var plan = ApprovalReview.Plan(approval, args[2], assumeYes);
+        if (plan.Refusal is not null)
+        {
+            throw new InvalidOperationException(plan.Refusal);
+        }
+
+        foreach (var line in plan.Review)
+        {
+            AnsiConsole.Write(new Text(line));
+            AnsiConsole.WriteLine();
+        }
+
+        if (plan.NeedsConfirmation && !AnsiConsole.Confirm("Send this decision?", defaultValue: false))
+        {
+            throw new InvalidOperationException("Not decided: not confirmed.");
+        }
+
+        await api.DecideApprovalAsync(approval.Id, approval.Nonce, plan.Choice);
         AnsiConsole.MarkupLine("Decision sent.");
     }
 }
-
 static async Task ProposalsAsync(CapybaraApiClient api, SubCommand sub)
 {
     switch (sub.Verb)

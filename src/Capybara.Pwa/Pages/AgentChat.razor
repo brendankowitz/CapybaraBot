@@ -70,15 +70,29 @@
             return;
         }
 
+        ClearError();
+
+        // The last history entry before sending: the fallback anchor if the server cannot give the turn a message id.
+        ChatEntryDto? before = null;
+        if (!_incognito)
+        {
+            var history = await TryAsync(() => Api.GetChatHistoryAsync(Id));
+            if (history is null)
+            {
+                return;
+            }
+
+            before = history.Count > 0 ? history[^1] : null;
+        }
+
         var prompt = _prompt;
         _prompt = string.Empty;
         _lines.Add(new ChatLine(DateTimeOffset.Now, "user", prompt));
-        ClearError();
         _busy = true;
         var result = await TryAsync(() => Api.SendTurnAsync(Id, new TurnRequestDto(prompt, _incognito, _conversationId)));
         if (result is { IsAccepted: true })
         {
-            await AwaitReplyAsync(prompt);
+            await AwaitReplyAsync(result.MessageId, before);
         }
         else if (result is not null)
         {
@@ -91,37 +105,28 @@
     // Every status is shown: a turn that did not run (paused, over budget, throttled) must not look like an empty reply.
     private static ChatLine Describe(TurnResultDto result) => new(DateTimeOffset.Now, result.IsCompleted ? "assistant" : "status", result.Summary);
 
-    // The turn was queued through the inbox: the reply lands in the chat history right after our message (matched by content, not by\n    // clock), so poll until an assistant entry follows it.
-    private async Task AwaitReplyAsync(string prompt)
+    // The turn was queued through the inbox: its reply lands in the chat history, correlated by message id (never by prompt text).
+    private async Task AwaitReplyAsync(string? messageId, ChatEntryDto? before)
     {
-        for (var attempt = 0; attempt < MaxPolls && !_disposed.IsCancellationRequested; attempt++)
+        IReadOnlyList<ChatEntryDto>? replies = null;
+        try
         {
-            try
-            {
-                await Task.Delay(PollInterval, _disposed.Token);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-
-            var history = await TryAsync(() => Api.GetChatHistoryAsync(Id));
-            if (history is null)
-            {
-                return;
-            }
-
-            var replies = ChatReplies.To(history, prompt);
-            if (replies.Count > 0)
-            {
-                _lines.AddRange(replies.Select(r => new ChatLine(r.At, "assistant", r.Content)));
-                return;
-            }
+            replies = await TryAsync(() => Api.AwaitReplyAsync(Id, messageId, before, PollInterval, MaxPolls, _disposed.Token));
+        }
+        catch (OperationCanceledException)
+        {
+            return;
         }
 
-        _lines.Add(new ChatLine(DateTimeOffset.Now, "status", "No reply yet. It will appear here when the agent finishes."));
-    }
+        if (replies is null)
+        {
+            return;
+        }
 
+        _lines.AddRange(replies.Count > 0
+            ? replies.Select(r => new ChatLine(r.At, "assistant", r.Content))
+            : [new ChatLine(DateTimeOffset.Now, "status", "No reply yet. It will appear here when the agent finishes.")]);
+    }
     private async Task SetModelAsync()
     {
         ClearError();

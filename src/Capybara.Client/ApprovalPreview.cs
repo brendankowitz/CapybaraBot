@@ -1,4 +1,7 @@
+using System.Buffers;
+using System.Globalization;
 using System.Net;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -7,7 +10,8 @@ namespace Capybara.Client;
 /// <summary>
 /// An email an agent wants to send, reduced to inert text. No markup survives, so nothing can load or link (FR-SAF-07),
 /// but nothing is hidden from the approver either: every link/image target and every piece of content an email client
-/// would not show (script, style, comments) is listed as plain text.
+/// would not show (script, style, comments) is listed as plain text. Display every string through
+/// <see cref="ApprovalPreview.Reveal"/>; recipients through <see cref="ApprovalPreview.RevealNonAscii"/>.
 /// </summary>
 /// <param name="To">Recipient as supplied.</param>
 /// <param name="Cc">Cc as supplied, if any.</param>
@@ -30,20 +34,23 @@ public sealed record EmailPreview(
 /// <summary>
 /// Structured view of an approval card, derived from the full args JSON when the server supplies it
 /// (<see cref="ApprovalDto.ArgsJson"/>), else from the server's text preview <c>"{agent} → {tool} {args json}"</c>.
-/// Everything here is untrusted agent output: pages must bind it as text nodes only.
+/// Everything here is untrusted agent output: show it only as text, and only through <see cref="Reveal"/>, so that
+/// invisible and direction-changing characters appear as visible tokens instead of reordering or hiding what is sent.
 /// </summary>
 /// <remarks>
 /// Parsing never throws: any failure degrades to kind <c>args</c> with only <see cref="Exact"/> shown.
-/// A card whose arguments could not be seen in full or unambiguously cannot be approved (<see cref="CanApprove"/>).
+/// A card whose arguments could not be seen in full, unambiguously and visibly cannot be approved (<see cref="CanApprove"/>).
 /// </remarks>
 /// <param name="Kind"><c>email</c>, <c>diff</c> or <c>args</c>.</param>
 /// <param name="Email">Set when <paramref name="Kind"/> is <c>email</c>.</param>
 /// <param name="Diff">Set when <paramref name="Kind"/> is <c>diff</c>.</param>
 /// <param name="Args">Every argument not shown by the email or diff view, in server order.</param>
-/// <param name="Exact">The exact text the arguments were parsed from, shown verbatim to the approver.</param>
+/// <param name="Exact">The exact text the arguments were parsed from; show it through <see cref="Reveal"/>.</param>
 /// <param name="Truncated">The server cut the preview mid-JSON and no full args were supplied.</param>
 /// <param name="ParseFailed">The arguments were not valid JSON or not an object.</param>
-/// <param name="ConflictingKeys">Argument names that collide case-insensitively (for example <c>to</c> and <c>To</c>).</param>
+/// <param name="ConflictingKeys">Raw argument names that collide after NFKC, case folding and invisible-character removal.</param>
+/// <param name="UnsafeFields">Fields a human cannot judge: invisible/control characters in a recipient, or any argument name that is non-ASCII or contains them.</param>
+/// <param name="Warnings">Non-blocking notices, e.g. invisible characters in the body or a non-ASCII recipient.</param>
 public sealed partial record ApprovalPreview(
     string Kind,
     EmailPreview? Email,
@@ -52,18 +59,131 @@ public sealed partial record ApprovalPreview(
     string Exact,
     bool Truncated,
     bool ParseFailed,
-    IReadOnlyCollection<string> ConflictingKeys)
+    IReadOnlyCollection<string> ConflictingKeys,
+    IReadOnlyList<string> UnsafeFields,
+    IReadOnlyList<string> Warnings)
 {
     private static readonly string[] EmailKeys = ["to", "subject", "body"];
+    private static readonly string[] RecipientKeys = ["to", "cc"];
 
     /// <summary>Why the card can only be denied, or <see langword="null"/> when the arguments were seen in full.</summary>
     public string? BlockReason =>
         Truncated ? "The preview is cut off, so some arguments (such as the recipient) are not shown."
         : ParseFailed ? "The arguments could not be parsed."
-        : ConflictingKeys.Count > 0 ? $"Argument names are ambiguous: {string.Join(", ", ConflictingKeys)}."
+        : ConflictingKeys.Count > 0 ? $"Argument names are ambiguous: {string.Join(", ", ConflictingKeys.Select(Reveal))}."
+        : UnsafeFields.Count > 0 ? $"Invisible or look-alike characters make this unsafe to judge: {string.Join(", ", UnsafeFields)}."
         : null;
 
     public bool CanApprove => BlockReason is null;
+
+    /// <summary>
+    /// Makes untrusted text safe to show: every control character (except newline and tab), format character (bidi
+    /// controls, zero-width, tag characters), line/paragraph separator, non-ASCII space, variation selector, private-use,
+    /// unassigned code point and unpaired surrogate is replaced by a visible token such as <c>⟦U+202E⟧</c>. CRLF becomes
+    /// LF. Nothing is dropped, so the approver sees what is really there.
+    /// </summary>
+    public static string Reveal(string? text) => Scan(text, asciiOnly: false, out _);
+
+    /// <summary>Like <see cref="Reveal"/>, and also tokenizes every non-ASCII character, so look-alike letters in an address show as code points.</summary>
+    public static string RevealNonAscii(string? text) => Scan(text, asciiOnly: true, out _);
+
+    /// <summary>Whether <paramref name="text"/> contains anything <see cref="Reveal"/> would tokenize.</summary>
+    public static bool ContainsInvisible(string? text)
+    {
+        Scan(text, asciiOnly: false, out var found);
+        return found;
+    }
+
+    private static string Scan(string? text, bool asciiOnly, out bool found)
+    {
+        found = false;
+        if (string.IsNullOrEmpty(text))
+        {
+            return string.Empty;
+        }
+
+        var builder = new StringBuilder(text.Length);
+        var i = 0;
+        while (i < text.Length)
+        {
+            if (text[i] == '\r' && i + 1 < text.Length && text[i + 1] == '\n')
+            {
+                builder.Append('\n');
+                i += 2;
+                continue;
+            }
+
+            if (Rune.DecodeFromUtf16(text.AsSpan(i), out var rune, out var consumed) != OperationStatus.Done)
+            {
+                found = true;
+                builder.Append(Token(text[i]));
+                i++;
+                continue;
+            }
+
+            var invisible = IsInvisible(rune);
+            found |= invisible;
+            if (invisible || (asciiOnly && rune.Value > 0x7F))
+            {
+                builder.Append(Token(rune.Value));
+            }
+            else
+            {
+                builder.Append(text, i, consumed);
+            }
+
+            i += consumed;
+        }
+
+        return builder.ToString();
+    }
+
+    private static string Token(int codePoint) => string.Create(CultureInfo.InvariantCulture, $"⟦U+{codePoint:X4}⟧");
+
+    private static bool IsInvisible(Rune rune)
+    {
+        if (rune.Value is '\n' or '\t')
+        {
+            return false;
+        }
+
+        var value = rune.Value;
+        return Rune.GetUnicodeCategory(rune) is UnicodeCategory.Control or UnicodeCategory.Format or UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator
+                or UnicodeCategory.PrivateUse or UnicodeCategory.OtherNotAssigned or UnicodeCategory.Surrogate
+            || (Rune.GetUnicodeCategory(rune) == UnicodeCategory.SpaceSeparator && value != ' ')
+            || value is (>= 0xFE00 and <= 0xFE0F) or (>= 0xE0100 and <= 0xE01EF)   // variation selectors
+                or 0x034F or 0x115F or 0x1160 or 0x3164 or 0xFFA0 or 0x2800;      // blank-rendering fillers
+    }
+
+    /// <summary>Folds an argument name so look-alike spellings collide: invisible characters removed, NFKC, lower case.</summary>
+    private static string FoldKey(string key)
+    {
+        var visible = new StringBuilder(key.Length);
+        foreach (var rune in key.EnumerateRunes())
+        {
+            if (IsInvisible(rune))
+            {
+                continue;
+            }
+
+            // Fullwidth ASCII (U+FF01–FF5E) folded by hand: runtimes with invariant globalization cannot normalize.
+            visible.Append(rune.Value is >= 0xFF01 and <= 0xFF5E ? ((char)(rune.Value - 0xFEE0)).ToString() : rune.ToString());
+        }
+
+        var folded = visible.ToString();
+        try
+        {
+            folded = folded.Normalize(NormalizationForm.FormKC);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException)
+        {
+            // Normalization data is not available on this runtime (invariant globalization): the non-ASCII-name rule still blocks look-alikes.
+        }
+
+        return folded.ToLowerInvariant();
+    }
+
+    private static bool HasNonAscii(string text) => text.Any(c => c > 0x7F);
 
     public static ApprovalPreview Parse(ApprovalDto approval)
     {
@@ -72,13 +192,18 @@ public sealed partial record ApprovalPreview(
         var exact = hasFull ? approval.ArgsJson! : approval.Preview;
         try
         {
-            return ParseCore(approval.Tool, exact, hasFull);
+            var parsed = ParseCore(approval.Tool, exact, hasFull);
+            return ContainsInvisible(approval.Agent) || ContainsInvisible(approval.Tool) || ContainsInvisible(approval.ReviewerRationale) || ContainsInvisible(approval.ReviewerVerdict)
+                ? parsed with { Warnings = [.. parsed.Warnings.Where(w => w != InvisibleWarning), InvisibleWarning] }
+                : parsed;
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or ArgumentException or FormatException or RegexMatchTimeoutException)
         {
-            return new ApprovalPreview("args", null, null, [], exact, Truncated: false, ParseFailed: true, []);
+            return Degraded(exact, truncated: false);
         }
     }
+
+    private const string InvisibleWarning = "Some text contains invisible or control characters; they are shown as ⟦U+…⟧ tokens.";
 
     private static ApprovalPreview ParseCore(string tool, string exact, bool isFullArgs)
     {
@@ -106,32 +231,68 @@ public sealed partial record ApprovalPreview(
         }
 
         var args = new List<KeyValuePair<string, string>>();
-        var byName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var conflicts = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        var byName = new Dictionary<string, string>(StringComparer.Ordinal);
+        var firstRawName = new Dictionary<string, string>(StringComparer.Ordinal);
+        var conflicts = new SortedSet<string>(StringComparer.Ordinal);
+        var unsafeFields = new List<string>();
+        var warnings = new List<string>();
         foreach (var property in root.EnumerateObject())
         {
             var value = property.Value.ValueKind == JsonValueKind.String ? property.Value.GetString() ?? string.Empty : property.Value.GetRawText();
             args.Add(new KeyValuePair<string, string>(property.Name, value));
-            if (!byName.TryAdd(property.Name, value))
+            var folded = FoldKey(property.Name);
+            if (!byName.TryAdd(folded, value))
             {
                 conflicts.Add(property.Name);
+                conflicts.Add(firstRawName[folded]);
+            }
+            else
+            {
+                firstRawName[folded] = property.Name;
+            }
+
+            if (HasNonAscii(property.Name) || ContainsInvisible(property.Name))
+            {
+                unsafeFields.Add($"argument name \"{RevealNonAscii(property.Name)}\"");
+            }
+
+            if (ContainsInvisible(value) && !warnings.Contains(InvisibleWarning))
+            {
+                warnings.Add(InvisibleWarning);
             }
         }
 
         if (tool.Contains("mail", StringComparison.OrdinalIgnoreCase) && EmailKeys.Any(byName.ContainsKey))
         {
-            var rest = args.Where(a => !EmailKeys.Contains(a.Key, StringComparer.OrdinalIgnoreCase) && !a.Key.Equals("cc", StringComparison.OrdinalIgnoreCase)).ToList();
-            return new ApprovalPreview("email", ToEmail(byName), null, rest, exact, Truncated: false, ParseFailed: false, conflicts);
+            foreach (var recipient in RecipientKeys)
+            {
+                if (!byName.TryGetValue(recipient, out var address))
+                {
+                    continue;
+                }
+
+                if (ContainsInvisible(address))
+                {
+                    unsafeFields.Add($"recipient ({recipient})");
+                }
+                else if (HasNonAscii(address))
+                {
+                    warnings.Add($"The {recipient} address contains non-ASCII characters (shown as code points): check it is the address you expect.");
+                }
+            }
+
+            var rest = args.Where(a => !EmailKeys.Contains(FoldKey(a.Key)) && FoldKey(a.Key) != "cc").ToList();
+            return new ApprovalPreview("email", ToEmail(byName), null, rest, exact, Truncated: false, ParseFailed: false, conflicts, unsafeFields, warnings);
         }
 
-        var diff = args.FirstOrDefault(a => a.Key.Equals("diff", StringComparison.OrdinalIgnoreCase) || a.Key.Equals("patch", StringComparison.OrdinalIgnoreCase) || LooksLikeUnifiedDiff(a.Value));
+        var diff = args.FirstOrDefault(a => FoldKey(a.Key) is "diff" or "patch" || LooksLikeUnifiedDiff(a.Value));
         return diff.Key is not null
-            ? new ApprovalPreview("diff", null, diff.Value, [.. args.Where(a => a.Key != diff.Key)], exact, Truncated: false, ParseFailed: false, conflicts)
-            : new ApprovalPreview("args", null, null, args, exact, Truncated: false, ParseFailed: false, conflicts);
+            ? new ApprovalPreview("diff", null, diff.Value, [.. args.Where(a => a.Key != diff.Key)], exact, Truncated: false, ParseFailed: false, conflicts, unsafeFields, warnings)
+            : new ApprovalPreview("args", null, null, args, exact, Truncated: false, ParseFailed: false, conflicts, unsafeFields, warnings);
     }
 
     private static ApprovalPreview Degraded(string exact, bool truncated) =>
-        new("args", null, null, [], exact, truncated, ParseFailed: !truncated, []);
+        new("args", null, null, [], exact, truncated, ParseFailed: !truncated, [], [], ContainsInvisible(exact) ? [InvisibleWarning] : []);
 
     private static bool LooksLikeUnifiedDiff(string value) =>
         value.StartsWith("diff --git", StringComparison.Ordinal) || value.StartsWith("--- ", StringComparison.Ordinal) || value.Contains("\n@@ ", StringComparison.Ordinal);

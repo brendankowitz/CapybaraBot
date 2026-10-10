@@ -45,7 +45,7 @@ Auth column: `any` = any authenticated device; `desktop` = desktop-surface devic
 | POST | `/api/agents/{id}/read` | – | 204 | any | **NEW**; clears the agent's unread count (called when the chat page opens). |
 | POST | `/api/agents/{id}/turn` | `TurnRequestDto{prompt, incognito, conversationId}` | `TurnResultDto` | any | existing; **changed** (see "Turn response"). |
 | PUT | `/api/agents/{id}/model` | `SetModelDto{model}` | 204 | any | **NEW**; `pool.Get(agent).SetModelAsync(model)` |
-| GET | `/api/agents/{id}/history?limit=100` | – | `ChatEntryDto[]` (oldest first) | any | **NEW**; user DMs and replies of the main session; incognito turns are not persisted. |
+| GET | `/api/agents/{id}/history?limit=100` | – | `ChatEntryDto[]` (oldest first) | any | **NEW**; user DMs and replies of the main session; user entries carry `messageId`, assistant entries `inReplyTo` (see "Turn response"); incognito turns are not persisted. |
 | GET | `/api/runtimes` | – | `RuntimeStatusDto[]` | any | existing |
 | POST | `/api/runtimes/{id}/unquarantine` | – | 204 | any | existing |
 
@@ -58,11 +58,23 @@ is the reply when `Completed`; `error` says why it did not run or failed. The pa
 that did not run is never an empty line.
 
 When the turn goes through the inbox (WP10/WP11), it may not be finished when the request returns. The server then answers
-200 with `status: "Accepted"` and the inbox `messageId`. **The reply is delivered through the chat history:** the user entry
-and then the agent's reply appear in `GET /api/agents/{id}/history`, in that order (clients match the reply to the
-message by content and order, not by timestamp, so clock skew does not matter), and the clients poll that route every ~2 s
-for up to ~3 minutes. The server may instead wait for the reply (bounded, e.g. 60 s) and answer `Completed`; both are valid.
-Incognito turns are not persisted, so they **must** be answered synchronously (`Completed`/failure), never `Accepted`.
+200 with `status: "Accepted"` and the inbox **`messageId` (required)**. **The reply is delivered through the chat history,
+correlated by id, never by text:**
+
+- `ChatEntryDto.messageId` on the **user** entry is that inbox message id (the same value the turn response returned).
+- `ChatEntryDto.inReplyTo` on every **assistant** entry that answers it is that id. An agent-initiated message (heartbeat,
+  proactive note, a routine's output) has **no** `inReplyTo`; a reply to another message has that message's id.
+- A reply may have several parts: several assistant entries with the same `inReplyTo`, in order, **appended together** (one
+  history write) so a client that sees the first sees them all.
+- The server may store a normalized/joined prompt as the user entry's content; ids make that irrelevant.
+
+Clients poll `GET /api/agents/{id}/history` every ~2 s for up to ~3 minutes and show exactly the assistant entries whose
+`inReplyTo` equals the `messageId`; nothing else is ever shown as the reply. Only if a server returns **no** `messageId`
+does the client fall back: it snapshots the last history entry **before** sending, ignores everything up to it, takes the
+first user entry after it as its own message (upgrading to id matching if that entry has a `messageId`) and the assistant
+entries right after it as the reply. That fallback cannot tell an agent message interleaved after the user entry from the
+reply, which is why ids are required. The server may instead wait for the reply (bounded, e.g. 60 s) and answer
+`Completed`; both are valid.
 
 ## Lifecycle (FR-AGT-07; all desktop only)
 
@@ -98,10 +110,20 @@ sorts before `cc`/`subject`/`to` and a long body cuts the recipient off the end.
 **`argsJson`: the full, untruncated canonical args JSON** (the same JSON the `argsHash` is computed over).
 
 Client behaviour (so WP11 knows what is guaranteed): when `argsJson` is present the email/diff/args views are built from it
-and the card can be approved. When it is absent and `preview` is cut (or the arguments cannot be parsed, or two argument
-names collide case-insensitively, e.g. `to` and `To`), the card shows why and offers **Deny only**; Allow once/Always are
-disabled. The exact arguments text is always shown in a `<details>`. Email bodies are shown as plain text with every
-link/image target and every script/style/comment content listed as text; nothing is rendered as HTML.
+and the card can be approved. The card shows **Deny only** (Allow once/Always disabled; the TUI refuses `allow`, even with
+`--yes`) when: `preview` is cut and no `argsJson`; the arguments cannot be parsed; two argument names collide after NFKC,
+case folding and removal of invisible characters (e.g. `to` / `To` / `t<ZWSP>o` / fullwidth `ｔｏ`); **any argument name is
+non-ASCII or contains an invisible character** (tool argument names are ASCII identifiers, so a look-alike name is an
+attack); or the **recipient (`to`/`cc`) contains an invisible, bidi or control character**. Non-ASCII letters in a
+recipient are allowed with a warning and shown as code points (`sam@⟦U+0456⟧nternal.com`).
+
+**Every agent-supplied string on a card is revealed, never dropped:** each control character (except newline/tab), format
+character (bidi controls U+202A–202E / U+2066–2069, zero-width, tag characters), line/paragraph separator, non-ASCII space,
+variation selector, private-use/unassigned code point and unpaired surrogate is replaced by a visible token such as
+`⟦U+202E⟧` (`ApprovalPreview.Reveal`). The exact arguments text is always shown in a `<details>` (revealed). Email bodies are
+shown as plain text with every link/image target and every script/style/comment content listed as text; nothing is
+rendered as HTML. The TUI shows the same revealed view and asks for confirmation before it sends an allow (`--yes` skips
+only the question).
 
 ## Questions (`PhoneUserEscalation` deep link `/questions/{id}`)
 

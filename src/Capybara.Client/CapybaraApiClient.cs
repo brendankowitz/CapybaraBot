@@ -39,6 +39,27 @@ public sealed class CapybaraApiClient(HttpClient http)
 
     public Task<IReadOnlyList<ChatEntryDto>> GetChatHistoryAsync(string id, int limit = 100, CancellationToken cancellationToken = default) => GetAsync<IReadOnlyList<ChatEntryDto>>($"/api/agents/{Id(id)}/history?limit={limit}", cancellationToken);
 
+    /// <summary>
+    /// Waits for the reply to a turn the server answered with <c>Accepted</c>, polling the chat history. Correlation is by
+    /// <paramref name="messageId"/> (see <see cref="ChatReplies.To"/>); only when the server gave none does it fall back to
+    /// <paramref name="snapshotLast"/>, the last history entry captured before the turn was sent (<see cref="ChatReplies.AfterSnapshot"/>).
+    /// Returns an empty list if no reply appeared within <paramref name="maxPolls"/> polls.
+    /// </summary>
+    public async Task<IReadOnlyList<ChatEntryDto>> AwaitReplyAsync(string agentId, string? messageId, ChatEntryDto? snapshotLast, TimeSpan pollInterval, int maxPolls, CancellationToken cancellationToken = default)
+    {
+        for (var attempt = 0; attempt < maxPolls; attempt++)
+        {
+            await Task.Delay(pollInterval, cancellationToken);
+            var replies = ChatReplies.Find(await GetChatHistoryAsync(agentId, 100, cancellationToken), messageId, snapshotLast);
+            if (replies.Count > 0)
+            {
+                return replies;
+            }
+        }
+
+        return [];
+    }
+
     public Task<IReadOnlyList<RuntimeStatusDto>> GetRuntimesAsync(CancellationToken cancellationToken = default) => GetAsync<IReadOnlyList<RuntimeStatusDto>>("/api/runtimes", cancellationToken);
 
     public Task UnquarantineRuntimeAsync(string id, CancellationToken cancellationToken = default) => PostAsync($"/api/runtimes/{Id(id)}/unquarantine", null, cancellationToken);

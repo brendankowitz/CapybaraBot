@@ -1,24 +1,30 @@
 @* Rich approval preview (FR-CLI-02, FR-SAF-04, FR-SAF-07). Every value comes from an agent and is bound as a text node:
-   no MarkupString, no <img>, no <a>, so nothing remote can load or unfurl. Nothing is hidden either: link/image targets and
-   non-displayed content are listed as text, and the exact arguments are always one click away. A card whose arguments were not
-   seen in full can only be denied. *@
+   no MarkupString, no <img>, no <a>, so nothing remote can load or unfurl. Every string goes through ApprovalPreview.Reveal so
+   bidi/zero-width/control characters show as ⟦U+XXXX⟧ tokens instead of reordering or hiding what is sent; recipients also show
+   non-ASCII characters as code points. Nothing is hidden: link/image targets and non-displayed content are listed as text, and
+   the exact arguments are always one click away. A card whose arguments were not seen in full, unambiguously and visibly can
+   only be denied. *@
 @{
     var preview = ApprovalPreview.Parse(Approval);
 }
 <article class="card approval @RiskClass">
-    <h2>@Approval.Agent · @Approval.Tool</h2>
+    <h2>@R(Approval.Agent) · @R(Approval.Tool)</h2>
     <p>
-        <span class="badge risk">Risk: @Approval.Risk</span>
+        <span class="badge risk">Risk: @R(Approval.Risk)</span>
         <span class="muted">expires @Approval.ExpiresAt.ToLocalTime().ToString("t")</span>
     </p>
     @if (!string.IsNullOrEmpty(Approval.ReviewerVerdict))
     {
-        <p class="reviewer">Reviewer: <b>@Approval.ReviewerVerdict</b>@(string.IsNullOrEmpty(Approval.ReviewerRationale) ? string.Empty : " - " + Approval.ReviewerRationale)</p>
+        <p class="reviewer">Reviewer: <b>@R(Approval.ReviewerVerdict)</b>@(string.IsNullOrEmpty(Approval.ReviewerRationale) ? string.Empty : " - " + R(Approval.ReviewerRationale))</p>
     }
 
     @if (preview.BlockReason is { } reason)
     {
         <p class="warning block-reason" role="alert">@reason You can only deny this request.</p>
+    }
+    @foreach (var warning in preview.Warnings)
+    {
+        <p class="warning notice">@warning</p>
     }
 
     @switch (preview.Kind)
@@ -26,20 +32,20 @@
         case "email" when preview.Email is { } email:
             <section class="email-preview" aria-label="Email preview">
                 <dl>
-                    <dt>To</dt><dd>@email.To</dd>
-                    @if (!string.IsNullOrEmpty(email.Cc)) { <dt>Cc</dt><dd>@email.Cc</dd> }
-                    <dt>Subject</dt><dd>@email.Subject</dd>
+                    <dt>To</dt><dd class="recipient">@ApprovalPreview.RevealNonAscii(email.To)</dd>
+                    @if (!string.IsNullOrEmpty(email.Cc)) { <dt>Cc</dt><dd class="recipient">@ApprovalPreview.RevealNonAscii(email.Cc)</dd> }
+                    <dt>Subject</dt><dd>@R(email.Subject)</dd>
                 </dl>
-                <pre class="email-body">@email.BodyText</pre>
+                <pre class="email-body">@R(email.BodyText)</pre>
                 @if (email.References.Count > 0)
                 {
                     <p class="muted">Links and images in the email (shown as text, never loaded):</p>
-                    <ul class="email-references">@foreach (var reference in email.References) { <li><code>@reference</code></li> }</ul>
+                    <ul class="email-references">@foreach (var reference in email.References) { <li><code>@ApprovalPreview.RevealNonAscii(reference)</code></li> }</ul>
                 }
                 @if (email.HiddenContent.Count > 0)
                 {
                     <p class="warning hidden-content">Hidden content: this email contains text a mail client would not display.</p>
-                    @foreach (var hidden in email.HiddenContent) { <pre class="hidden-content-text">@hidden</pre> }
+                    @foreach (var hidden in email.HiddenContent) { <pre class="hidden-content-text">@R(hidden)</pre> }
                 }
                 @if (email.RemoteImagesBlocked > 0 || email.LinksStripped > 0)
                 {
@@ -59,8 +65,8 @@
             <tbody>
             @foreach (var arg in preview.Args)
             {
-                var conflicting = preview.ConflictingKeys.Contains(arg.Key, StringComparer.OrdinalIgnoreCase);
-                <tr class="@(conflicting ? "conflict" : string.Empty)"><th scope="row">@arg.Key@(conflicting ? " (conflicting name)" : string.Empty)</th><td><code>@arg.Value</code></td></tr>
+                var conflicting = preview.ConflictingKeys.Contains(arg.Key, StringComparer.Ordinal);
+                <tr class="@(conflicting ? "conflict" : string.Empty)"><th scope="row">@ApprovalPreview.RevealNonAscii(arg.Key)@(conflicting ? " (conflicting name)" : string.Empty)</th><td><code>@R(arg.Value)</code></td></tr>
             }
             </tbody>
         </table>
@@ -68,7 +74,7 @@
 
     <details open="@(!preview.CanApprove || (preview.Args.Count == 0 && preview.Kind == "args"))">
         <summary>Exact arguments as received</summary>
-        <pre class="exact-args">@preview.Exact</pre>
+        <pre class="exact-args">@R(preview.Exact)</pre>
     </details>
 
     <div class="actions">
@@ -88,4 +94,6 @@
     [Parameter] public EventCallback<string> OnDecide { get; set; }
 
     private string RiskClass => Approval.Risk.Equals("High", StringComparison.OrdinalIgnoreCase) ? "risk-high" : string.Empty;
+
+    private static string R(string? text) => ApprovalPreview.Reveal(text);
 }

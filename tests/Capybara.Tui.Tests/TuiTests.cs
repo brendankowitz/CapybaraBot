@@ -138,6 +138,128 @@ public sealed class TuiTests : IDisposable
     }
 
     [Fact]
+    public void Parser_reads_the_yes_flag()
+    {
+        Assert.True(ParsedCommand.Parse(["approvals", "decide", "a1", "allow-once", "--yes"]).Yes);
+        Assert.True(ParsedCommand.Parse(["approvals", "decide", "a1", "allow-once", "-y"]).Yes);
+        Assert.False(ParsedCommand.Parse(["approvals", "decide", "a1", "deny"]).Yes);
+    }
+
+    private static ApprovalDto Approval(string tool, string argsJson, string preview = "ea → x", bool offersAlways = true) =>
+        new("a1", "n", "ea", tool, "hash", preview, "Medium", offersAlways, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, ArgsJson: argsJson);
+
+    private const string GoodEmail = """{"body":"hi","subject":"Hello","to":"sam@example.com"}""";
+
+    [Fact]
+    public void Allow_shows_the_whole_request_and_asks_for_confirmation()
+    {
+        var plan = ApprovalReview.Plan(Approval("email_send", GoodEmail), "allow-once", assumeYes: false);
+
+        Assert.Null(plan.Refusal);
+        Assert.Equal("AllowOnce", plan.Choice);
+        Assert.True(plan.NeedsConfirmation);
+        Assert.Contains("To: sam@example.com", plan.Review);
+        Assert.Contains("Subject: Hello", plan.Review);
+        Assert.Contains(GoodEmail, plan.Review);
+    }
+
+    [Fact]
+    public void Yes_skips_the_confirmation_but_not_the_review_text()
+    {
+        var plan = ApprovalReview.Plan(Approval("email_send", GoodEmail), "allow-once", assumeYes: true);
+
+        Assert.Null(plan.Refusal);
+        Assert.False(plan.NeedsConfirmation);
+        Assert.NotEmpty(plan.Review);
+    }
+
+    [Fact]
+    public void Deny_is_always_possible_without_confirmation()
+    {
+        var plan = ApprovalReview.Plan(Approval("email_send", "{broken"), "deny", assumeYes: false);
+
+        Assert.Null(plan.Refusal);
+        Assert.Equal("Deny", plan.Choice);
+        Assert.False(plan.NeedsConfirmation);
+    }
+
+    [Theory]
+    [InlineData("allow-once")]
+    [InlineData("always")]
+    public void Allow_is_refused_when_the_preview_is_cut_off_even_with_yes(string choice)
+    {
+        var cut = Approval("email_send", argsJson: string.Empty, preview: """ea → email_send {"body":"long…""");
+
+        var plan = ApprovalReview.Plan(cut with { ArgsJson = null }, choice, assumeYes: true);
+
+        Assert.NotNull(plan.Refusal);
+        Assert.Contains("cut off", plan.Refusal, StringComparison.Ordinal);
+        Assert.Contains("deny", plan.Refusal, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Full_args_from_the_server_make_a_cut_preview_allowable_and_show_the_recipient()
+    {
+        var approval = Approval("email_send", """{"body":"hi","subject":"s","to":"attacker@evil.test"}""", preview: """ea → email_send {"body":"hi…""");
+
+        var plan = ApprovalReview.Plan(approval, "allow-once", assumeYes: false);
+
+        Assert.Null(plan.Refusal);
+        Assert.Contains("To: attacker@evil.test", plan.Review);
+    }
+
+    [Theory]
+    [InlineData("""{"body":"b","subject":"s","to":"a@x.y\u202Egro.live"}""")]
+    [InlineData("""{"To":"a@x.y","body":"b","subject":"s","to":"c@x.y"}""")]
+    [InlineData("""{"body":"b","subject":"s","to":"a@x.y","t\u043E":"evil@x.y"}""")]
+    [InlineData("not json")]
+    public void Allow_is_refused_for_look_alike_ambiguous_or_unparseable_arguments(string argsJson)
+    {
+        var plan = ApprovalReview.Plan(Approval("email_send", argsJson), "allow-once", assumeYes: true);
+
+        Assert.NotNull(plan.Refusal);
+        Assert.DoesNotContain('\u202E', plan.Refusal);
+        Assert.All(plan.Review, line => Assert.False(ApprovalPreview.ContainsInvisible(line), line));
+    }
+
+    [Fact]
+    public void Always_is_refused_when_the_server_does_not_offer_it()
+    {
+        var plan = ApprovalReview.Plan(Approval("email_send", GoodEmail, offersAlways: false), "always", assumeYes: false);
+
+        Assert.NotNull(plan.Refusal);
+        Assert.Contains("high-risk", plan.Refusal, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Review_text_reveals_invisible_characters_instead_of_dropping_them()
+    {
+        var plan = ApprovalReview.Plan(Approval("calendar_create", "{\"title\":\"pay\\u202Eenoyna\\u200B\"}"), "allow-once", assumeYes: false);
+
+        Assert.Null(plan.Refusal);
+        Assert.Contains(plan.Review, line => line.Contains("⟦U+202E⟧", StringComparison.Ordinal) && line.Contains("⟦U+200B⟧", StringComparison.Ordinal));
+        Assert.Contains(plan.Review, line => line.Contains("invisible or control characters", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void The_approvals_table_reveals_invisible_characters_and_flags_deny_only_cards()
+    {
+        var hostile = Approval("email_send", """{"body":"b","subject":"s","to":"a@x.y\u202Egro.live"}""", preview: "ea → email_send {\"to\":\"a@x.y\u202Egro.live\"}");
+        var fine = Approval("calendar_create", """{"title":"Sync"}""") with { Id = "a2" };
+
+        using var writer = new StringWriter();
+        var console = Spectre.Console.AnsiConsole.Create(new Spectre.Console.AnsiConsoleSettings { Out = new Spectre.Console.AnsiConsoleOutput(writer), Ansi = Spectre.Console.AnsiSupport.No, ColorSystem = Spectre.Console.ColorSystemSupport.NoColors });
+        console.Profile.Width = 2_000;
+        console.Write(Capybara.Tui.Rendering.Tables.Approvals([hostile, fine]));
+        var output = writer.ToString();
+
+        Assert.Contains("⟦U+202E⟧", output, StringComparison.Ordinal);
+        Assert.DoesNotContain('\u202E', output);
+        Assert.Contains("deny only", output, StringComparison.Ordinal);
+        Assert.Contains("yes", output, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Token_file_refuses_world_readable_permissions()
     {
         Assert.SkipUnless(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS(), "Unix file modes are not available on this platform; runs on the Linux target host (FR-CLI-05).");

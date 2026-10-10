@@ -3,7 +3,8 @@ namespace Capybara.Tui.Commands;
 /// <summary>
 /// Command line after global options. <see cref="AcknowledgedCredits"/> (<c>--ack N</c>) is the non-interactive cost
 /// acknowledgement for <c>routines enable</c> (FR-RTN-09); <see cref="OutputPath"/> (<c>--out FILE</c>) is the
-/// destination for <c>memory export</c>.
+/// destination for <c>memory export</c>; <see cref="Yes"/> (<c>--yes</c>) skips the confirmation before an approval is
+/// allowed (it never overrides a refusal).
 /// </summary>
 public sealed record ParsedCommand(
     string Name,
@@ -12,7 +13,8 @@ public sealed record ParsedCommand(
     bool Live,
     bool ReleaseKillSwitch,
     decimal? AcknowledgedCredits = null,
-    string? OutputPath = null)
+    string? OutputPath = null,
+    bool Yes = false)
 {
     public static ParsedCommand Parse(IReadOnlyList<string> args)
     {
@@ -20,6 +22,7 @@ public sealed record ParsedCommand(
         var baseUrl = new Uri(Environment.GetEnvironmentVariable("CAPYBARA_URL") ?? "http://127.0.0.1:8787");
         var live = false;
         var release = false;
+        var yes = false;
         decimal? acknowledged = null;
         string? output = null;
         var remaining = new List<string>();
@@ -49,6 +52,10 @@ public sealed record ParsedCommand(
             {
                 release = true;
             }
+            else if (arg is "--yes" or "-y")
+            {
+                yes = true;
+            }
             else
             {
                 remaining.Add(arg);
@@ -56,7 +63,7 @@ public sealed record ParsedCommand(
         }
 
         var name = remaining.Count == 0 ? "dashboard" : remaining[0];
-        return new ParsedCommand(name, remaining.Skip(1).ToList(), baseUrl, live, release, acknowledged, output);
+        return new ParsedCommand(name, remaining.Skip(1).ToList(), baseUrl, live, release, acknowledged, output, yes);
     }
 
     private static string ValueOf(IReadOnlyList<string> args, ref int index, string option) =>

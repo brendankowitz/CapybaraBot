@@ -59,16 +59,64 @@ public sealed class AgentChatTests : PwaTestContext
     }
 
     [Fact]
-    public void A_queued_turn_waits_for_the_reply_to_appear_in_the_history()
+    public void A_queued_turn_shows_only_the_reply_correlated_to_its_message_id()
     {
         var cut = RenderChat();
-        Gateway.Respond("POST", "/api/agents/ea/turn", """{"status":"Accepted","messageId":"m1"}""");
+        Gateway.Respond("POST", "/api/agents/ea/turn", """{"status":"Accepted","messageId":"m2"}""");
         var now = DateTimeOffset.UtcNow;
-        ServeJson(History, new[] { new ChatEntryDto(now, "user", "do it"), new ChatEntryDto(now, "assistant", "queued reply") });
+
+        // Same prompt twice, an agent-initiated message in between, and a two-part reply to the second one.
+        ServeJson(History, new[]
+        {
+            new ChatEntryDto(now, "user", "do it", MessageId: "m1"),
+            new ChatEntryDto(now, "assistant", "reply to the FIRST", InReplyTo: "m1"),
+            new ChatEntryDto(now, "user", "do it", MessageId: "m2"),
+            new ChatEntryDto(now, "assistant", "unprompted noise"),
+            new ChatEntryDto(now, "assistant", "part one", InReplyTo: "m2"),
+            new ChatEntryDto(now, "assistant", "part two", InReplyTo: "m2"),
+        });
 
         Send(cut, "do it");
 
-        cut.WaitForAssertion(() => Assert.Contains("queued reply", cut.FindAll(".chat-line.assistant pre").Select(p => p.TextContent)));
+        cut.WaitForAssertion(() => Assert.Contains("part two", cut.FindAll(".chat-line.assistant pre").Select(p => p.TextContent)));
+        var replies = cut.FindAll(".chat-line.assistant pre").Select(p => p.TextContent).ToList();
+        Assert.Equal(["part one", "part two"], replies);
+    }
+
+    [Fact]
+    public void Without_a_message_id_the_reply_is_found_after_the_snapshot_taken_before_sending()
+    {
+        var old = new ChatEntryDto(DateTimeOffset.UnixEpoch, "assistant", "old reply");
+        var oldUser = new ChatEntryDto(DateTimeOffset.UnixEpoch, "user", "do it");
+        var asJson = (ChatEntryDto[] entries) => System.Text.Json.JsonSerializer.Serialize(entries, Web);
+        ServeJson(History, new[] { oldUser, old });
+        Gateway.Respond("POST", "/api/agents/ea/read", string.Empty, HttpStatusCode.NoContent);
+        Gateway.Respond("POST", "/api/agents/ea/turn", """{"status":"Accepted"}""");
+        var cut = Render<AgentChat>(p => p.Add(x => x.Id, "ea").Add(x => x.PollInterval, TimeSpan.FromMilliseconds(10)).Add(x => x.MaxPolls, 50));
+        cut.WaitForAssertion(() => Assert.Contains(Gateway.Requests, r => r.Path == "/api/agents/ea/read"));
+
+        // History reads from here: the pre-send snapshot, a poll with no reply yet, then the reply (identical prompt as before).
+        var fresh = new ChatEntryDto(DateTimeOffset.UnixEpoch, "user", "do it (joined)");
+        Gateway.RespondSequence("GET", History, asJson([oldUser, old]), asJson([oldUser, old, fresh]), asJson([oldUser, old, fresh, new ChatEntryDto(DateTimeOffset.UnixEpoch, "assistant", "new reply")]));
+
+        Send(cut, "do it");
+
+        cut.WaitForAssertion(() => Assert.Contains("new reply", cut.FindAll(".chat-line.assistant pre").Select(p => p.TextContent)));
+        // "old reply" is only the line loaded with the history; the new turn added exactly one reply.
+        Assert.Equal(["old reply", "new reply"], cut.FindAll(".chat-line.assistant pre").Select(p => p.TextContent));
+    }
+
+    [Fact]
+    public void A_queued_turn_with_no_reply_says_so_instead_of_inventing_one()
+    {
+        var cut = RenderChat();
+        Gateway.Respond("POST", "/api/agents/ea/turn", """{"status":"Accepted","messageId":"m1"}""");
+        ServeJson(History, new[] { new ChatEntryDto(DateTimeOffset.UtcNow, "assistant", "unprompted") });
+
+        Send(cut, "do it");
+
+        cut.WaitForAssertion(() => Assert.Contains("No reply yet", cut.Find(".chat-line.status pre").TextContent, StringComparison.Ordinal), TimeSpan.FromSeconds(10));
+        Assert.DoesNotContain("unprompted", cut.FindAll(".chat-line.assistant pre").Select(p => p.TextContent));
     }
 
     [Fact]

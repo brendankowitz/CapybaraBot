@@ -18,14 +18,19 @@ public static class Tables
 
     public static Table Approvals(IEnumerable<ApprovalDto> approvals)
     {
-        var table = new Table().AddColumn("Id").AddColumn("Agent").AddColumn("Tool").AddColumn("Risk").AddColumn("Preview");
+        // Approval content is shown revealed, never cleaned: invisible and bidi characters appear as ⟦U+XXXX⟧ so the approver sees what would be sent.
+        var table = new Table().AddColumn("Id").AddColumn("Agent").AddColumn("Tool").AddColumn("Risk").AddColumn("Allow?").AddColumn("Preview");
         foreach (var approval in approvals)
         {
-            table.AddRow(Safe(approval.Id), Safe(approval.Agent), Safe(approval.Tool), Safe(approval.Risk), Safe(approval.Preview));
+            var preview = ApprovalPreview.Parse(approval);
+            table.AddRow(Revealed(approval.Id), Revealed(approval.Agent), Revealed(approval.Tool), Revealed(approval.Risk), preview.CanApprove ? "yes" : "deny only", Revealed(approval.Preview));
         }
 
         return table;
     }
+
+    /// <summary>Approval text for markup: <see cref="ApprovalPreview.Reveal"/> then escaped. Unlike <see cref="Safe"/> it drops nothing.</summary>
+    public static string Revealed(string? text) => Markup.Escape(ApprovalPreview.Reveal(text));
 
     public static Table Proposals(IEnumerable<ProposalDto> proposals)
     {

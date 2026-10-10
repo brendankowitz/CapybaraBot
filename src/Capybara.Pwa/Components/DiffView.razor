@@ -1,10 +1,11 @@
-@* Plain-text diff: every line is a text node, never markup or markdown (FR-SAF-07, FR-AGT-06). *@
+@* Plain-text diff: every line is a text node, never markup or markdown (FR-SAF-07, FR-AGT-06); invisible and bidi characters
+   show as ⟦U+XXXX⟧ tokens so a diff cannot display something other than what it contains. *@
 <pre class="diff">@foreach (var line in Lines) {<span class="@LineClass(line)">@(line + "\n")</span>}</pre>
 
 @code {
     [Parameter] public string? Text { get; set; }
 
-    private IEnumerable<string> Lines => (Text ?? string.Empty).ReplaceLineEndings("\n").Split('\n');
+    private IEnumerable<string> Lines => ApprovalPreview.Reveal(Text).Split('\n');
 
     private static string LineClass(string line) => line switch
     {
