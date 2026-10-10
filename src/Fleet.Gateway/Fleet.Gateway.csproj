@@ -2,7 +2,7 @@
   <PropertyGroup>
     <Description>fleetd: loopback-only gateway (minimal API) published to the tailnet via Tailscale Serve.</Description>
     <AssemblyName>fleetd</AssemblyName>
-    <UserSecretsId>charcuteriebot-fleetd</UserSecretsId>
+    <RootNamespace>Fleet.Gateway</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Fleet.Contracts\Fleet.Contracts.csproj" />
@@ -11,5 +11,6 @@
     <ProjectReference Include="..\Fleet.Memory\Fleet.Memory.csproj" />
     <ProjectReference Include="..\Fleet.Observability\Fleet.Observability.csproj" />
     <ProjectReference Include="..\Fleet.Scheduling\Fleet.Scheduling.csproj" />
+    <ProjectReference Include="..\Fleet.Runtime.Copilot\Fleet.Runtime.Copilot.csproj" />
   </ItemGroup>
 </Project>

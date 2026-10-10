@@ -144,6 +144,17 @@ public sealed class WikiStore
         ArgumentNullException.ThrowIfNull(context);
         ArgumentException.ThrowIfNullOrWhiteSpace(fact);
         var path = Parse(rawPath);
+        var proposesUserChange = MemoryAccessPolicy.CanProposeUserChange(context, path);
+        if (!proposesUserChange)
+        {
+            // Authorize before reading the page, so dedupe results never leak another scope's content.
+            EnsureWritable(context, path);
+        }
+        else if (!context.CanReadUser)
+        {
+            throw new MemoryAccessDeniedException($"{context.Agent} may not propose changes to {path}.");
+        }
+
         EnsureNoSensitiveData(fact);
 
         var file = ResolveFile(path);
@@ -167,7 +178,7 @@ public sealed class WikiStore
         var content = FrontmatterSerializer.Write(metadata, body);
         EnsureSize(content);
 
-        if (MemoryAccessPolicy.CanProposeUserChange(context, path))
+        if (proposesUserChange)
         {
             var before = File.Exists(file) ? await File.ReadAllTextAsync(file, cancellationToken) : null;
             var change = new PendingUserChange(Guid.NewGuid().ToString("N"), path.Value, context.Agent, before, content, now);
@@ -175,7 +186,6 @@ public sealed class WikiStore
             return MemoryOperation.Proposed;
         }
 
-        EnsureWritable(context, path);
         await WriteFileAsync(file, content, cancellationToken);
         await _versioning.CommitAsync($"{(existing is null ? "add" : "update")} {path} by {context.Agent}", cancellationToken);
         return existing is null ? MemoryOperation.Add : MemoryOperation.Update;

@@ -32,6 +32,9 @@ public sealed class CopilotRuntimeOptions
     /// <summary>Tools whose results are untrusted; using one taints the session (FR-SAF-03).</summary>
     public IList<string> UntrustedInputTools { get; } = ["web_fetch", "web_search", "email_read", "calendar_read"];
 
+    /// <summary>Start runtimes and the supervisor with the host. Disabled in tests and for config validation.</summary>
+    public bool AutoStart { get; set; } = true;
+
     /// <summary>Upper bound for one consult turn.</summary>
     public TimeSpan ConsultTimeout { get; set; } = TimeSpan.FromMinutes(5);
 

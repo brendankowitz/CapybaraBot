@@ -52,8 +52,12 @@ public static class CopilotRuntimeServiceCollectionExtensions
             sp.GetRequiredService<TimeProvider>(),
             sp.GetRequiredService<ILogger<RuntimeSupervisor>>()));
 
-        services.AddHostedService<AgentRuntimeHostedService>();
-        services.AddHostedService<RuntimeSupervisorService>();
+        if (runtimeOptions.AutoStart)
+        {
+            services.AddHostedService<AgentRuntimeHostedService>();
+            services.AddHostedService<RuntimeSupervisorService>();
+        }
+
         return services;
     }
 

@@ -1,0 +1,46 @@
+# Coding agent. Reads issues (untrusted), works in private repos, and can push, so pushes and PRs need approval.
+id: code
+name: Code
+job: Fix bugs and implement small changes in the user's repositories on agent/* branches.
+description: Only push to branches named agent/*. Never push to main or force-push.
+model: auto
+tools:
+  - list_agents
+  - ask_agent
+  - send_message
+  - memory_list
+  - memory_read
+  - memory_search
+  - remember
+  - propose_change
+  - shell
+  - read_file
+  - edit_file
+  - git_push
+  - github_create_pr
+externalActionTools: [git_push, github_create_pr]
+approvalRequiredTools: [git_push, github_create_pr]
+trifecta:
+  untrustedInput: true
+  privateData: true
+  externalAction: true
+peers:
+  consult: [research]
+  message: [ea]
+  task: [research]
+accepts:
+  consults: true
+  messages: true
+  tasks: true
+grants:
+  - connection: github
+    operations: [read, push, pull_request]
+    constraints:
+      branch: ["agent/*"]
+egress: [github.com, api.github.com]
+budget:
+  dailyCredits: 80
+  monthlyCredits: 2000
+  sessionMaxCredits: 15
+memory:
+  readUser: false

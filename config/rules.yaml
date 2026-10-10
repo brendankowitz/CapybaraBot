@@ -1,0 +1,28 @@
+# Deterministic rules (FR-SAF-01). Precedence: deny > ask > allowUnlessTainted > allow.
+- effect: deny
+  agent: code
+  tool: git_push
+  argument: branch
+  pattern: main
+  reason: Never push to main.
+- effect: deny
+  agent: code
+  tool: git_push
+  argument: force
+  pattern: "true"
+  reason: Never force-push.
+- effect: allow
+  tool: memory_*
+  reason: Memory reads are scoped by the store itself.
+- effect: allow
+  tool: list_agents
+- effect: allowUnlessTainted
+  agent: ea
+  tool: ask_agent
+  argument: agent
+  destinationAllowlist: [research, code]
+  reason: A tainted EA session may not reach other agents without approval.
+- effect: allow
+  agent: research
+  tool: web_*
+  reason: Research has no private data, so open browsing is safe.

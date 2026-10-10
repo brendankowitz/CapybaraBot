@@ -1,0 +1,22 @@
+# Routines (FR-RTN-01). Minimum interval 5 minutes; at most 50 per agent.
+- id: ea-heartbeat
+  owner: ea
+  kind: heartbeat
+  every: 2h
+  activeHours: 07:00-21:00
+  prompt: Check the inbox and calendar. If nothing needs the user, reply HEARTBEAT_OK.
+  deliver: push
+  budgetCredits: 1
+- id: morning-brief
+  owner: ea
+  kind: cron
+  every: 1d
+  activeHours: 06:30-07:30
+  skill: morning-brief
+  prompt: Prepare today's brief.
+  input: calendar, inbox
+  output: brief
+  deliver: push
+  approvalBoundary: [email_send]
+  onMissingInput: skipAndAlert
+  budgetCredits: 3

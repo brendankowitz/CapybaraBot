@@ -1,0 +1,56 @@
+# fleetd: hardened systemd unit (FR-HST-02).
+# MemoryDenyWriteExecute is intentionally NOT set: the .NET JIT and the Copilot CLI's Node runtime need W^X pages.
+[Unit]
+Description=CharcuterieBot agent fleet gateway (fleetd)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=fleet
+Group=fleet
+ExecStart=/opt/fleet/fleetd
+WorkingDirectory=/opt/fleet
+Environment=DOTNET_ENVIRONMENT=Production
+Environment=Fleet__ConfigRoot=/etc/fleet
+Environment=Fleet__StateRoot=/var/lib/fleet
+Restart=on-failure
+RestartSec=5s
+
+# The Copilot PAT is an encrypted credential, never an env var or config file (FR-HST-03).
+LoadCredentialEncrypted=github-token:/etc/fleet/credentials/github-token.cred
+
+StateDirectory=fleet
+StateDirectoryMode=0700
+ConfigurationDirectory=fleet
+ReadOnlyPaths=/etc/fleet
+ReadWritePaths=/var/lib/fleet
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,6 @@
+<Project>
+  <!-- Policy fakes, for test projects that set UsePolicyTestKit (evaluated after the project file). -->
+  <ItemGroup Condition="'$(UsePolicyTestKit)' == 'true'">
+    <Compile Include="$(MSBuildThisFileDirectory)Shared/Policy/**/*.cs" LinkBase="Shared" />
+  </ItemGroup>
+</Project>
