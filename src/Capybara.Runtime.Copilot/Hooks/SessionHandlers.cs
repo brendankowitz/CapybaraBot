@@ -133,7 +133,7 @@ public sealed partial class SessionHandlers(
                     turn.RecordPendingApproval(approval.Id);
 
                     // The resume after the decision continues this turn's chain, not a fresh root (FR-A2A-05/07).
-                    approvalTurns?.Save(approval.Id, new ApprovalTurnContext(session.Envelope, session.TurnOrigin, session.TurnFrom));
+                    approvalTurns?.Save(approval.Id, new ApprovalTurnContext(session.Envelope, session.TurnOrigin, session.TurnFrom, session.RoutineId, session.ApprovalBoundary));
                 }
 
                 return Deny($"waiting for user approval ({verdict.Approval?.Id}); do not retry until the user has decided");

@@ -17,10 +17,11 @@ internal sealed class FakeAgentRuntime(AgentId agent) : IAgentRuntime
 
     public AgentDefinition Definition { get; private set; } = Testing.TestAgents.Create(agent.Value);
 
-    public Task UpdateDefinitionAsync(AgentDefinition definition, CancellationToken cancellationToken)
+    public Task<DefinitionChange> UpdateDefinitionAsync(AgentDefinition definition, CancellationToken cancellationToken)
     {
+        var change = DefinitionChanges.Classify(Definition, definition);
         Definition = definition;
-        return Task.CompletedTask;
+        return Task.FromResult(change);
     }
 
     /// <summary>The turn body; completes with "done" by default.</summary>

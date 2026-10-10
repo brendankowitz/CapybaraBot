@@ -21,13 +21,14 @@ public interface IAgentRuntime : IAsyncDisposable
     AgentDefinition Definition { get; }
 
     /// <summary>
-    /// Makes an edited definition of this agent take effect without a capybarad restart (FR-AGT-06): once the main-session
-    /// turn in flight (if any) has finished, later sessions are built from <paramref name="definition"/> and the main
-    /// session is dropped, so its next turn resumes it with the new configuration re-registered. Sessions already
-    /// running a turn finish it on the old definition. The CLI process itself is not restarted here; see
-    /// <see cref="DefinitionChange.Process"/>.
+    /// Makes an edited definition of this agent take effect without a capybarad restart (FR-AGT-06), once the main-session
+    /// turn in flight (if any) has finished: later sessions are built from <paramref name="definition"/> and the main
+    /// session is dropped, so its next turn resumes it with the new configuration re-registered. For a
+    /// <see cref="DefinitionChange.Process"/> change to a running agent, the CLI is replaced first: new session turns wait,
+    /// running ones get <c>DefinitionSwapDrainTimeout</c> and are then aborted (reported as interrupted), and the new CLI
+    /// is not started while the kill switch is engaged. Returns what changed; the caller re-runs the tool self-test.
     /// </summary>
-    Task UpdateDefinitionAsync(AgentDefinition definition, CancellationToken cancellationToken);
+    Task<DefinitionChange> UpdateDefinitionAsync(AgentDefinition definition, CancellationToken cancellationToken);
 
     /// <summary>
     /// Runs one turn and waits until it is persisted. Failures of the turn itself are returned as

@@ -116,32 +116,33 @@ public sealed class SelfTestAndRecoveryTests : IDisposable
     }
 
     [Fact]
-    public async Task An_edited_definition_restarts_the_cli_only_when_asked_and_always_re_runs_the_self_test()
+    public async Task An_edited_definition_is_self_tested_without_the_supervisor_restarting_anything()
     {
         var runtime = new ScriptedRuntime { SelfTest = new SelfTestResult(false, [], ["bash"]) };
         using var supervisor = new RuntimeSupervisor([runtime], _alerts, new SupervisorOptions(), _time, NullLogger<RuntimeSupervisor>.Instance, Guard(), new RecordingReconciler(runtime));
 
-        await supervisor.ApplyDefinitionChangeAsync(runtime, restartProcess: false, Ct);
+        await supervisor.VerifyDefinitionChangeAsync(runtime, Ct);
+
         Assert.Equal(0, runtime.Restarts);
         Assert.Equal(["selftest"], runtime.Calls);
         Assert.True(_killSwitch.IsBlocked(runtime.Agent));
-
-        await supervisor.ApplyDefinitionChangeAsync(runtime, restartProcess: true, Ct);
-        Assert.Equal(1, runtime.Restarts);
-        Assert.Equal(["selftest", "selftest"], runtime.Calls);
     }
 
     [Fact]
-    public async Task An_edited_definition_is_not_restarted_into_a_suspended_fleet()
+    public async Task An_edited_definition_is_not_self_tested_while_suspended_or_while_its_cli_is_down()
     {
-        var runtime = new ScriptedRuntime();
-        using var supervisor = new RuntimeSupervisor([runtime], _alerts, new SupervisorOptions(), _time, NullLogger<RuntimeSupervisor>.Instance, Guard(), new RecordingReconciler(runtime));
+        var down = new ScriptedRuntime { Healthy = false };
+        using var supervisor = new RuntimeSupervisor([down], _alerts, new SupervisorOptions(), _time, NullLogger<RuntimeSupervisor>.Instance, Guard(), new RecordingReconciler(down));
+
+        // Down (the kill switch left it stopped, or its start failed): a self-test would only pause it for nothing.
+        await supervisor.VerifyDefinitionChangeAsync(down, Ct);
+        Assert.Empty(down.Calls);
+        Assert.False(_killSwitch.IsBlocked(down.Agent));
+
+        var up = new ScriptedRuntime();
         supervisor.MarkSuspended();
-
-        await supervisor.ApplyDefinitionChangeAsync(runtime, restartProcess: true, Ct);
-
-        Assert.Equal(0, runtime.Restarts);
-        Assert.Empty(runtime.Calls);
+        await supervisor.VerifyDefinitionChangeAsync(up, Ct);
+        Assert.Empty(up.Calls);
     }
 
     [Fact]

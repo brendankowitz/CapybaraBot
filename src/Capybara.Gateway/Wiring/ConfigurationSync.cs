@@ -28,9 +28,10 @@ namespace Capybara.Gateway.Wiring;
 /// </para>
 /// <para>
 /// An edited definition reaches its runtime once that agent's main-session turn in flight finishes: the main session is
-/// rebuilt from it, and when the change is fixed at process start (<see cref="DefinitionChange.Process"/>) the
-/// supervisor restarts the CLI; either way the tool self-test runs again (FR-AGT-09). An agent added to the config gets a
-/// runtime only at the next capybarad start; a removed one is stopped by the lifecycle observers.
+/// rebuilt from it, and when the change is fixed at process start (<see cref="DefinitionChange.Process"/>) the runtime
+/// replaces its CLI under its own locks (see <see cref="IAgentRuntime.UpdateDefinitionAsync"/>); either way the
+/// supervisor then re-runs the tool self-test (FR-AGT-09). An agent added to the config gets a runtime only at the next
+/// capybarad start; a removed one is stopped by the lifecycle observers.
 /// </para>
 /// </remarks>
 public sealed partial class ConfigurationSync(
@@ -125,19 +126,24 @@ public sealed partial class ConfigurationSync(
 
         try
         {
-            var change = DefinitionChanges.Classify(runtime.Definition, next);
+            // Cheap pre-check, so an unchanged agent never waits for its turn in flight; the runtime re-checks under its locks.
+            if (DefinitionChanges.Classify(runtime.Definition, next) == DefinitionChange.None)
+            {
+                return;
+            }
+
+            var change = await runtime.UpdateDefinitionAsync(next, cancellationToken);
             if (change == DefinitionChange.None)
             {
                 return;
             }
 
-            await runtime.UpdateDefinitionAsync(next, cancellationToken);
             LogDefinitionApplied(logger, next.Id.Value, change);
 
-            // Only where this host runs CLIs at all: a host that never started them must not start one now.
+            // Only where this host runs CLIs at all: a host that never started them must not self-test one now.
             if (runtimeOptions.AutoStart && runtime is ISupervisedRuntime supervised)
             {
-                await supervisor.ApplyDefinitionChangeAsync(supervised, restartProcess: change == DefinitionChange.Process, cancellationToken);
+                await supervisor.VerifyDefinitionChangeAsync(supervised, cancellationToken);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)

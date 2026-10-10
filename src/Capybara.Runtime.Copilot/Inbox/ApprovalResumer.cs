@@ -90,6 +90,8 @@ public sealed partial class ApprovalResumer : IHostedService, IDisposable
             CreatedAt = _time.GetUtcNow(),
             SessionId = session,
             TaskId = SessionIds.TryParseTask(session, out _, out var key) && FileTaskStore.IsTaskId(key) ? key : null,
+            RoutineId = turn?.RoutineId,
+            ApprovalBoundary = turn?.ApprovalBoundary ?? [],
         };
 
         try

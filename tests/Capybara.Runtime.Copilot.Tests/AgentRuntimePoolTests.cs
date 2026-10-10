@@ -37,7 +37,7 @@ public sealed class AgentRuntimePoolTests
 
         public Contracts.Agents.AgentDefinition Definition => _inner.Definition;
 
-        public Task UpdateDefinitionAsync(Contracts.Agents.AgentDefinition definition, CancellationToken cancellationToken) => _inner.UpdateDefinitionAsync(definition, cancellationToken);
+        public Task<DefinitionChange> UpdateDefinitionAsync(Contracts.Agents.AgentDefinition definition, CancellationToken cancellationToken) => _inner.UpdateDefinitionAsync(definition, cancellationToken);
 
         public Task<TurnResult> RunTurnAsync(AgentTurnRequest request, CancellationToken cancellationToken) => _inner.RunTurnAsync(request, cancellationToken);
 

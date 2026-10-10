@@ -1,5 +1,6 @@
 using System.Globalization;
 using Capybara.Scheduling.Durable;
+using Microsoft.Data.Sqlite;
 
 namespace Capybara.Scheduling.Lifecycle;
 
@@ -44,26 +45,40 @@ internal sealed class RoutineOverrideStore
 
     public void Save(string routineId, RoutineOverride value)
     {
-        using var connection = SchedulingDatabase.Open(_path);
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            INSERT INTO capybara_routine_overrides (routine_id, enabled, acknowledged_credits, spec_enabled)
-            VALUES ($id, $enabled, $ack, $spec)
-            ON CONFLICT(routine_id) DO UPDATE SET enabled = excluded.enabled, acknowledged_credits = excluded.acknowledged_credits, spec_enabled = excluded.spec_enabled
-            """;
-        command.Parameters.AddWithValue("$id", routineId);
-        command.Parameters.AddWithValue("$enabled", value.Enabled ? 1 : 0);
-        command.Parameters.AddWithValue("$ack", value.AcknowledgedMonthlyCredits is { } ack ? ack.ToString(CultureInfo.InvariantCulture) : DBNull.Value);
-        command.Parameters.AddWithValue("$spec", value.SpecEnabled ? 1 : 0);
-        command.ExecuteNonQuery();
+        try
+        {
+            using var connection = SchedulingDatabase.Open(_path);
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                INSERT INTO capybara_routine_overrides (routine_id, enabled, acknowledged_credits, spec_enabled)
+                VALUES ($id, $enabled, $ack, $spec)
+                ON CONFLICT(routine_id) DO UPDATE SET enabled = excluded.enabled, acknowledged_credits = excluded.acknowledged_credits, spec_enabled = excluded.spec_enabled
+                """;
+            command.Parameters.AddWithValue("$id", routineId);
+            command.Parameters.AddWithValue("$enabled", value.Enabled ? 1 : 0);
+            command.Parameters.AddWithValue("$ack", value.AcknowledgedMonthlyCredits is { } ack ? ack.ToString(CultureInfo.InvariantCulture) : DBNull.Value);
+            command.Parameters.AddWithValue("$spec", value.SpecEnabled ? 1 : 0);
+            command.ExecuteNonQuery();
+        }
+        catch (SqliteException ex)
+        {
+            throw new RoutineOverridePersistenceException($"The decision for routine '{routineId}' could not be saved.", ex);
+        }
     }
 
     public void Delete(string routineId)
     {
-        using var connection = SchedulingDatabase.Open(_path);
-        using var command = connection.CreateCommand();
-        command.CommandText = "DELETE FROM capybara_routine_overrides WHERE routine_id = $id";
-        command.Parameters.AddWithValue("$id", routineId);
-        command.ExecuteNonQuery();
+        try
+        {
+            using var connection = SchedulingDatabase.Open(_path);
+            using var command = connection.CreateCommand();
+            command.CommandText = "DELETE FROM capybara_routine_overrides WHERE routine_id = $id";
+            command.Parameters.AddWithValue("$id", routineId);
+            command.ExecuteNonQuery();
+        }
+        catch (SqliteException ex)
+        {
+            throw new RoutineOverridePersistenceException($"The decision for routine '{routineId}' could not be removed.", ex);
+        }
     }
 }

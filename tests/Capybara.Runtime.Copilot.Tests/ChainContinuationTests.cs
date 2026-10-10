@@ -88,6 +88,71 @@ public sealed class ChainContinuationTests
     }
 
     [Fact]
+    public async Task A_heartbeats_resumed_main_session_turn_keeps_its_routine_and_approval_boundary()
+    {
+        var heartbeatAgent = TestAgents.Create("ea", a => a with { Tools = ["email_read", "email_draft"] }).WithPeers("research");
+        using var f = new RuntimeFixture([new Policy.Rules.PolicyRule { Effect = Policy.Rules.RuleEffect.Allow, Tool = "email_*" }], fleet: [heartbeatAgent, Research]);
+        using var resumer = new ApprovalResumer(f.Approvals, f.ApprovalTurns, f.Inbox, f.Alerts, f.Time, NullLogger<ApprovalResumer>.Instance);
+        await resumer.StartAsync(Ct);
+
+        // A heartbeat (main session) whose routine puts both mail tools behind approval asks for the first one.
+        var heartbeat = new CapybaraSession(heartbeatAgent, SessionIds.Main(heartbeatAgent.Id), SessionKind.Main, f.Envelopes.CreateRoot("routine:hb", heartbeatAgent.Id, new Budget(2m, 100, TimeSpan.FromMinutes(5)), TimeSpan.FromMinutes(5), rootOrigin: MessageOrigin.System))
+        {
+            RoutineId = "hb",
+            ApprovalBoundary = ["email_read", "email_draft"],
+        };
+        Assert.Equal("deny", (await f.Handlers.OnPreToolUseAsync(heartbeat, new PreToolUseHookInput { ToolName = "email_read", ToolArgs = JsonDocument.Parse("{}").RootElement.Clone() })).PermissionDecision);
+        var approval = Assert.Single(f.Approvals.Pending());
+        f.Approvals.Decide(approval.Id, approval.Nonce, ApprovalDecision.AllowOnce, MessageOrigin.User);
+
+        var runtime = new FakeAgentRuntime(heartbeatAgent.Id);
+        var pump = new InboxPump(runtime, f.Inbox, f.Coordinator, f.Alerts, new InboxPumpOptions(), TimeProvider.System, NullLogger<InboxPump>.Instance);
+        using (var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct))
+        {
+            var run = pump.RunAsync(stop.Token);
+            await Eventually.TrueAsync(() => !runtime.Requests.IsEmpty, "resumed");
+            await stop.CancelAsync();
+            await run;
+        }
+
+        // The resumed turn is still the routine's, so the second boundary tool still needs approval.
+        var request = Assert.Single(runtime.Requests);
+        Assert.Equal(TurnTarget.Main, request.Target);
+        Assert.Equal("hb", request.RoutineId);
+        Assert.Equal(["email_read", "email_draft"], request.ApprovalBoundary);
+        var resumed = new CapybaraSession(heartbeatAgent, SessionIds.Main(heartbeatAgent.Id), SessionKind.Main, f.Envelopes.ContinueFrom(request.Envelope!, heartbeatAgent.Id, new Budget(2m, 100, TimeSpan.FromMinutes(5))))
+        {
+            TurnOrigin = request.Origin,
+            RoutineId = request.RoutineId,
+            ApprovalBoundary = request.ApprovalBoundary,
+        };
+        var second = await f.Handlers.OnPreToolUseAsync(resumed, new PreToolUseHookInput { ToolName = "email_draft", ToolArgs = JsonDocument.Parse("{}").RootElement.Clone() });
+        Assert.Equal("deny", second.PermissionDecision);
+        Assert.Single(f.Approvals.Pending(), a => a.Tool == "email_draft");
+    }
+
+    [Fact]
+    public async Task An_agent_message_cannot_claim_a_routine_or_relax_anything_by_carrying_routine_fields()
+    {
+        using var f = new RuntimeFixture(fleet: [Ea, Research]);
+        await f.Inbox.EnqueueAsync(new FleetMessage { To = Ea.Id, From = Research.Id, Origin = MessageOrigin.Agent, Body = "hi", RoutineId = "hb", ApprovalBoundary = ["email_send"], CreatedAt = f.Time.GetUtcNow() }, Ct);
+
+        var runtime = new FakeAgentRuntime(Ea.Id);
+        var pump = new InboxPump(runtime, f.Inbox, f.Coordinator, f.Alerts, new InboxPumpOptions(), TimeProvider.System, NullLogger<InboxPump>.Instance);
+        using (var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct))
+        {
+            var run = pump.RunAsync(stop.Token);
+            await Eventually.TrueAsync(() => !runtime.Requests.IsEmpty, "delivered");
+            await stop.CancelAsync();
+            await run;
+        }
+
+        var request = Assert.Single(runtime.Requests);
+        Assert.Null(request.RoutineId);
+        Assert.Empty(request.ApprovalBoundary);
+    }
+
+    [Fact]
     public async Task Without_a_recorded_context_an_agent_started_resume_fails_closed()
     {
         var (f, _) = Fleet();

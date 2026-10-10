@@ -78,7 +78,7 @@ name a systemd credential read from `$CREDENTIALS_DIRECTORY`.
 | `Capybara:Incognito` | `IdleTimeout` (default 30 min) after which an unused incognito conversation's CLI session is deleted, and `SweepInterval` (default 5 min). Sessions from before a restart are deleted at start. |
 | `Capybara:Hosting` | `StateDatabasePath` and `BlobRoot` (backup archives; default `{StateRoot}/blobs`). |
 | `Capybara:Backup` | `Sources[]`, `RetainCount`, `ScheduleUtc`, shared with `capybarad backup`. `InProcess` (default `true`) runs the nightly job inside capybarad; set `false` when `capybara-backup.timer` runs it. |
-| `Capybara:Runtime` | `AutoStart`, `CliPath`/`CliArgs` (unsandboxed only), `TurnTimeout`, `ConsultTimeout` (default 5 min per `ask_agent` answer), `FrontDoorAgent`, `ReviewerModel`, `ReviewerTimeout` (default 45 s; running out escalates the call to you), `ToolSearchDeferThreshold`, `BuiltInSkillDirectory`, plus the isolation settings below. |
+| `Capybara:Runtime` | `AutoStart`, `CliPath`/`CliArgs` (unsandboxed only), `TurnTimeout`, `ConsultTimeout` (default 5 min per `ask_agent` answer), `FrontDoorAgent`, `ReviewerModel`, `ReviewerTimeout` (default 45 s; running out escalates the call to you), `DefinitionSwapDrainTimeout` (default 1 min: how long an edit that restarts an agent's CLI waits for its running task, routine and consult turns before stopping them; they are retried or reported), `ToolSearchDeferThreshold`, `BuiltInSkillDirectory`, plus the isolation settings below. |
 | `Capybara:Runtime:UntrustedInputTools` | Tools whose results are untrusted, so using one taints the session (FR-SAF-03). Default `web_fetch`, `web_search`, `email_read`, `calendar_read`; add every tool that returns outside content (MCP readers, other connectors), or its output counts as clean. |
 | `Capybara:Runtime:CliEnvironmentPassthrough` | Host variables copied into each CLI's otherwise empty environment (proxies, CA bundles). Credential-like names are dropped even if listed. |
 | `Capybara:Runtime:SessionScopedGitHubToken` | `true` (default): the PAT goes to each session over RPC, never into the CLI's environment. `false` is a rollback switch only. |
@@ -134,7 +134,7 @@ Command-line modes: `capybarad backup`, `capybarad restore <archive> <destinatio
   `AllowUnlessTainted` rules then block exfiltration paths such as sending messages to non-allowlisted
   destinations. Taint is journaled, so a session resumed after a restart is still tainted.
 - **Config edits apply live.** An approved proposal or a hand edit reaches the running agent at its next turn (its main session is
-  rebuilt; its CLI restarts for egress, MCP or provider changes) and the tool self-test runs again. Agent-proposed routines land
+  rebuilt; for egress, MCP or provider changes its CLI is replaced under the runtime's locks, with new turns held back and running ones drained or stopped first) and the tool self-test runs again. Agent-proposed routines land
   disabled until you enable them with their projected cost; a routine's `approvalBoundary` tools need approval in its runs.
 - **Human controls stick.** Agent pauses and routine enable/disable decisions survive restarts and are audited.
 - **A2A envelopes.** Envelopes carry depth (max 2), hop path (no cycles), deadline and a budget slice.

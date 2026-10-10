@@ -145,11 +145,18 @@ public sealed class FakeSupervisedRuntime(Contracts.Agents.AgentDefinition initi
 
     public int DefinitionUpdates { get; private set; }
 
-    public Task UpdateDefinitionAsync(Contracts.Agents.AgentDefinition definition, CancellationToken cancellationToken)
+    /// <summary>Like the real runtime: a process-level change to a running CLI replaces it.</summary>
+    public Task<Runtime.Copilot.Hosting.DefinitionChange> UpdateDefinitionAsync(Contracts.Agents.AgentDefinition definition, CancellationToken cancellationToken)
     {
+        var change = Runtime.Copilot.Hosting.DefinitionChanges.Classify(_definition, definition);
         _definition = definition;
         DefinitionUpdates++;
-        return Task.CompletedTask;
+        if (change == Runtime.Copilot.Hosting.DefinitionChange.Process && _running)
+        {
+            Interlocked.Increment(ref _restarts);
+        }
+
+        return Task.FromResult(change);
     }
 
     public Task StartAsync(CancellationToken cancellationToken)

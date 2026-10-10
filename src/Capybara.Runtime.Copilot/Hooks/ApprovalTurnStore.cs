@@ -9,9 +9,16 @@ namespace Capybara.Runtime.Copilot.Hooks;
 /// <summary>
 /// The turn an approval interrupted: its envelope (depth, remaining budget, deadline, root task and root origin), its
 /// origin and the agent whose message started it. The turn that resumes after the decision continues under it, so an
-/// approval can never turn an agent-started or event-started turn into a fresh, user-facing root (FR-A2A-05/07).
+/// approval can never turn an agent-started or event-started turn into a fresh, user-facing root (FR-A2A-05/07). A turn a
+/// routine ran also keeps that routine's attribution and approval boundary (FR-OBS-03, FR-RTN-02), so a heartbeat's
+/// resumed main-session turn still needs approval for every tool its routine declared.
 /// </summary>
-public sealed record ApprovalTurnContext(Envelope Envelope, MessageOrigin Origin, AgentId? From);
+public sealed record ApprovalTurnContext(
+    Envelope Envelope,
+    MessageOrigin Origin,
+    AgentId? From,
+    string? RoutineId = null,
+    IReadOnlyList<string>? ApprovalBoundary = null);
 
 /// <summary>
 /// Durable <see cref="ApprovalTurnContext"/>s keyed by approval id, one small file each under

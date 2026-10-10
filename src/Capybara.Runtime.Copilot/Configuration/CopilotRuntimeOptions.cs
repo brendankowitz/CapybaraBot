@@ -94,6 +94,12 @@ public sealed class CopilotRuntimeOptions
     /// <summary>Upper bound for one consult turn.</summary>
     public TimeSpan ConsultTimeout { get; set; } = TimeSpan.FromMinutes(5);
 
+    /// <summary>
+    /// How long an edit that replaces an agent's CLI process (egress, MCP servers, provider) waits for that agent's running
+    /// task, isolated, incognito and consult turns before aborting them (FR-AGT-06). New turns wait meanwhile.
+    /// </summary>
+    public TimeSpan DefinitionSwapDrainTimeout { get; set; } = TimeSpan.FromMinutes(1);
+
     /// <summary>Upper bound for one main-session turn.</summary>
     public TimeSpan TurnTimeout { get; set; } = TimeSpan.FromMinutes(20);
 

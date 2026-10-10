@@ -68,6 +68,35 @@ public sealed class TaintTrackerTests : IDisposable
     }
 
     [Fact]
+    public void A_failed_journal_write_keeps_the_taint_alerts_and_is_retried_on_the_next_turn()
+    {
+        var tracker = new TaintTracker(JournalPath);
+        tracker.MarkTainted("a");
+        var failures = new List<Exception>();
+        tracker.PersistenceFailed += (_, ex) => failures.Add(ex);
+
+        // The journal's directory becomes unusable: a file stands where it should be.
+        var policy = Path.GetDirectoryName(JournalPath)!;
+        Directory.Delete(policy, recursive: true);
+        File.WriteAllText(policy, "not a directory");
+
+        tracker.MarkTainted("b");
+        tracker.Apply("c", Taint.Clean);
+
+        Assert.True(tracker.IsTainted("b"));
+        Assert.True(tracker.HasUnsavedChanges);
+        Assert.Equal(2, failures.Count);
+
+        File.Delete(policy);
+        tracker.Apply("c", Taint.Clean);
+
+        Assert.False(tracker.HasUnsavedChanges);
+        var restarted = new TaintTracker(JournalPath);
+        Assert.True(restarted.IsTainted("a"));
+        Assert.True(restarted.IsTainted("b"));
+    }
+
+    [Fact]
     public void A_torn_last_line_from_a_crash_is_dropped()
     {
         new TaintTracker(JournalPath).MarkTainted("a");

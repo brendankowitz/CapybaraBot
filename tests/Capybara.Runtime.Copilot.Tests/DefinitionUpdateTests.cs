@@ -68,10 +68,25 @@ public sealed class DefinitionUpdateTests
         await using var runtime = f.Runtime(Ea);
         var edited = Ea with { Soul = "Warmer.", Model = "claude-sonnet" };
 
-        await runtime.UpdateDefinitionAsync(edited, Ct);
+        Assert.Equal(DefinitionChange.Sessions, await runtime.UpdateDefinitionAsync(edited, Ct));
+        Assert.Equal(DefinitionChange.None, await runtime.UpdateDefinitionAsync(edited with { }, Ct));
 
         Assert.Same(edited, runtime.Definition);
         await Assert.ThrowsAsync<ArgumentException>(() => runtime.UpdateDefinitionAsync(TestAgents.Create("code"), Ct));
         Assert.Same(edited, runtime.Definition);
+    }
+
+    [Fact]
+    public async Task A_process_level_edit_to_a_runtime_that_is_not_running_starts_no_cli()
+    {
+        // Stopped by the kill switch, or never started on this host: the release (or the next start) uses the new definition.
+        using var f = new RuntimeFixture();
+        await using var runtime = f.Runtime(Ea);
+        var narrowed = Ea with { EgressDomains = [] };
+
+        Assert.Equal(DefinitionChange.Process, await runtime.UpdateDefinitionAsync(narrowed, Ct));
+
+        Assert.Same(narrowed, runtime.Definition);
+        Assert.False(await runtime.PingAsync(Ct));
     }
 }

@@ -102,10 +102,11 @@ public sealed class ReplyingFactory : ApiFactory
 
         public AgentDefinition Definition { get; private set; } = initial;
 
-        public Task UpdateDefinitionAsync(AgentDefinition definition, CancellationToken cancellationToken)
+        public Task<DefinitionChange> UpdateDefinitionAsync(AgentDefinition definition, CancellationToken cancellationToken)
         {
+            var change = DefinitionChanges.Classify(Definition, definition);
             Definition = definition;
-            return Task.CompletedTask;
+            return Task.FromResult(change);
         }
 
         public async Task<TurnResult> RunTurnAsync(AgentTurnRequest request, CancellationToken cancellationToken)

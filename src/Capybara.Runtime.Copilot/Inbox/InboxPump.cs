@@ -398,6 +398,11 @@ public sealed partial class InboxPump
             _ => MessagePrompts.ForSystemMessage(message),
         };
 
+        // An isolated routine run resumes from its continuation; any other routine turn (a heartbeat in the main session)
+        // from what the approval recorded. Only a host notice can carry these, and a boundary only adds approvals.
+        var routineId = continuation?.Routine.Id ?? (message.Origin == MessageOrigin.System ? message.RoutineId : null);
+        IReadOnlyList<string> boundary = continuation?.Routine.ApprovalBoundary ?? (message.Origin == MessageOrigin.System ? message.ApprovalBoundary : []);
+
         return new TurnPlan(
             new AgentTurnRequest
             {
@@ -410,8 +415,8 @@ public sealed partial class InboxPump
                 From = message.From,
                 Taint = message.Taint,
                 Envelope = envelope,
-                RoutineId = continuation?.Routine.Id,
-                ApprovalBoundary = continuation?.Routine.ApprovalBoundary ?? [],
+                RoutineId = routineId,
+                ApprovalBoundary = boundary,
                 Model = continuation?.Model,
                 Budget = continuation is { } c ? new Budget(c.RemainingCredits, 100, TimeSpan.FromMinutes(20)) : null,
             },

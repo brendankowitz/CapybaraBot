@@ -39,7 +39,7 @@ public static class AgentEndpoints
                 .ToList()));
 
         // A human pause outlives a restart (journaled) and is audited (FR-SAF-06, FR-SAF-09).
-        group.MapPost("/{id}/pause", async (string id, HttpContext context, AgentRegistry registry, KillSwitch killSwitch, PausedAgentsJournal journal, IAuditLog audit, CancellationToken cancellationToken) =>
+        group.MapPost("/{id}/pause", async (string id, HttpContext context, AgentRegistry registry, KillSwitch killSwitch, PausedAgentsJournal journal, IAuditLog audit) =>
         {
             if (Resolve(registry, id) is not { } agent)
             {
@@ -49,11 +49,11 @@ public static class AgentEndpoints
             // Paused in memory first: if the journal write fails, the agent is still paused now and the caller hears so.
             killSwitch.Pause(agent);
             journal.Add(agent);
-            await audit.AppendAsync(new AuditRecord("agent_control", "paused", agent.Value, Detail: $"by {context.GetDevice().PrincipalName}"), cancellationToken);
+            await audit.AppendAsync(new AuditRecord("agent_control", "paused", agent.Value, Detail: $"by {context.GetDevice().PrincipalName}"), CancellationToken.None);
             return Results.NoContent();
         });
 
-        group.MapPost("/{id}/resume", async (string id, HttpContext context, AgentRegistry registry, KillSwitch killSwitch, PausedAgentsJournal journal, IAuditLog audit, CancellationToken cancellationToken) =>
+        group.MapPost("/{id}/resume", async (string id, HttpContext context, AgentRegistry registry, KillSwitch killSwitch, PausedAgentsJournal journal, IAuditLog audit) =>
         {
             if (Resolve(registry, id) is not { } agent)
             {
@@ -63,7 +63,7 @@ public static class AgentEndpoints
             // Journal first: a resume that could not be recorded must not take effect, or a restart would re-pause.
             journal.Remove(agent);
             killSwitch.Resume(agent);
-            await audit.AppendAsync(new AuditRecord("agent_control", "resumed", agent.Value, Detail: $"by {context.GetDevice().PrincipalName}"), cancellationToken);
+            await audit.AppendAsync(new AuditRecord("agent_control", "resumed", agent.Value, Detail: $"by {context.GetDevice().PrincipalName}"), CancellationToken.None);
             return Results.NoContent();
         });
 

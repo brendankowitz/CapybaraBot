@@ -203,8 +203,14 @@ public static class CapybaraServiceCollectionExtensions
 
             return killSwitch;
         });
-        // Sessions resume with their history after a restart, so their taint must too (FR-SAF-03).
-        services.AddSingleton(_ => new TaintTracker(state.Taint));
+        // Sessions resume with their history after a restart, so their taint must too (FR-SAF-03). A journal write that
+        // fails keeps the taint in force and is retried; the user is told the journal is behind.
+        services.AddSingleton(sp =>
+        {
+            var taint = new TaintTracker(state.Taint);
+            taint.PersistenceFailed += (_, ex) => _ = AlertTaintJournalAsync(sp, ex);
+            return taint;
+        });
         services.AddSingleton(new LearnedRuleStore(state.LearnedRules));
 
         // Learned "Always allow" rules survive restarts and are saved as they are learned (FR-SAF-04).
@@ -238,6 +244,32 @@ public static class CapybaraServiceCollectionExtensions
             SystemdCredentials.Read(channels.Telegram.BotTokenCredential),
             SystemdCredentials.Read(channels.Ntfy.AccessTokenCredential),
         }.OfType<string>().Where(s => s.Length > 0)));
+    }
+
+    /// <summary>Alert kind for a taint journal write that failed (retried; the taint is in force meanwhile).</summary>
+    public const string TaintJournalAlertKind = "policy.taint_journal";
+
+    /// <summary>
+    /// Resolved when it fires, not when the tracker is built: the alert sink's own graph (channels, router) must not have
+    /// to exist before the policy layer. Never throws; the tracker raises this from whatever thread wrote.
+    /// </summary>
+    private static async Task AlertTaintJournalAsync(IServiceProvider services, Exception failure)
+    {
+        try
+        {
+            await services.GetRequiredService<IAlertSink>().PublishAsync(
+                new Alert(
+                    TaintJournalAlertKind,
+                    AlertSeverity.Critical,
+                    $"The session taint journal could not be written ({failure.GetType().Name}); taint is enforced in memory and the write is retried, but a restart before it succeeds would lose it.",
+                    services.GetRequiredService<TimeProvider>().GetUtcNow()),
+                CancellationToken.None);
+        }
+#pragma warning disable CA1031 // Last resort: an alert about a failed write must not itself crash the writer.
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+        }
     }
 
     private static void AddObservability(IServiceCollection services, CapybaraConfiguration fleet, StateLayout state)

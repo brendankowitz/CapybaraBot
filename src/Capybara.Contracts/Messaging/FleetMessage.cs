@@ -34,4 +34,16 @@ public sealed record FleetMessage
 
     /// <summary>Conversational channel a user DM arrived on (e.g. <c>telegram</c>), so the reply can go back there.</summary>
     public string? Channel { get; init; }
+
+    /// <summary>
+    /// For a host notice resuming a turn a routine ran (an approval outcome): that routine, so the resumed turn stays
+    /// attributed to it (FR-OBS-03). Honoured only on <see cref="MessageOrigin.System"/> messages.
+    /// </summary>
+    public string? RoutineId { get; init; }
+
+    /// <summary>
+    /// With <see cref="RoutineId"/>: the routine's approval boundary, which the resumed turn keeps (FR-RTN-02). It can only
+    /// add approval requirements, never remove one.
+    /// </summary>
+    public IReadOnlyList<string> ApprovalBoundary { get; init; } = [];
 }

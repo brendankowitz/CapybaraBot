@@ -103,4 +103,61 @@ public sealed class RoutineOverrideTests : IDisposable
 
         Assert.True(after.GetState("hb").Enabled);
     }
+
+    [Fact]
+    public void A_disable_that_cannot_be_saved_still_takes_effect_and_says_so()
+    {
+        var registry = Restart(Kit.Heartbeat());
+        using (ReadOnlyDatabase())
+        {
+            Assert.Throws<RoutineOverridePersistenceException>(() => registry.Disable("hb", Kit.User));
+        }
+
+        Assert.False(registry.GetState("hb").Enabled);
+    }
+
+    [Fact]
+    public void An_enable_that_cannot_be_saved_is_not_applied()
+    {
+        var routine = Kit.Heartbeat() with { Enabled = false };
+        var registry = Restart(routine);
+        using (ReadOnlyDatabase())
+        {
+            Assert.Throws<RoutineOverridePersistenceException>(() => registry.Enable("hb", registry.ProjectedMonthlyCredits(routine), Kit.User));
+        }
+
+        Assert.False(registry.GetState("hb").Enabled);
+    }
+
+    [Fact]
+    public void Config_loads_keep_working_when_derived_decisions_cannot_be_saved()
+    {
+        var routine = Kit.Heartbeat() with { Enabled = false };
+        var registry = Restart(routine);
+        registry.Enable("hb", registry.ProjectedMonthlyCredits(routine), Kit.User);
+        using (ReadOnlyDatabase())
+        {
+            registry.AddOrUpdate(routine with { Interval = TimeSpan.FromMinutes(5) }, Kit.User);
+            registry.AddOrUpdate(routine with { Enabled = true, Interval = TimeSpan.FromMinutes(5) }, Kit.User);
+            registry.Remove("hb", Kit.User);
+        }
+
+        Assert.Null(registry.Find("hb"));
+    }
+
+    /// <summary>Makes the scheduling database refuse writes until disposed.</summary>
+    private ReadOnlyFile ReadOnlyDatabase() => new(Db);
+
+    private sealed class ReadOnlyFile : IDisposable
+    {
+        private readonly string _path;
+
+        public ReadOnlyFile(string path)
+        {
+            _path = path;
+            File.SetAttributes(path, FileAttributes.ReadOnly);
+        }
+
+        public void Dispose() => File.SetAttributes(_path, FileAttributes.Normal);
+    }
 }

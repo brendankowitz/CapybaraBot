@@ -10,9 +10,10 @@ namespace Capybara.Policy.Provenance;
 /// replays its state on construction: a restart never turns a tainted session clean.
 /// </summary>
 /// <remarks>
-/// Thread-safe. With a journal, every change of state (a session becoming tainted, or a tainted session being
-/// forgotten when it ends) is appended before the call returns; the in-memory state changes first, so a failed write
-/// still leaves this process conservative and the exception tells the caller the change is not durable.
+/// Thread-safe. The in-memory state always changes first, so this process is conservative whatever the disk does. After a
+/// failed write (which may have left a torn line), the next change, or the next turn (<see cref="Apply"/> is called for
+/// every turn), rewrites the journal atomically from the in-memory state; every failed write raises
+/// <see cref="PersistenceFailed"/> so the host can alert. Never throws for a failed write: the taint is already in force.
 /// </remarks>
 public sealed class TaintTracker
 {
@@ -21,6 +22,9 @@ public sealed class TaintTracker
     private readonly HashSet<string> _tainted = new(StringComparer.Ordinal);
     private readonly Lock _gate = new();
     private readonly string? _journal;
+
+    // A write failed, so the journal may lack changes or end in a torn line: the next write replaces it atomically.
+    private bool _unsaved;
 
     /// <summary>An in-memory tracker (tests and processes that own no state).</summary>
     public TaintTracker()
@@ -55,24 +59,52 @@ public sealed class TaintTracker
         }
     }
 
-    public void MarkTainted(string sessionId)
+    /// <summary>
+    /// A change could not be written to the journal (it is retried). Raised outside the tracker's lock; handlers must not
+    /// throw.
+    /// </summary>
+    public event EventHandler<Exception>? PersistenceFailed;
+
+    /// <summary>The journal lacks changes this process made (a write failed and no retry has succeeded yet).</summary>
+    public bool HasUnsavedChanges
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
-        lock (_gate)
+        get
         {
-            if (_tainted.Add(sessionId))
+            lock (_gate)
             {
-                Persist(new TaintRecord(sessionId, Tainted: true));
+                return _unsaved;
             }
         }
     }
 
+    public void MarkTainted(string sessionId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        Exception? failure;
+        lock (_gate)
+        {
+            failure = _tainted.Add(sessionId) ? Persist(new TaintRecord(sessionId, Tainted: true)) : Flush();
+        }
+
+        Report(failure);
+    }
+
+    /// <summary>Applies a turn's incoming taint; on every turn, also retries journal writes that failed before.</summary>
     public void Apply(string sessionId, Taint taint)
     {
         if (taint == Taint.Tainted)
         {
             MarkTainted(sessionId);
+            return;
         }
+
+        Exception? failure;
+        lock (_gate)
+        {
+            failure = Flush();
+        }
+
+        Report(failure);
     }
 
     public bool IsTainted(string sessionId)
@@ -94,23 +126,71 @@ public sealed class TaintTracker
         }
     }
 
-    /// <summary>The session has ended for good (deleted); a later session with the same id starts clean.</summary>
+    /// <summary>
+    /// The session has ended for good (deleted); a later session with the same id starts clean. A tombstone that cannot be
+    /// written only leaves the session tainted on disk, the safe side.
+    /// </summary>
     public void Forget(string sessionId)
     {
+        Exception? failure;
         lock (_gate)
         {
-            if (_tainted.Remove(sessionId))
-            {
-                Persist(new TaintRecord(sessionId, Tainted: false));
-            }
+            failure = _tainted.Remove(sessionId) ? Persist(new TaintRecord(sessionId, Tainted: false)) : Flush();
+        }
+
+        Report(failure);
+    }
+
+    /// <summary>Appends <paramref name="record"/>, or rewrites the journal if an earlier write failed. Caller holds the lock.</summary>
+    private Exception? Persist(TaintRecord record)
+    {
+        if (_journal is null)
+        {
+            return null;
+        }
+
+        if (_unsaved)
+        {
+            return Flush();
+        }
+
+        try
+        {
+            JsonlFile.Append(_journal, record, Json);
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _unsaved = true;
+            return ex;
         }
     }
 
-    private void Persist(TaintRecord record)
+    /// <summary>After a failed write, replaces the journal with the live set (temp file, then move). Caller holds the lock.</summary>
+    private Exception? Flush()
     {
-        if (_journal is not null)
+        if (_journal is null || !_unsaved)
         {
-            JsonlFile.Append(_journal, record, Json);
+            return null;
+        }
+
+        try
+        {
+            JsonlFile.Rewrite(_journal, _tainted.Order(StringComparer.Ordinal).Select(id => new TaintRecord(id, Tainted: true)), Json);
+            _unsaved = false;
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return ex;
+        }
+    }
+
+    private void Report(Exception? failure)
+    {
+        if (failure is not null)
+        {
+            PersistenceFailed?.Invoke(this, failure);
         }
     }
 

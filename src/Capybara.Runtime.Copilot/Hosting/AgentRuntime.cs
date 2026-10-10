@@ -39,6 +39,12 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     /// <summary>Alert raised when a turn overspends its own credit limit and is stopped.</summary>
     public const string LimitAlertKind = "runtime.turn_over_budget";
 
+    /// <summary>Alert raised when running turns were stopped so the CLI could restart with an edited definition.</summary>
+    public const string InterruptedAlertKind = "runtime.turns_interrupted";
+
+    /// <summary>The error of a turn stopped so the CLI could restart with an edited definition.</summary>
+    public const string InterruptedForRestart = "interrupted: the agent's CLI restarted to apply its edited configuration";
+
     private const int MainTurnToolCalls = 200;
     private const string ImmediateMode = "immediate";
 
@@ -61,6 +67,9 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     private readonly SemaphoreSlim _mainLock = new(1, 1);
     private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
     private readonly KeyedLocks _sessionLocks = new();
+
+    // Readers: every turn or call that uses the CLI outside the main lock. Writer: replacing the CLI for an edited definition.
+    private readonly SessionTurnGate _sessionTurns = new();
 
     private readonly Lock _turnGate = new();
 
@@ -111,7 +120,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
 
     public AgentDefinition Definition => _agent;
 
-    public async Task UpdateDefinitionAsync(AgentDefinition definition, CancellationToken cancellationToken)
+    public async Task<DefinitionChange> UpdateDefinitionAsync(AgentDefinition definition, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(definition);
         if (definition.Id != _agent.Id)
@@ -127,20 +136,44 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
             await _mainLock.WaitAsync(cancellationToken);
             try
             {
-                var previous = _agent;
-                _agent = definition;
-
-                // A model set from a client (FR-AGT-08) is kept unless the config's own model changed.
-                if (definition.Model != previous.Model)
+                var change = DefinitionChanges.Classify(_agent, definition);
+                if (change == DefinitionChange.None)
                 {
-                    _model = definition.Model;
+                    return change;
+                }
+
+                if (change == DefinitionChange.Process && _client is not null)
+                {
+                    // The running process enforces the old egress, MCP servers and provider. No session turn may run on it
+                    // with the new configuration, nor keep running into its replacement: new turns wait, running ones get
+                    // the drain timeout and are then aborted and reported, and only then is the process replaced.
+                    var aborted = await _sessionTurns.RunExclusiveAsync(
+                        () => ReplaceProcessAsync(definition, cancellationToken),
+                        _options.DefinitionSwapDrainTimeout,
+                        _time,
+                        cancellationToken);
+                    if (aborted > 0)
+                    {
+                        await PublishAsync(new Alert(
+                            InterruptedAlertKind,
+                            AlertSeverity.Warning,
+                            $"{aborted} running turn(s) of {definition.Id} were stopped so its CLI could restart with its edited configuration; each is retried or reported to whoever started it.",
+                            _time.GetUtcNow(),
+                            definition.Id.Value));
+                    }
+                }
+                else
+                {
+                    // Not running (never started, or stopped by the kill switch): the next start uses the new definition.
+                    Swap(definition);
+                    await DropMainSessionAsync();
                 }
 
                 // The main session's context carries the definition it was built with; the next turn builds a new one
                 // and resumes the persisted session with the new configuration re-registered (FR-AGT-03).
-                await DropMainSessionAsync();
                 _mainSession = null;
-                LogDefinitionUpdated(_logger, definition.Id.Value);
+                LogDefinitionUpdated(_logger, definition.Id.Value, change);
+                return change;
             }
             finally
             {
@@ -150,6 +183,31 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         finally
         {
             _lifecycleLock.Release();
+        }
+    }
+
+    /// <summary>Caller holds the lifecycle and main locks and the session-turn gate exclusively.</summary>
+    private async Task ReplaceProcessAsync(AgentDefinition definition, CancellationToken cancellationToken)
+    {
+        await StopCoreAsync();
+        Swap(definition);
+
+        // Honour the kill switch engaged meanwhile: leave the process stopped; the release starts it with this definition.
+        if (!_killSwitch.IsEngaged)
+        {
+            await StartCoreAsync(cancellationToken);
+        }
+    }
+
+    private void Swap(AgentDefinition definition)
+    {
+        var previous = _agent;
+        _agent = definition;
+
+        // A model set from a client (FR-AGT-08) is kept unless the config's own model changed.
+        if (definition.Model != previous.Model)
+        {
+            _model = definition.Model;
         }
     }
 
@@ -330,6 +388,9 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         }
 
         var sessionId = target.SessionIdFor(_agent.Id);
+
+        // Never while the CLI is being replaced: with no client then, the delete would be skipped and the session kept.
+        using var lease = await _sessionTurns.EnterAsync(cancellationToken);
         using (await _sessionLocks.AcquireAsync(sessionId, cancellationToken))
         {
             if (_client is { } client)
@@ -370,6 +431,9 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     public async Task<ConsultReply> ConsultAsync(string sessionId, string question, Envelope envelope, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(envelope);
+
+        // Like every session turn, never on a CLI being replaced; stopped for one, it fails like a timed-out consult.
+        using var lease = await _sessionTurns.EnterAsync(cancellationToken);
         var client = _client ?? throw new InvalidOperationException($"Runtime for {_agent.Id} is not running.");
         var context = new CapybaraSession(_agent, sessionId, SessionKind.Consult, envelope) { TurnOrigin = MessageOrigin.Agent, Model = _model };
         _taint.Apply(sessionId, envelope.Taint);
@@ -378,7 +442,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         var session = await client.CreateSessionAsync(await _configs.CreateConfigAsync(context, cancellationToken), cancellationToken);
         try
         {
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _killSwitch.FleetToken);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _killSwitch.FleetToken, lease.AbortToken);
             var reply = await session.SendAndWaitAsync(
                 new MessageOptions { Prompt = question, Source = MessageSource.Agent(caller) },
                 _options.ConsultTimeout,
@@ -474,6 +538,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         await StopCoreAsync();
         _mainLock.Dispose();
         _lifecycleLock.Dispose();
+        _sessionTurns.Dispose();
     }
 
     private async Task<TurnResult> RunMainTurnAsync(AgentTurnRequest request, CancellationToken cancellationToken)
@@ -632,6 +697,24 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
 
     private async Task<TurnResult> RunSessionTurnAsync(AgentTurnRequest request, CancellationToken cancellationToken)
     {
+        // Admitted only while the CLI is not being replaced for an edited definition (FR-AGT-06); a replacement that gives
+        // up waiting for this turn stops it through the lease, on the same abort path as the caller's cancellation.
+        using var lease = await _sessionTurns.EnterAsync(cancellationToken);
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lease.AbortToken);
+        SessionTurnLog? turn = null;
+        try
+        {
+            return await RunAdmittedSessionTurnAsync(request, log => turn = log, stop.Token);
+        }
+        catch (OperationCanceledException) when (lease.WasAborted && !cancellationToken.IsCancellationRequested)
+        {
+            LogInterruptedForRestart(_logger, _agent.Id.Value, request.Target.Kind);
+            return TurnResult.Failed(InterruptedForRestart, turn?.Snapshot()) with { RoutineId = request.RoutineId };
+        }
+    }
+
+    private async Task<TurnResult> RunAdmittedSessionTurnAsync(AgentTurnRequest request, Action<SessionTurnLog> started, CancellationToken cancellationToken)
+    {
         var target = request.Target;
         var sessionId = target.SessionIdFor(_agent.Id);
 
@@ -657,6 +740,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
                 Model = request.Model ?? _model,
             };
             var turn = context.BeginTurn(creditLimit);
+            started(turn);
             _taint.Apply(sessionId, envelope.Taint);
             _taint.Apply(sessionId, request.Taint);
 
@@ -872,8 +956,11 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     [LoggerMessage(Level = LogLevel.Information, Message = "Runtime for {Agent} started")]
     private static partial void LogStarted(ILogger logger, string agent);
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Runtime for {Agent} now uses its edited definition; its main session will be rebuilt")]
-    private static partial void LogDefinitionUpdated(ILogger logger, string agent);
+    [LoggerMessage(Level = LogLevel.Warning, Message = "A {Kind} turn of {Agent} was stopped so its CLI could restart with its edited definition")]
+    private static partial void LogInterruptedForRestart(ILogger logger, string agent, SessionKind kind);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Runtime for {Agent} now uses its edited definition ({Change}); its main session will be rebuilt")]
+    private static partial void LogDefinitionUpdated(ILogger logger, string agent, DefinitionChange change);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Resumed session {SessionId}")]
     private static partial void LogResumed(ILogger logger, string sessionId);

@@ -202,7 +202,7 @@ public sealed class InboxResilienceTests
 
         public AgentDefinition Definition => _inner.Definition;
 
-        public Task UpdateDefinitionAsync(AgentDefinition definition, CancellationToken cancellationToken) => _inner.UpdateDefinitionAsync(definition, cancellationToken);
+        public Task<DefinitionChange> UpdateDefinitionAsync(AgentDefinition definition, CancellationToken cancellationToken) => _inner.UpdateDefinitionAsync(definition, cancellationToken);
 
         public System.Collections.Concurrent.ConcurrentQueue<AgentTurnRequest> Requests => _inner.Requests;
 

@@ -103,13 +103,13 @@ public sealed class RoutineRegistry
             else if (previous.Enabled != routine.Enabled)
             {
                 // The config file's flag was edited: it wins over the user's earlier decision.
-                DeleteOverride(routine.Id);
+                TryDeleteOverride(routine.Id);
                 _states[routine.Id] = state with { Enabled = routine.Enabled, Reason = routine.Enabled ? null : "disabled", AcknowledgedMonthlyCredits = null };
             }
             else if (state.Enabled && ExceedsAcknowledgement(routine, state.AcknowledgedMonthlyCredits) is { } reason)
             {
-                SaveOverride(routine.Id, new RoutineOverride(Enabled: false, null, routine.Enabled));
                 _states[routine.Id] = state with { Enabled = false, Reason = reason, AcknowledgedMonthlyCredits = null };
+                TrySaveOverride(routine.Id, new RoutineOverride(Enabled: false, null, routine.Enabled));
             }
         }
 
@@ -127,7 +127,7 @@ public sealed class RoutineRegistry
             if (removed)
             {
                 _states.TryRemove(routineId, out _);
-                DeleteOverride(routineId);
+                TryDeleteOverride(routineId);
             }
         }
 
@@ -144,6 +144,7 @@ public sealed class RoutineRegistry
     public bool IsRunnable(RoutineSpec routine) => GetState(routine.Id).Runnable;
 
     /// <summary>Enables a routine once the user acknowledged its projected monthly cost (FR-RTN-09); survives restarts.</summary>
+    /// <exception cref="RoutineOverridePersistenceException">The decision could not be saved; the routine was not enabled.</exception>
     public void Enable(string routineId, decimal acknowledgedMonthlyCost, RoutinePrincipal principal)
     {
         principal.RequireHuman();
@@ -159,6 +160,7 @@ public sealed class RoutineRegistry
     }
 
     /// <summary>Disables a routine; survives restarts until the user enables it or edits its <c>enabled</c> flag.</summary>
+    /// <exception cref="RoutineOverridePersistenceException">The routine is disabled now, but a restart would not keep it.</exception>
     public void Disable(string routineId, RoutinePrincipal principal)
     {
         principal.RequireHuman();
@@ -190,7 +192,7 @@ public sealed class RoutineRegistry
 
         if (decision.SpecEnabled != routine.Enabled)
         {
-            DeleteOverride(routine.Id);
+            TryDeleteOverride(routine.Id);
             return fromSpec;
         }
 
@@ -218,18 +220,44 @@ public sealed class RoutineRegistry
             : null;
     }
 
-    /// <summary>A human enable or disable: the new state and its persisted override change together.</summary>
+    /// <summary>
+    /// A human enable or disable. Fails safe when the decision cannot be saved: an enable is not applied, a disable is
+    /// in force at once anyway; either way <see cref="RoutineOverridePersistenceException"/> tells the caller it would not
+    /// survive a restart.
+    /// </summary>
     private void Decide(string routineId, Func<RoutineState, RoutineState> change)
     {
+        RoutineOverridePersistenceException? notSaved = null;
         lock (_gate)
         {
             var routine = RequireRoutine(routineId);
             var state = change(GetState(routineId));
-            SaveOverride(routineId, new RoutineOverride(state.Enabled, state.AcknowledgedMonthlyCredits, routine.Enabled));
-            _states[routineId] = state;
+            var decision = new RoutineOverride(state.Enabled, state.AcknowledgedMonthlyCredits, routine.Enabled);
+            if (state.Enabled)
+            {
+                SaveOverride(routineId, decision);
+                _states[routineId] = state;
+            }
+            else
+            {
+                _states[routineId] = state;
+                try
+                {
+                    SaveOverride(routineId, decision);
+                }
+                catch (RoutineOverridePersistenceException ex)
+                {
+                    _overrides[routineId] = decision;
+                    notSaved = ex;
+                }
+            }
         }
 
         Changed?.Invoke(this, EventArgs.Empty);
+        if (notSaved is not null)
+        {
+            throw notSaved;
+        }
     }
 
     private void SetState(string routineId, RoutineState state)
@@ -245,11 +273,37 @@ public sealed class RoutineRegistry
         _overrides[routineId] = value;
     }
 
-    private void DeleteOverride(string routineId)
+    /// <summary>
+    /// For decisions the config load derives itself: if the write fails, the next start derives the same state again from
+    /// the stored decision and the config file, so the in-memory state stands.
+    /// </summary>
+    private void TrySaveOverride(string routineId, RoutineOverride value)
+    {
+        try
+        {
+            SaveOverride(routineId, value);
+        }
+        catch (RoutineOverridePersistenceException)
+        {
+            _overrides[routineId] = value;
+        }
+    }
+
+    /// <summary>
+    /// A decision left behind is re-checked against the config file's flag and the acknowledged cost whenever a routine
+    /// with that id is loaded, so failing to delete it never enables anything the file and the user did not.
+    /// </summary>
+    private void TryDeleteOverride(string routineId)
     {
         if (_overrides.Remove(routineId))
         {
-            _store?.Delete(routineId);
+            try
+            {
+                _store?.Delete(routineId);
+            }
+            catch (RoutineOverridePersistenceException)
+            {
+            }
         }
     }
 

@@ -32,7 +32,7 @@ public static class RoutineEndpoints
                 .Select(r => ToDto(r, registry, history))
                 .ToList()));
 
-        routines.MapPost("/{id}/enable", async (string id, EnableRoutineDto request, HttpContext context, RoutineRegistry registry, KillSwitch killSwitch, IAuditLog audit, CancellationToken cancellationToken) =>
+        routines.MapPost("/{id}/enable", async (string id, EnableRoutineDto request, HttpContext context, RoutineRegistry registry, KillSwitch killSwitch, IAuditLog audit) =>
         {
             if (registry.Find(id) is not { } routine)
             {
@@ -63,20 +63,35 @@ public static class RoutineEndpoints
             {
                 return Results.NotFound();
             }
+            catch (RoutineOverridePersistenceException)
+            {
+                // Fail safe: an enable that a restart would forget is not applied at all.
+                return Results.Problem($"Routine {id} was not enabled: the decision could not be saved. Try again.", statusCode: StatusCodes.Status500InternalServerError);
+            }
 
-            await AuditAsync(audit, routine, "enabled", context, $"acknowledged {request.AcknowledgedMonthlyCredits.ToString(CultureInfo.InvariantCulture)} credits/month", cancellationToken);
+            await AuditAsync(audit, routine, "enabled", context, $"acknowledged {request.AcknowledgedMonthlyCredits.ToString(CultureInfo.InvariantCulture)} credits/month");
             return Results.NoContent();
         });
 
-        routines.MapPost("/{id}/disable", async (string id, HttpContext context, RoutineRegistry registry, IAuditLog audit, CancellationToken cancellationToken) =>
+        routines.MapPost("/{id}/disable", async (string id, HttpContext context, RoutineRegistry registry, IAuditLog audit) =>
         {
             if (registry.Find(id) is not { } routine)
             {
                 return Results.NotFound();
             }
 
-            registry.Disable(id, Human(context));
-            await AuditAsync(audit, routine, "disabled", context, null, cancellationToken);
+            try
+            {
+                registry.Disable(id, Human(context));
+            }
+            catch (RoutineOverridePersistenceException)
+            {
+                // Fail safe: the routine is disabled now; only its survival across a restart is in doubt.
+                await AuditAsync(audit, routine, "disabled", context, "not saved; a restart would re-enable it");
+                return Results.Problem($"Routine {id} is disabled now, but the decision could not be saved, so a restart would re-enable it. Try again.", statusCode: StatusCodes.Status500InternalServerError);
+            }
+
+            await AuditAsync(audit, routine, "disabled", context, null);
             return Results.NoContent();
         });
 
@@ -92,7 +107,7 @@ public static class RoutineEndpoints
             return Results.Ok(new DryRunResultDto(result.Status.ToString(), result.Summary, result.Evidence?.DeniedApprovals ?? [], result.CreditsUsed));
         });
 
-        routines.MapPost("/{id}/confirm-resume", async (string id, HttpContext context, RoutineRegistry registry, RoutineAutoPauser autoPauser, KillSwitch killSwitch, IAuditLog audit, CancellationToken cancellationToken) =>
+        routines.MapPost("/{id}/confirm-resume", async (string id, HttpContext context, RoutineRegistry registry, RoutineAutoPauser autoPauser, KillSwitch killSwitch, IAuditLog audit) =>
         {
             if (registry.Find(id) is not { } routine)
             {
@@ -105,18 +120,21 @@ public static class RoutineEndpoints
             }
 
             autoPauser.ConfirmResume(id, Human(context));
-            await AuditAsync(audit, routine, "resumed", context, null, cancellationToken);
+            await AuditAsync(audit, routine, "resumed", context, null);
             return Results.NoContent();
         });
 
         return api;
     }
 
-    /// <summary>Human routine controls are audited like every other control action (FR-SAF-09).</summary>
-    private static async Task AuditAsync(IAuditLog audit, RoutineSpec routine, string decision, HttpContext context, string? note, CancellationToken cancellationToken) =>
+    /// <summary>
+    /// Human routine controls are audited like every other control action (FR-SAF-09). The action has already taken effect,
+    /// so its record is written even if the client goes away meanwhile.
+    /// </summary>
+    private static async Task AuditAsync(IAuditLog audit, RoutineSpec routine, string decision, HttpContext context, string? note) =>
         await audit.AppendAsync(
             new AuditRecord("routine_control", decision, routine.Owner.Value, Detail: $"routine {routine.Id} by {context.GetDevice().PrincipalName}{(note is null ? string.Empty : "; " + note)}"),
-            cancellationToken);
+            CancellationToken.None);
 
     private static RoutineDto ToDto(RoutineSpec routine, RoutineRegistry registry, RoutineRunHistory history)
     {
