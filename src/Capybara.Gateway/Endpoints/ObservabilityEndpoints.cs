@@ -19,7 +19,7 @@ public static class ObservabilityEndpoints
             ByRoutine = ledger.ByRoutine(),
         })).WithTags("Observability");
 
-        app.MapGet("/api/alerts", (InMemoryAlertSink alerts) => TypedResults.Ok(alerts.Recent)).WithTags("Observability");
+        app.MapGet("/api/alerts", (FileAlertSink alerts) => TypedResults.Ok(alerts.Recent)).WithTags("Observability");
 
         app.MapGet("/api/thread", (FleetThread thread) => TypedResults.Ok(thread.Entries)).WithTags("Observability");
 

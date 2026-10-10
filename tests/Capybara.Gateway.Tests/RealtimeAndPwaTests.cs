@@ -45,6 +45,7 @@ public sealed class RealtimeAndPwaTests(GatewayFactory factory) : IClassFixture<
 
         await tracker.TurnStartedAsync("ea", Ct);
         await tracker.ApprovalPendingAsync("ea", Ct);
+        await tracker.TurnCompletedAsync("ea", cancellationToken: Ct);
         await tracker.MarkReadAsync("ea", Ct);
 
         Assert.Equal(AgentActivityState.Working, events.Records[0].State);
@@ -52,26 +53,5 @@ public sealed class RealtimeAndPwaTests(GatewayFactory factory) : IClassFixture<
         Assert.Equal(1, events.Records[1].Unread);
         Assert.Equal(AgentActivityState.Idle, tracker.Get("ea").State);
         Assert.Equal(0, tracker.Get("ea").Unread);
-    }
-
-    private sealed class RecordingEvents : ICapybaraEvents
-    {
-        public List<AgentActivitySnapshot> Records { get; } = [];
-
-        public Task PublishAgentStatusChangedAsync(string agentId, AgentActivityState state, int unread, CancellationToken cancellationToken = default)
-        {
-            Records.Add(new AgentActivitySnapshot(agentId, state, unread));
-            return Task.CompletedTask;
-        }
-
-        public Task PublishThreadEntryAsync(object entry, CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-        public Task PublishApprovalRequestedAsync(object approval, CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-        public Task PublishApprovalResolvedAsync(string id, CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-        public Task PublishAlertAsync(object alert, CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-        public Task PublishKillSwitchChangedAsync(bool engaged, CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 }

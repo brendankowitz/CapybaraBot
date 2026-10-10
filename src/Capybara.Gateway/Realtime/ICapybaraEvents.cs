@@ -14,4 +14,7 @@ public interface ICapybaraEvents
     Task PublishAlertAsync(object alert, CancellationToken cancellationToken = default);
 
     Task PublishKillSwitchChangedAsync(bool engaged, CancellationToken cancellationToken = default);
+
+    /// <summary>An agent proposed a change to its own config, persona, routines or skills (FR-AGT-06).</summary>
+    Task PublishProposalAsync(object proposal, CancellationToken cancellationToken = default);
 }

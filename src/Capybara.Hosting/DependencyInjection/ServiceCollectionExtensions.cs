@@ -6,6 +6,7 @@ using Capybara.Hosting.Backup;
 using Capybara.Hosting.Storage;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Capybara.Hosting.DependencyInjection;
 
@@ -22,7 +23,7 @@ public static class ServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(options);
         var bound = configuration is null ? null : BackupConfiguration.Bind(configuration);
 
-        services.AddSingleton(TimeProvider.System);
+        services.TryAddSingleton(TimeProvider.System);
         services.AddSingleton<ICommandRunner, ProcessCommandRunner>();
         services.AddSingleton<IStateStore>(_ => new SqliteStateStore(options.StateDatabasePath));
         services.AddSingleton<IBlobStore>(_ => new FileSystemBlobStore(options.BlobRoot));

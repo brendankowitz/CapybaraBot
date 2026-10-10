@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 namespace Capybara.Gateway.Realtime;
 
 /// <summary>Tracks Working, Needs attention and Unread counts per agent for clients (FR-CLI-02).</summary>
+/// <remarks>An agent can run several turns at once (main session, tasks, isolated routine runs); it is Working while any is.</remarks>
 public sealed class AgentActivityTracker(ICapybaraEvents events)
 {
     private readonly ConcurrentDictionary<string, AgentActivity> _agents = new(StringComparer.Ordinal);
@@ -17,20 +18,19 @@ public sealed class AgentActivityTracker(ICapybaraEvents events)
         }
     }
 
-    public Task TurnStartedAsync(string agentId, CancellationToken cancellationToken = default) => UpdateAsync(agentId, static a => a.Working = true, cancellationToken);
+    public Task TurnStartedAsync(string agentId, CancellationToken cancellationToken = default) => UpdateAsync(agentId, static a => a.ActiveTurns++, cancellationToken);
 
     public Task TurnCompletedAsync(string agentId, bool needsAttention = false, CancellationToken cancellationToken = default) =>
         UpdateAsync(agentId, a =>
         {
-            a.Working = false;
-            a.NeedsAttention = needsAttention;
+            a.ActiveTurns = Math.Max(0, a.ActiveTurns - 1);
+            a.NeedsAttention |= needsAttention;
             a.Unread++;
         }, cancellationToken);
 
     public Task ApprovalPendingAsync(string agentId, CancellationToken cancellationToken = default) =>
         UpdateAsync(agentId, a =>
         {
-            a.Working = false;
             a.NeedsAttention = true;
             a.Unread++;
         }, cancellationToken);
@@ -58,15 +58,16 @@ public sealed class AgentActivityTracker(ICapybaraEvents events)
 
     private static AgentActivitySnapshot Snapshot(string agentId, AgentActivity activity)
     {
-        var state = activity.Working
-            ? AgentActivityState.Working
-            : activity.NeedsAttention ? AgentActivityState.NeedsAttention : AgentActivityState.Idle;
+        // Something waiting on the user outranks background work: it stays visible until read (FR-CLI-02).
+        var state = activity.NeedsAttention
+            ? AgentActivityState.NeedsAttention
+            : activity.ActiveTurns > 0 ? AgentActivityState.Working : AgentActivityState.Idle;
         return new AgentActivitySnapshot(agentId, state, activity.Unread);
     }
 
     private sealed class AgentActivity
     {
-        public bool Working { get; set; }
+        public int ActiveTurns { get; set; }
 
         public bool NeedsAttention { get; set; }
 
