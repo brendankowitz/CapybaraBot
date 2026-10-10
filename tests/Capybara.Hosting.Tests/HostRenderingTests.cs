@@ -19,6 +19,16 @@ public sealed class HostRenderingTests
     }
 
     [Fact]
+    public void Systemd_drop_in_allows_only_ip_ranges_not_domains()
+    {
+        var text = SystemdHost.RenderDropIn(Spec with { EgressDomains = ["github.com", "192.0.2.0/24", "2001:db8::1"] });
+
+        Assert.DoesNotContain("IPAddressAllow=github.com", text, StringComparison.Ordinal);
+        Assert.Contains("IPAddressAllow=192.0.2.0/24", text, StringComparison.Ordinal);
+        Assert.Contains("IPAddressAllow=2001:db8::1", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Podman_quadlet_contains_sandbox_hardening()
     {
         var text = PodmanHost.RenderQuadlet(Spec);

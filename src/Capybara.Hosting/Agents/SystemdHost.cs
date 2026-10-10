@@ -62,7 +62,8 @@ public sealed class SystemdHost(ICommandRunner runner, TimeProvider time) : IAge
         AgentIdValidator.Validate(spec.AgentId);
         var memory = spec.MemoryMaxBytes?.ToString(CultureInfo.InvariantCulture) ?? "1G";
         var cpu = string.IsNullOrWhiteSpace(spec.CpuQuota) ? "100%" : spec.CpuQuota;
-        var allows = spec.EgressDomains.Count == 0 ? string.Empty : string.Join(Environment.NewLine, spec.EgressDomains.Select(d => $"IPAddressAllow={d}"));
+        // systemd IPAddressAllow takes addresses/CIDRs only; domain allowlists are enforced by the srt proxy (FR-SAF-07), not here.
+        var allows = string.Join(Environment.NewLine, spec.EgressDomains.Where(IsIpOrCidr).Select(a => $"IPAddressAllow={a}"));
         return $$"""
             [Service]
             Environment=CAPYBARA_AGENT_ID={{spec.AgentId}}
@@ -82,6 +83,9 @@ public sealed class SystemdHost(ICommandRunner runner, TimeProvider time) : IAge
             LockPersonality=yes
             """;
     }
+
+    private static bool IsIpOrCidr(string value) =>
+        System.Net.IPAddress.TryParse(value, out _) || System.Net.IPNetwork.TryParse(value, out _);
 
     private static string UnitName(string agentId) => $"capybara-agent@{agentId}.service";
 }
