@@ -122,12 +122,12 @@ public sealed class CapybaraSession
         public static CustomTools None { get; } = new(new HashSet<string>(), new HashSet<string>());
     }
 
-    /// <summary>Starts a fresh <see cref="Turn"/> record and returns it.</summary>
-    public SessionTurnLog BeginTurn()
+    /// <summary>Starts a fresh <see cref="Turn"/> record, optionally with a per-turn credit limit, and returns it.</summary>
+    public SessionTurnLog BeginTurn(decimal? creditLimit = null)
     {
         lock (_gate)
         {
-            _turn = new SessionTurnLog();
+            _turn = new SessionTurnLog(creditLimit);
             return _turn;
         }
     }

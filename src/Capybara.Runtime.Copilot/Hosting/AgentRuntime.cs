@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Capybara.Contracts.Agents;
 using Capybara.Contracts.Messaging;
+using Capybara.Observability.Alerts;
 using Capybara.Observability.Cost;
 using Capybara.Orchestration.Coordination;
 using Capybara.Orchestration.Envelopes;
@@ -35,6 +36,9 @@ namespace Capybara.Runtime.Copilot.Hosting;
 /// </remarks>
 public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, ISessionEventHistory
 {
+    /// <summary>Alert raised when a turn overspends its own credit limit and is stopped.</summary>
+    public const string LimitAlertKind = "runtime.turn_over_budget";
+
     private const int MainTurnToolCalls = 200;
     private const string ImmediateMode = "immediate";
 
@@ -47,6 +51,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     private readonly TaintTracker _taint;
     private readonly PermissionAllowances _allowances;
     private readonly TurnMemory _memory;
+    private readonly IAlertSink _alerts;
     private readonly TimeProvider _time;
     private readonly ILogger<AgentRuntime> _logger;
     private readonly SemaphoreSlim _mainLock = new(1, 1);
@@ -71,6 +76,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         TaintTracker taint,
         PermissionAllowances allowances,
         TurnMemory memory,
+        IAlertSink alerts,
         TimeProvider time,
         ILogger<AgentRuntime> logger)
     {
@@ -84,6 +90,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         _taint = taint;
         _allowances = allowances;
         _memory = memory;
+        _alerts = alerts;
         _time = time;
         _logger = logger;
         _model = agent.Model;
@@ -183,6 +190,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         }
 
         await turn.Session.SendAsync(new MessageOptions { Prompt = prompt, Source = SourceFor(origin, null), Mode = ImmediateMode }, cancellationToken);
+        Interlocked.Increment(ref turn.Joined);
         LogSteered(_logger, _agent.Id.Value);
         return await turn.Done.Task.WaitAsync(cancellationToken);
     }
@@ -345,7 +353,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
             context.TurnOrigin = request.Origin;
             context.RoutineId = request.RoutineId;
             context.DryRun = request.DryRun;
-            var turn = context.BeginTurn();
+            var turn = context.BeginTurn(request.Budget?.Credits);
             _taint.Apply(context.SessionId, request.Taint);
 
             if (request.Model is { } model && model != context.Model)
@@ -355,7 +363,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
             }
 
             var prompt = await _memory.PrepareAsync(context, request.Prompt, cancellationToken);
-            var inFlight = new InFlightTurn(session, Steerable: !request.DryRun);
+            var inFlight = new InFlightTurn(session, steerable: !request.DryRun);
             lock (_turnGate)
             {
                 _mainTurn = inFlight;
@@ -364,8 +372,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
             TurnResult? result = null;
             try
             {
-                var reply = await SendAsync(session, prompt, SourceFor(request.Origin, request.From), cancellationToken);
-                result = TurnResult.Completed(reply, turn.Snapshot());
+                result = await SendTurnAsync(session, turn, prompt, SourceFor(request.Origin, request.From), DropMainSessionAsync, cancellationToken);
             }
             finally
             {
@@ -375,10 +382,16 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
                 }
 
                 // Messages steered into this turn share its outcome.
-                inFlight.Done.TrySetResult(result ?? TurnResult.Failed("the turn did not complete", turn.Snapshot()));
+                result = (result ?? TurnResult.Failed("the turn did not complete", turn.Snapshot()))
+                    with { RoutineId = request.RoutineId, UserMessagesJoined = Volatile.Read(ref inFlight.Joined) };
+                inFlight.Done.TrySetResult(result);
             }
 
-            await _memory.IngestAsync(context, request.Prompt, result.Content, cancellationToken);
+            if (result.Success)
+            {
+                await _memory.IngestAsync(context, request.Prompt, result.Content, cancellationToken);
+            }
+
             return result;
         }
         finally
@@ -397,7 +410,14 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     /// <summary>A per-turn model override (a routine's model) does not outlive its turn.</summary>
     private async Task RestoreModelAsync(CopilotSession? session, CapybaraSession context)
     {
-        if (session is null || context.Model == _model)
+        if (session is null || !ReferenceEquals(session, _main))
+        {
+            // Discarded: the rebuilt session is configured from the context, so it must carry the agent's model.
+            context.Model = _model;
+            return;
+        }
+
+        if (context.Model == _model)
         {
             return;
         }
@@ -433,7 +453,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
                 DryRun = request.DryRun,
                 Model = request.Model ?? _model,
             };
-            var turn = context.BeginTurn();
+            var turn = context.BeginTurn(target.Task?.Envelope.Budget.Credits ?? request.Budget?.Credits);
             _taint.Apply(sessionId, envelope.Taint);
             _taint.Apply(sessionId, request.Taint);
 
@@ -441,9 +461,13 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
             try
             {
                 var prompt = await _memory.PrepareAsync(context, request.Prompt, cancellationToken);
-                var reply = await SendAsync(session, prompt, SourceFor(request.Origin, request.From), cancellationToken);
-                await _memory.IngestAsync(context, request.Prompt, reply, cancellationToken);
-                return TurnResult.Completed(reply, turn.Snapshot());
+                var result = await SendTurnAsync(session, turn, prompt, SourceFor(request.Origin, request.From), () => DeleteQuietlyAsync(sessionId), cancellationToken);
+                if (result.Success)
+                {
+                    await _memory.IngestAsync(context, request.Prompt, result.Content, cancellationToken);
+                }
+
+                return result with { RoutineId = request.RoutineId };
             }
             finally
             {
@@ -457,11 +481,102 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         }
     }
 
-    private async Task<string?> SendAsync(CopilotSession session, string prompt, MessageSource source, CancellationToken cancellationToken)
+    /// <summary>
+    /// Sends one turn, stopped by the caller, the fleet kill switch, the turn timeout or the turn's own credit limit.
+    /// Whatever stops it, the run is aborted before this returns (<see cref="TurnSender"/>), so the caller's context and
+    /// locks are only reset once nothing runs any more; if the abort fails, <paramref name="discardSession"/> throws the
+    /// session away. Only cancellation by the caller propagates.
+    /// </summary>
+    private async Task<TurnResult> SendTurnAsync(CopilotSession session, SessionTurnLog turn, string prompt, MessageSource source, Func<Task> discardSession, CancellationToken cancellationToken)
     {
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _killSwitch.FleetToken);
-        var reply = await session.SendAndWaitAsync(new MessageOptions { Prompt = prompt, Source = source }, _options.TurnTimeout, linked.Token);
-        return reply?.Data?.Content;
+        using var overLimit = new CancellationTokenSource();
+
+        // Off the SDK's event thread: cancelling runs the send's cancellation callbacks.
+        using var limitHook = turn.OnLimitExceeded(() => _ = Task.Run(() => TryCancel(overLimit)));
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _killSwitch.FleetToken, overLimit.Token);
+        try
+        {
+            var reply = await TurnSender.SendAsync(new CopilotTurnSession(session), new MessageOptions { Prompt = prompt, Source = source }, _options.TurnTimeout, _options.AbortTimeout, linked.Token);
+            return TurnResult.Completed(reply, turn.Snapshot());
+        }
+        catch (TurnAbortFailedException ex)
+        {
+            LogAbortFailed(_logger, ex.AbortFailure, _agent.Id.Value);
+            await discardSession();
+            cancellationToken.ThrowIfCancellationRequested();
+            return await InterruptedAsync(ex.InnerException, turn);
+        }
+#pragma warning disable CA1031 // The run is already aborted; the failure becomes a result.
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+#pragma warning restore CA1031
+        {
+            return await InterruptedAsync(ex, turn);
+        }
+    }
+
+    private async Task<TurnResult> InterruptedAsync(Exception? cause, SessionTurnLog turn)
+    {
+        var evidence = turn.Snapshot();
+        if (turn.LimitExceeded)
+        {
+            var message = $"A turn of {_agent.Id} spent {evidence.Credits:0.##} credits, over its limit of {turn.CreditLimit:0.##}, and was stopped.";
+            LogLimitExceeded(_logger, _agent.Id.Value, evidence.Credits, turn.CreditLimit);
+            await PublishAsync(new Alert(LimitAlertKind, AlertSeverity.Warning, message, _time.GetUtcNow(), _agent.Id.Value));
+            return TurnResult.LimitExceeded(message, evidence);
+        }
+
+        if (_killSwitch.IsBlocked(_agent.Id))
+        {
+            return TurnResult.Blocked("the kill switch stopped the turn", evidence);
+        }
+
+        LogTurnInterrupted(_logger, cause, _agent.Id.Value);
+        return TurnResult.Failed(cause is null ? "the turn failed" : $"{cause.GetType().Name}: {cause.Message}", evidence);
+    }
+
+    private async Task PublishAsync(Alert alert)
+    {
+        try
+        {
+            await _alerts.PublishAsync(alert, CancellationToken.None);
+        }
+#pragma warning disable CA1031 // The turn is already stopped; a failed alert must not turn that into a crash.
+        catch (Exception ex)
+#pragma warning restore CA1031
+        {
+            LogAlertFailed(_logger, ex, _agent.Id.Value);
+        }
+    }
+
+    private static void TryCancel(CancellationTokenSource source)
+    {
+        try
+        {
+            source.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The turn already ended.
+        }
+    }
+
+    private async Task DeleteQuietlyAsync(string sessionId)
+    {
+        if (_client is not { } client)
+        {
+            return;
+        }
+
+        try
+        {
+            await client.DeleteSessionAsync(sessionId, CancellationToken.None);
+        }
+#pragma warning disable CA1031 // Best effort: the next turn creates the session afresh either way.
+        catch (Exception ex)
+#pragma warning restore CA1031
+        {
+            LogDeleteSkipped(_logger, sessionId, ex.Message);
+        }
     }
 
     private async Task StartCoreAsync(CancellationToken cancellationToken)
@@ -533,8 +648,15 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     }
 
     /// <summary>A main-session turn in flight; user DMs may be steered into it unless it is a dry run.</summary>
-    private sealed record InFlightTurn(CopilotSession Session, bool Steerable)
+    private sealed class InFlightTurn(CopilotSession session, bool steerable)
     {
+        /// <summary>User DMs steered into the turn.</summary>
+        public int Joined;
+
+        public CopilotSession Session { get; } = session;
+
+        public bool Steerable { get; } = steerable;
+
         public TaskCompletionSource<TurnResult> Done { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
@@ -565,6 +687,18 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Session {SessionId} was not deleted: {Reason}")]
     private static partial void LogDeleteSkipped(ILogger logger, string sessionId, string reason);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "A stopped turn of {Agent} could not be aborted; its session is discarded")]
+    private static partial void LogAbortFailed(ILogger logger, Exception? exception, string agent);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "A turn of {Agent} spent {Credits} credits, over its limit of {Limit}; stopped")]
+    private static partial void LogLimitExceeded(ILogger logger, string agent, decimal credits, decimal? limit);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "A turn of {Agent} was interrupted and aborted")]
+    private static partial void LogTurnInterrupted(ILogger logger, Exception? exception, string agent);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Could not publish an alert for {Agent}")]
+    private static partial void LogAlertFailed(ILogger logger, Exception exception, string agent);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Could not restore the model of {Agent} after a per-turn override; the main session will be rebuilt")]
     private static partial void LogModelRestoreFailed(ILogger logger, Exception exception, string agent);

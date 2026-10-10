@@ -127,6 +127,7 @@ public static class CopilotRuntimeServiceCollectionExtensions
         sp.GetRequiredService<TaintTracker>(),
         sp.GetRequiredService<PermissionAllowances>(),
         sp.GetRequiredService<TurnMemory>(),
+        sp.GetRequiredService<Capybara.Observability.Alerts.IAlertSink>(),
         sp.GetRequiredService<TimeProvider>(),
         sp.GetRequiredService<ILogger<AgentRuntime>>());
 }

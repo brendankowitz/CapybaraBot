@@ -83,6 +83,22 @@ public sealed class InboxPumpTests
     }
 
     [Fact]
+    public async Task A_turn_stopped_at_its_credit_limit_is_acknowledged_not_retried()
+    {
+        using var f = Fleet();
+        var runtime = new FakeAgentRuntime(Ea.Id) { Turn = (_, _) => Task.FromResult(TurnResult.LimitExceeded("over", TurnEvidence.Empty)) };
+        await f.Inbox.EnqueueAsync(Message(Ea.Id, "expensive"), Ct);
+
+        await RunningAsync(Pump(f, runtime), async () =>
+        {
+            await Eventually.TrueAsync(async () => await f.Inbox.CountAsync(Ea.Id, Ct) == 0, "acknowledged");
+            return 0;
+        });
+
+        Assert.Single(runtime.Requests);
+    }
+
+    [Fact]
     public async Task A_failed_turn_keeps_the_message_and_retries_it()
     {
         using var f = Fleet();

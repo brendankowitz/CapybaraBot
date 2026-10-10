@@ -11,9 +11,10 @@ namespace Capybara.Runtime.Copilot.Usage;
 /// (FR-OBS-02, FR-OBS-03), and into the session's turn record for per-run credits and model attribution.
 /// </summary>
 /// <remarks>
-/// A routine run's usage is not written to the ledger here: the executor returns the run's credits and model, and the
-/// routine dispatcher records them exactly once (otherwise every routine credit would be counted twice). The run is
-/// bounded meanwhile by its per-run budget, passed to the SDK as <c>SessionLimits.MaxAiCredits</c>.
+/// Every turn's usage, routine runs included, is written to the ledger as it happens, attributed to its routine, so the
+/// hard stop sees spend during a run. The routine executor reports the same credits back with
+/// <c>CreditsLedgered</c> set, and the dispatcher keeps them for history without recording them again. The turn record
+/// also enforces the turn's own credit limit (a routine's per-run budget), which lets the runtime abort an overspending run.
 /// </remarks>
 public sealed partial class UsageCapture(CostLedger ledger, TimeProvider time, ILogger<UsageCapture> logger)
 {
@@ -48,11 +49,8 @@ public sealed partial class UsageCapture(CostLedger ledger, TimeProvider time, I
             return;
         }
 
+        _ = RecordAsync(record);
         session.Turn.RecordUsage(record.Model, record.Credits);
-        if (session.RoutineId is null)
-        {
-            _ = RecordAsync(record);
-        }
     }
 
     /// <summary>

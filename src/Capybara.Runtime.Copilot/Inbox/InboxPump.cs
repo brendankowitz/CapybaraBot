@@ -190,7 +190,9 @@ public sealed partial class InboxPump
 
         switch (result.Status)
         {
-            case TurnStatus.Completed:
+            case TurnStatus.Completed or TurnStatus.LimitExceeded:
+                // A turn stopped at its own credit limit was handled as far as its budget allowed; rerunning it would
+                // only overspend again.
                 // The turn is persisted: only now may the messages leave the inbox (NFR-02).
                 await _inbox.AcknowledgeAsync(Agent, message.Id, CancellationToken.None);
                 foreach (var dm in steered)
@@ -203,7 +205,7 @@ public sealed partial class InboxPump
                 Raise(new InboxTurnCompletedEventArgs(Agent, message, result, steered));
                 break;
 
-            case TurnStatus.Blocked or TurnStatus.OverBudget:
+            case TurnStatus.Blocked or TurnStatus.OverBudget or TurnStatus.Throttled:
                 LogBlocked(_logger, Agent.Value, result.Error);
                 Defer(message.Id, _options.BlockedPollInterval);
                 break;

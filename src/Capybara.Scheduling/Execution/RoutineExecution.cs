@@ -60,12 +60,18 @@ public sealed record RoutineInvocation(
     SessionTarget SessionTarget);
 
 /// <summary>Result contract returned by routine executors (FR-RTN-05, FR-OBS-06).</summary>
+/// <remarks>
+/// <c>CreditsLedgered</c> means the executor already wrote <c>CreditsUsed</c> to the cost ledger as it was spent (so the
+/// hard stop saw it during the run); the dispatcher then keeps the credits for history only and must not record them
+/// again. Otherwise the dispatcher records them once.
+/// </remarks>
 public sealed record RoutineExecutionResult(
     RoutineExecutionStatus Status,
     string? Summary = null,
     RoutineEvidence? Evidence = null,
     decimal CreditsUsed = 0,
-    string? Model = null);
+    string? Model = null,
+    bool CreditsLedgered = false);
 
 /// <summary>
 /// Executes one routine invocation inside the agent runtime (FR-RTN-01). Implemented by the runtime project (WP9).

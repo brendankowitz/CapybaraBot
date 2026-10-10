@@ -187,10 +187,11 @@ public sealed class RoutineDispatcher : IDisposable
             return result;
         }
 
-        // Credits were really spent, so the ledger comes first: nothing in the history path may lose them.
+        // Credits were really spent, so the ledger comes first: nothing in the history path may lose them. An executor
+        // that ledgered them live says so, and they are not counted twice.
         try
         {
-            if (result.CreditsUsed > 0)
+            if (result.CreditsUsed > 0 && !result.CreditsLedgered)
             {
                 await _costLedger.RecordAsync(new UsageRecord(routine.Owner, result.Model ?? routine.Model, result.CreditsUsed, _time.GetUtcNow(), RoutineId: routine.Id), cancellationToken);
             }

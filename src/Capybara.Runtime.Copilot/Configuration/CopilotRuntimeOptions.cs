@@ -98,6 +98,12 @@ public sealed class CopilotRuntimeOptions
     public TimeSpan TurnTimeout { get; set; } = TimeSpan.FromMinutes(20);
 
     /// <summary>
+    /// How long a stopped turn's abort may take to reach idle. Past it the session is discarded and rebuilt, so no run
+    /// outlives its turn.
+    /// </summary>
+    public TimeSpan AbortTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
     /// How long the post-start self-test waits for the runtime to report its tools (they are null until tools
     /// initialize). Running out fails the self-test, which pauses the agent (fail closed, FR-AGT-09).
     /// </summary>

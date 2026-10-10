@@ -17,8 +17,10 @@ namespace Capybara.Runtime.Copilot.Hosting;
 /// model (FR-OBS-03) and its evidence (FR-OBS-06).
 /// </summary>
 /// <remarks>
-/// Credits are reported here and written to the ledger once by the dispatcher; the runtime does not also record a
-/// routine turn's usage (see <see cref="Usage.UsageCapture"/>).
+/// The run's usage is written to the cost ledger live by <see cref="Usage.UsageCapture"/> (so the hard stop sees it);
+/// the result reports the same credits with <c>CreditsLedgered</c> set, so the dispatcher does not record them again.
+/// The routine's per-run budget is the turn's credit limit: a run that passes it is aborted and reported as
+/// <see cref="RoutineExecutionStatus.OverBudget"/>.
 /// </remarks>
 public sealed partial class CopilotRoutineExecutor(AgentRuntimePool runtimes, CopilotRuntimeOptions options, ILogger<CopilotRoutineExecutor> logger) : IRoutineExecutor
 {
@@ -68,7 +70,8 @@ public sealed partial class CopilotRoutineExecutor(AgentRuntimePool runtimes, Co
         var status = result.Status switch
         {
             TurnStatus.Blocked => RoutineExecutionStatus.Refused,
-            TurnStatus.OverBudget => RoutineExecutionStatus.OverBudget,
+            TurnStatus.OverBudget or TurnStatus.LimitExceeded => RoutineExecutionStatus.OverBudget,
+            TurnStatus.Throttled => RoutineExecutionStatus.Skipped,
             TurnStatus.Failed => RoutineExecutionStatus.Failed,
             _ when invocation.TriggerKind == RoutineTriggerKind.Heartbeat && IsSilent(result.Content) => RoutineExecutionStatus.NothingToReport,
             _ => RoutineExecutionStatus.Succeeded,
@@ -84,7 +87,8 @@ public sealed partial class CopilotRoutineExecutor(AgentRuntimePool runtimes, Co
             Summarize(result),
             new RoutineEvidence(evidence.Sources, evidence.ActionLog, Unverified(result.Content), evidence.DeniedApprovals),
             evidence.Credits,
-            evidence.Model ?? invocation.ModelTier);
+            evidence.Model ?? invocation.ModelTier,
+            CreditsLedgered: true);
     }
 
     /// <summary>The routine's instructions, plus an event payload as untrusted, delimited data (FR-RTN-07).</summary>
