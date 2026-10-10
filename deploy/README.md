@@ -30,10 +30,14 @@ are wired separately from the deploy artifacts, and until they are the units do 
 ### Units that launch srt are relaxed on purpose
 
 srt sandboxes with bubblewrap on Linux, which needs unprivileged user/mount/pid namespaces, `mount`/`pivot_root`/`capset`, and a fresh
-`/proc` mount. So `capybarad.service` and `capybara-agent@.service` use `RestrictNamespaces=user mnt pid net ipc uts`, allow `@mount` and a
-few privileged syscalls in `SystemCallFilter`, and drop `ProtectProc`, `ProcSubset` and `ProtectKernelTunables` (they overmount `/proc`,
-which makes bubblewrap's own `/proc` mount fail). All other hardening is kept. `capybara-broker.service` and `capybara-backup.service`
-launch no sandbox and keep the strict settings.
+`/proc` mount. So `capybarad.service` and `capybara-agent@.service` relax exactly these, and nothing else:
+
+- `RestrictNamespaces=user mnt pid net ipc uts` (instead of `yes`);
+- `SystemCallFilter` adds `@mount`, plus `capset` and `pivot_root` re-allowed from `@privileged` (add others only if the host test below fails);
+- `RestrictAddressFamilies` adds `AF_NETLINK` (bwrap's `--unshare-net` brings up loopback over a `NETLINK_ROUTE` socket);
+- `ProtectProc`, `ProcSubset` and `ProtectKernelTunables` are dropped (they overmount `/proc`, which makes bubblewrap's own `/proc` mount fail).
+
+All other hardening is kept. `capybara-broker.service` and `capybara-backup.service` launch no sandbox and keep the strict settings.
 
 **This has not been verified on a real host.** Before relying on it, on the target machine run as the service user:
 `srt --settings <generated file> -- true`, and check `journalctl -u capybarad` for `bwrap` / `seccomp` denials. Also check that
@@ -50,8 +54,10 @@ the fallback is rootless Podman (`quadlet/capybara-sandbox@.container`).
   else. The settings file itself is in `denyWrite` (which wins over `allowWrite`), and the planner refuses a `SettingsDirectory` that
   lies inside a path the agent can write.
 - **Reads are allowed everywhere unless denied** (the opposite of writes). So `filesystem.denyRead` lists
-  `AgentSandboxOptions.DenyRead`: by default the state root (`/var/lib/capybara`, which holds every agent's `COPILOT_HOME`, the memory
-  repo and the state databases), `/etc/capybara`, `/run/credentials` and `$CREDENTIALS_DIRECTORY`. The agent's own workspace and
+  `AgentSandboxOptions.DenyRead`, which has no default: build it with `AgentSandboxOptions.FromHosting(hostingOptions, ...)` so it follows
+  the configured state root (which holds every agent's `COPILOT_HOME`, the memory repo and the state databases), plus `/etc/capybara`,
+  `/run/credentials` and `$CREDENTIALS_DIRECTORY`. `PlanAsync` fails closed: it throws if an agent's workspace or `COPILOT_HOME` is not
+  under a denied path, since the agent's neighbours would then be readable. The agent's own workspace and
   `COPILOT_HOME` are re-opened with `filesystem.allowRead`, which srt gives precedence over `denyRead`. Anything outside those paths
   (for example `/usr`, `/opt`, `/home`) stays readable; add it to `DenyRead` if it must not be. Install the Copilot CLI outside the state
   root so it stays readable inside the sandbox.

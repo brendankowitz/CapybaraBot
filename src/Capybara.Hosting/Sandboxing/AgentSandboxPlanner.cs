@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using Capybara.Contracts.Agents;
 using Capybara.Hosting.Agents;
+using Capybara.Hosting.DependencyInjection;
 
 namespace Capybara.Hosting.Sandboxing;
 
@@ -14,22 +15,34 @@ namespace Capybara.Hosting.Sandboxing;
 /// Directory receiving <c>{agentId}.srt.json</c>; created on demand. It must not lie under an agent's workspace or BaseDirectory,
 /// otherwise the agent could rewrite its own policy.
 /// </param>
-public sealed record AgentSandboxOptions(string SrtPath, string CopilotCliPath, string SettingsDirectory)
+/// <param name="DenyRead">
+/// Paths hidden from every sandboxed agent. srt allows reads everywhere unless denied, so this is what keeps an agent away from
+/// other agents' COPILOT_HOMEs, the memory repo and state databases (all under the state root), the configuration and the decrypted
+/// credentials. There is deliberately no default: a hard-coded state root would silently lose isolation when the state root is relocated.
+/// Build it with <see cref="FromHosting"/> or <see cref="DefaultDenyRead"/>. An agent's own workspace and BaseDirectory are re-allowed per agent,
+/// and <see cref="AgentSandboxPlanner.PlanAsync"/> refuses agents whose directories are not under a denied path.
+/// </param>
+public sealed record AgentSandboxOptions(string SrtPath, string CopilotCliPath, string SettingsDirectory, IReadOnlyList<string> DenyRead)
 {
     /// <summary>
-    /// Paths hidden from every sandboxed agent. srt allows reads everywhere unless denied, so this is what keeps an agent away from
-    /// other agents' COPILOT_HOMEs, the memory repo and state databases (all under the state root), the configuration and the decrypted credentials.
-    /// An agent's own workspace and BaseDirectory are re-allowed per agent. Defaults to <see cref="DefaultDenyRead"/>.
+    /// Options whose read denials follow <paramref name="hosting"/>'s state root, so they stay correct when it is relocated.
+    /// <paramref name="settingsDirectory"/> should sit under the state root but outside every agent directory (for example <c>{StateRoot}/srt</c>).
     /// </summary>
-    public IReadOnlyList<string> DenyRead { get; init; } = DefaultDenyRead();
+    public static AgentSandboxOptions FromHosting(HostingOptions hosting, string srtPath, string copilotCliPath, string settingsDirectory, string configRoot = "/etc/capybara", string? credentialsDirectory = null)
+    {
+        ArgumentNullException.ThrowIfNull(hosting);
+        return new AgentSandboxOptions(srtPath, copilotCliPath, settingsDirectory, DefaultDenyRead(hosting.StateRoot, configRoot, credentialsDirectory));
+    }
 
     /// <summary>
-    /// The state root (<c>/var/lib/capybara</c> unless given), <c>/etc/capybara</c>, <c>/run/credentials</c> (systemd <c>LoadCredential</c> output)
-    /// and <c>$CREDENTIALS_DIRECTORY</c> when it is set.
+    /// <paramref name="stateRoot"/>, <paramref name="configRoot"/>, <c>/run/credentials</c> (systemd <c>LoadCredential</c> output) and
+    /// <paramref name="credentialsDirectory"/> (default <c>$CREDENTIALS_DIRECTORY</c>) when set.
     /// </summary>
-    public static IReadOnlyList<string> DefaultDenyRead(string stateRoot = "/var/lib/capybara", string? credentialsDirectory = null)
+    public static IReadOnlyList<string> DefaultDenyRead(string stateRoot, string configRoot = "/etc/capybara", string? credentialsDirectory = null)
     {
-        var paths = new List<string> { stateRoot, "/etc/capybara", "/run/credentials" };
+        ArgumentException.ThrowIfNullOrWhiteSpace(stateRoot);
+        ArgumentException.ThrowIfNullOrWhiteSpace(configRoot);
+        var paths = new List<string> { stateRoot, configRoot, "/run/credentials" };
         var credentials = credentialsDirectory ?? Environment.GetEnvironmentVariable("CREDENTIALS_DIRECTORY");
         if (!string.IsNullOrEmpty(credentials))
         {
@@ -64,7 +77,8 @@ public sealed partial class AgentSandboxPlanner(AgentSandboxOptions options)
     /// <param name="copilotArgs">Arguments passed to the Copilot CLI after its path.</param>
     /// <param name="cancellationToken">Cancels writing the settings file.</param>
     /// <exception cref="ArgumentException">
-    /// The agent id, a directory or an egress domain is invalid, or the settings directory lies inside a path the agent can write.
+    /// The agent id, a directory or an egress domain is invalid; an agent directory is not under any <see cref="AgentSandboxOptions.DenyRead"/> path;
+    /// or the settings directory lies inside a path the agent can write.
     /// </exception>
     public async Task<AgentSandboxPlan> PlanAsync(
         AgentDefinition agent,
@@ -80,12 +94,19 @@ public sealed partial class AgentSandboxPlanner(AgentSandboxOptions options)
         AgentIdValidator.Validate(agentId);
 
         var settingsDirectory = Path.GetFullPath(options.SettingsDirectory);
+        var denyRead = options.DenyRead.Select(Path.GetFullPath).ToArray();
         string[] own = [.. new[] { Path.GetFullPath(workspaceDirectory), Path.GetFullPath(baseDirectory) }.Distinct(StringComparer.Ordinal)];
-        foreach (var writable in own)
+        foreach (var directory in own)
         {
-            if (IsSameOrInside(settingsDirectory, writable))
+            // Fail closed: srt reads are allowed unless denied, so an agent directory outside every denied path means its neighbours are readable.
+            if (!denyRead.Any(denied => IsSameOrInside(directory, denied)))
             {
-                throw new ArgumentException($"Sandbox settings directory '{settingsDirectory}' lies inside '{writable}', which agent '{agentId}' can write; the agent could rewrite its own policy.");
+                throw new ArgumentException($"Agent '{agentId}' directory '{directory}' is not under any read-denied path ({string.Join(", ", denyRead)}); the sandbox would not isolate it from other agents. Set AgentSandboxOptions.DenyRead from the state root (AgentSandboxOptions.FromHosting).");
+            }
+
+            if (IsSameOrInside(settingsDirectory, directory))
+            {
+                throw new ArgumentException($"Sandbox settings directory '{settingsDirectory}' lies inside '{directory}', which agent '{agentId}' can write; the agent could rewrite its own policy.");
             }
         }
 
@@ -94,7 +115,7 @@ public sealed partial class AgentSandboxPlanner(AgentSandboxOptions options)
             agentId,
             NormalizeDomains(agent.EgressDomains),
             WriteAllowlist: own,
-            DenyRead: [.. options.DenyRead.Select(Path.GetFullPath)],
+            DenyRead: denyRead,
             AllowRead: own,
             DenyWrite: [settingsPath]);
 

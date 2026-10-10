@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Capybara.Hosting.DependencyInjection;
 using Capybara.Hosting.Sandboxing;
 using Capybara.Testing;
 
@@ -8,7 +9,10 @@ public sealed class AgentSandboxPlannerTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
-    private static AgentSandboxOptions Options(string settingsDir) => new("/usr/bin/srt", "/opt/copilot/copilot", settingsDir);
+    // Every TempDirectory lives under this root, so it stands in for the (relocatable) state root.
+    private static readonly string TestStateRoot = Path.Combine(Path.GetTempPath(), "capybara-tests");
+
+    private static AgentSandboxOptions Options(string settingsDir) => new("/usr/bin/srt", "/opt/copilot/copilot", settingsDir, [TestStateRoot]);
 
     [Fact]
     public async Task Plan_writes_srt_settings_from_egress_domains_and_write_allowlist()
@@ -99,7 +103,7 @@ public sealed class AgentSandboxPlannerTests
         using var temp = new TempDirectory();
         var baseDir = Path.Combine(temp.Path, "agents", "code", "copilot");
         var workspace = Path.Combine(temp.Path, "agents", "code", "workspace");
-        var options = Options(Path.Combine(temp.Path, "srt")) with { DenyRead = AgentSandboxOptions.DefaultDenyRead(temp.Path, "/run/credentials/capybarad.service") };
+        var options = Options(Path.Combine(temp.Path, "srt")) with { DenyRead = AgentSandboxOptions.DefaultDenyRead(temp.Path, "/etc/capybara", "/run/credentials/capybarad.service") };
 
         var plan = await new AgentSandboxPlanner(options).PlanAsync(TestAgents.Create("code"), baseDir, workspace, cancellationToken: Ct);
 
@@ -114,12 +118,63 @@ public sealed class AgentSandboxPlannerTests
     [Fact]
     public void Default_deny_read_covers_state_root_config_and_credentials()
     {
-        var defaults = AgentSandboxOptions.DefaultDenyRead();
+        var defaults = AgentSandboxOptions.DefaultDenyRead("/srv/capybara");
 
-        Assert.Contains("/var/lib/capybara", defaults);
+        Assert.Contains("/srv/capybara", defaults);
+        Assert.DoesNotContain("/var/lib/capybara", defaults);
         Assert.Contains("/etc/capybara", defaults);
         Assert.Contains("/run/credentials", defaults);
-        Assert.Contains("/run/credentials/capybarad.service", AgentSandboxOptions.DefaultDenyRead(credentialsDirectory: "/run/credentials/capybarad.service"));
+        Assert.Contains("/run/credentials/capybarad.service", AgentSandboxOptions.DefaultDenyRead("/srv/capybara", credentialsDirectory: "/run/credentials/capybarad.service"));
+    }
+
+    [Fact]
+    public void FromHosting_follows_a_relocated_state_root()
+    {
+        var options = AgentSandboxOptions.FromHosting(new HostingOptions { StateRoot = "/srv/capybara" }, "/usr/bin/srt", "/opt/copilot/copilot", "/srv/capybara/srt");
+
+        Assert.Contains("/srv/capybara", options.DenyRead);
+        Assert.DoesNotContain("/var/lib/capybara", options.DenyRead);
+        Assert.Equal("/srv/capybara/srt", options.SettingsDirectory);
+    }
+
+    [Fact]
+    public async Task Agent_directories_outside_every_denied_path_are_rejected_fail_closed()
+    {
+        using var temp = new TempDirectory();
+        var relocated = AgentSandboxOptions.FromHosting(new HostingOptions { StateRoot = Path.Combine(temp.Path, "old-root") }, "/usr/bin/srt", "/opt/copilot/copilot", Path.Combine(temp.Path, "srt"));
+        var planner = new AgentSandboxPlanner(relocated);
+
+        // The agent lives under a state root that DenyRead does not cover (the classic relocated-StateRoot mistake).
+        var ex = await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await planner.PlanAsync(TestAgents.Create("code"), Path.Combine(temp.Path, "new-root", "agents", "code", "copilot"), Path.Combine(temp.Path, "new-root", "agents", "code", "workspace"), cancellationToken: Ct));
+        Assert.Contains("read-denied", ex.Message, StringComparison.Ordinal);
+        Assert.False(File.Exists(Path.Combine(temp.Path, "srt", "code.srt.json")));
+    }
+
+    [Theory]
+    [InlineData("old-root-evil/copilot", "old-root/ws")]
+    [InlineData("old-root/copilot", "elsewhere/ws")]
+    public async Task Rejection_applies_to_each_agent_directory_and_does_not_prefix_match(string baseRelative, string workspaceRelative)
+    {
+        using var temp = new TempDirectory();
+        var denied = Path.Combine(temp.Path, "old-root");
+        var planner = new AgentSandboxPlanner(new AgentSandboxOptions("/usr/bin/srt", "/opt/copilot/copilot", Path.Combine(temp.Path, "srt"), [denied]));
+
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await planner.PlanAsync(TestAgents.Create("code"), Path.Combine(temp.Path, baseRelative), Path.Combine(temp.Path, workspaceRelative), cancellationToken: Ct));
+    }
+
+    [Fact]
+    public async Task Agent_directories_under_a_relocated_state_root_are_accepted()
+    {
+        using var temp = new TempDirectory();
+        var root = Path.Combine(temp.Path, "srv");
+        var options = AgentSandboxOptions.FromHosting(new HostingOptions { StateRoot = root }, "/usr/bin/srt", "/opt/copilot/copilot", Path.Combine(root, "srt"));
+
+        var plan = await new AgentSandboxPlanner(options).PlanAsync(TestAgents.Create("code"), Path.Combine(root, "agents", "code", "copilot"), Path.Combine(root, "agents", "code", "workspace"), cancellationToken: Ct);
+
+        using var json = JsonDocument.Parse(await File.ReadAllTextAsync(plan.SettingsPath, Ct));
+        Assert.Contains(Path.GetFullPath(root), json.RootElement.GetProperty("filesystem").GetProperty("denyRead").EnumerateArray().Select(e => e.GetString()));
     }
 
     [Fact]

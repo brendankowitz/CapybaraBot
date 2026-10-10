@@ -49,12 +49,13 @@ UMask=0077
 
 # This unit also launches the agent's Copilot CLI under srt (bubblewrap), so it needs the same relaxations as capybarad.service:
 # user/mount/pid/net/ipc/uts namespaces, the @mount syscalls plus the few privileged calls bwrap makes, and an unmasked /proc
-# (ProtectProc/ProcSubset/ProtectKernelTunables would make bwrap's /proc mount fail). Verify on a real host.
+# (ProtectProc/ProcSubset/ProtectKernelTunables would make bwrap's /proc mount fail), plus AF_NETLINK (bwrap's loopback setup in the new
+# net namespace). Only capset and pivot_root are re-allowed from @privileged; add more only if the host test fails. Verify on a real host.
 RestrictNamespaces=user mnt pid net ipc uts
 SystemCallFilter=@system-service @mount
 SystemCallFilter=~@privileged @resources
-SystemCallFilter=capset pivot_root sethostname setgroups setuid setgid setresuid setresgid
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=capset pivot_root
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
 WantedBy=multi-user.target

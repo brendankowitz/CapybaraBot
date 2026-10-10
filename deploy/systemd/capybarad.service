@@ -67,11 +67,13 @@ UMask=0077
 # the broker and the backup job, this unit must not use RestrictNamespaces=yes, must allow @mount (not in @system-service), and must
 # leave /proc unmasked (ProtectProc/ProcSubset/ProtectKernelTunables overmount /proc and make bwrap's own proc mount fail). The srt
 # sandbox then provides the per-agent isolation. Verify on a real host: `sudo -u capybara srt --settings <file> -- true`.
+# AF_NETLINK: bwrap --unshare-net brings up loopback in the new net namespace over a NETLINK_ROUTE socket. Only capset and pivot_root are
+# re-allowed from @privileged (the rest of bwrap's unprivileged user-namespace path needs nothing else); add more only if the host test above fails.
 RestrictNamespaces=user mnt pid net ipc uts
 SystemCallFilter=@system-service @mount
 SystemCallFilter=~@privileged @resources
-SystemCallFilter=capset pivot_root sethostname setgroups setuid setgid setresuid setresgid
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=capset pivot_root
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
 WantedBy=multi-user.target

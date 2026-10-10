@@ -52,6 +52,9 @@ public sealed class SystemdUnitTests
         Assert.DoesNotContain(directives, l => l.StartsWith("RestrictNamespaces=~", StringComparison.Ordinal));
         Assert.Contains(directives, l => l.StartsWith("SystemCallFilter=", StringComparison.Ordinal) && l.Split(' ').Contains("@mount"));
         Assert.Contains(directives, l => l.StartsWith("SystemCallFilter=", StringComparison.Ordinal) && l.Split(' ').Contains("pivot_root"));
+        Assert.Contains("SystemCallFilter=capset pivot_root", directives);
+        var families = Assert.Single(directives, l => l.StartsWith("RestrictAddressFamilies=", StringComparison.Ordinal));
+        Assert.Contains("AF_NETLINK", families.Split(' '));
         Assert.DoesNotContain(directives, l => l.StartsWith("ProcSubset=", StringComparison.Ordinal) || l.StartsWith("ProtectProc=", StringComparison.Ordinal) || l.StartsWith("ProtectKernelTunables=", StringComparison.Ordinal));
         Assert.Contains("NoNewPrivileges=yes", directives);
         Assert.Contains("ProtectSystem=strict", directives);
@@ -64,6 +67,7 @@ public sealed class SystemdUnitTests
         var directives = Directives("capybara-broker.service").ToList();
 
         Assert.Contains("RestrictNamespaces=yes", directives);
+        Assert.DoesNotContain("AF_NETLINK", directives.Single(l => l.StartsWith("RestrictAddressFamilies=", StringComparison.Ordinal)), StringComparison.Ordinal);
         Assert.Contains("ProtectProc=invisible", directives);
     }
 
