@@ -15,6 +15,9 @@ internal sealed record StateLayout(string Root)
 
     public string KillSwitch => Path.Combine(Root, "policy", "kill-switch.json");
 
+    /// <summary>Tainted session ids, so resumed sessions stay tainted across restarts (FR-SAF-03).</summary>
+    public string Taint => Path.Combine(Root, "policy", "taint.jsonl");
+
     public string CostLedger => Path.Combine(Root, "observability", "cost-ledger.jsonl");
 
     public string Alerts => Path.Combine(Root, "observability", "alerts.jsonl");

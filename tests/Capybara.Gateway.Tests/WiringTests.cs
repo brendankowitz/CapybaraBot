@@ -151,6 +151,17 @@ public sealed class WiringTests
     }
 
     [Fact]
+    public void A_session_tainted_before_a_restart_is_still_tainted_after_it()
+    {
+        using var factory = new GatewayFactory();
+        new TaintTracker(Path.Combine(factory.StateRoot, "policy", "taint.jsonl")).MarkTainted("ea:main");
+
+        _ = factory.CreateClient();
+
+        Assert.Equal(Taint.Tainted, factory.Services.GetRequiredService<TaintTracker>().Of("ea:main"));
+    }
+
+    [Fact]
     public async Task An_approval_request_reaches_the_phone_and_the_clients_without_any_time_passing()
     {
         using var factory = new GatewayFactory();

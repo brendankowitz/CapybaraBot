@@ -196,7 +196,8 @@ public static class CapybaraServiceCollectionExtensions
 
             return killSwitch;
         });
-        services.AddSingleton<TaintTracker>();
+        // Sessions resume with their history after a restart, so their taint must too (FR-SAF-03).
+        services.AddSingleton(_ => new TaintTracker(state.Taint));
         services.AddSingleton(new LearnedRuleStore(state.LearnedRules));
 
         // Learned "Always allow" rules survive restarts and are saved as they are learned (FR-SAF-04).
