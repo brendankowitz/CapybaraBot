@@ -108,6 +108,9 @@ public sealed class CopilotRuntimeOptions
     /// <summary>The agent that receives conversational-channel DMs (FR-CLI-04): the default front door.</summary>
     public string FrontDoorAgent { get; set; } = "ea";
 
+    /// <summary>How long a delivered channel message id is remembered, so a redelivery is dropped (FR-CLI-04).</summary>
+    public TimeSpan InboundDedupeRetention { get; set; } = TimeSpan.FromDays(7);
+
     /// <summary>How long a root agent's <c>ask_user</c> waits for the human on the phone channel (FR-A2A-07).</summary>
     public TimeSpan UserEscalationTimeout { get; set; } = TimeSpan.FromMinutes(30);
 
