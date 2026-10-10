@@ -31,6 +31,11 @@ public sealed class QuartzSchedulerFactory(Capybara.Scheduling.Dispatch.Scheduli
             ["quartz.dataSource.default.provider"] = "SQLite-Microsoft",
             ["quartz.dataSource.default.connectionString"] = ConnectionString,
             ["quartz.threadPool.threadCount"] = Math.Max(2, options.ConcurrencyCap + 1).ToString(System.Globalization.CultureInfo.InvariantCulture),
+
+            // The misfire handler otherwise runs on a foreground thread, which keeps the process alive after Main
+            // returns whenever a shutdown did not reach the job store. The host owns the lifetime: SchedulerHostedService
+            // shuts the scheduler down on a graceful stop.
+            ["quartz.jobStore.useBackgroundThreads"] = "true",
         };
 
         return await QuartzSchedulerBuilder.Create(_ => { }).UseProperties(properties).BuildScheduler(cancellationToken);

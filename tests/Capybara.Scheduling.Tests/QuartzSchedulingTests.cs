@@ -307,6 +307,31 @@ public sealed class QuartzSchedulingTests
     }
 
     [Fact]
+    public async Task Concurrent_stops_both_wait_for_the_one_scheduler_shutdown()
+    {
+        // A test host stops twice at once (its own StopAsync and the app's RunAsync); a caller that returned early
+        // would dispose the container under a scheduler still shutting down.
+        using var directory = new TempDirectory();
+        var services = new ServiceCollection();
+        services.AddSingleton<IAlertSink>(new InMemoryAlertSink());
+        services.AddSingleton(sp => new CostLedger(sp.GetRequiredService<IAlertSink>(), TimeProvider.System));
+        services.AddSingleton(new KillSwitch(TimeProvider.System));
+        services.AddSingleton<IRoutineExecutor>(new ScriptedExecutor());
+        services.AddCapybaraScheduling(Options(Path.Combine(directory.Path, "scheduling.sqlite")));
+        await using var provider = services.BuildServiceProvider();
+        var hosted = provider.GetServices<IHostedService>().OfType<SchedulerHostedService>().Single();
+        var quartz = provider.GetRequiredService<IScheduler>();
+        await hosted.StartAsync(TestContext.Current.CancellationToken);
+
+        var first = hosted.StopAsync(TestContext.Current.CancellationToken);
+        var second = hosted.StopAsync(TestContext.Current.CancellationToken);
+        await second;
+
+        Assert.Equal(SchedulerStatus.Shutdown, quartz.Status);
+        await first;
+    }
+
+    [Fact]
     public void Adding_scheduling_twice_does_not_duplicate_registrations()
     {
         var services = new ServiceCollection();
