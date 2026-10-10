@@ -14,8 +14,14 @@ WorkingDirectory=/opt/capybara
 Environment=DOTNET_ENVIRONMENT=Production
 Restart=on-failure
 RestartSec=5s
-LoadCredentialEncrypted=github-token:/etc/capybara/credentials/github-token.cred
-LoadCredentialEncrypted=broker-secrets:/etc/capybara/credentials/broker-secrets.cred
+# Credentials the broker reads from $CREDENTIALS_DIRECTORY (FR-CON-04). capybarad holds only broker-api-key (the same value).
+# broker-vault-key: 32 random bytes, base64 (`head -c32 /dev/urandom | base64 | systemd-creds encrypt --name=broker-vault-key - ...`).
+# connection-github: the GitHub connection's fine-grained PAT. oauth-google-client-secret: the Google OAuth client secret.
+# Add one LoadCredentialEncrypted line per further connection-<id> / oauth-<provider>-client-secret you configure.
+LoadCredentialEncrypted=broker-api-key:/etc/capybara/credentials/broker-api-key.cred
+LoadCredentialEncrypted=broker-vault-key:/etc/capybara/credentials/broker-vault-key.cred
+LoadCredentialEncrypted=connection-github:/etc/capybara/credentials/connection-github.cred
+LoadCredentialEncrypted=oauth-google-client-secret:/etc/capybara/credentials/oauth-google-client-secret.cred
 StateDirectory=capybara-broker
 StateDirectoryMode=0700
 ConfigurationDirectory=capybara

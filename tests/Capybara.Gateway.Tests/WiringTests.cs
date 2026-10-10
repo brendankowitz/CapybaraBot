@@ -6,6 +6,7 @@ using Capybara.Contracts.Agents;
 using Capybara.Contracts.Approvals;
 using Capybara.Contracts.Messaging;
 using Capybara.Contracts.Storage;
+using Capybara.Gateway.Composition;
 using Capybara.Gateway.Wiring;
 using Capybara.Memory.Abstractions;
 using Capybara.Memory.Access;
@@ -30,6 +31,7 @@ using Capybara.Runtime.Copilot.Supervision;
 using Capybara.Scheduling.Execution;
 using Capybara.Scheduling.Hosting;
 using Capybara.Scheduling.Lifecycle;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Quartz;
@@ -226,6 +228,28 @@ public sealed class WiringTests
         Assert.Contains(rules.LearnedRules, r => r.Agent == "*");
         Assert.DoesNotContain("\"ea\"", await File.ReadAllTextAsync(Path.Combine(factory.StateRoot, "policy", "learned-rules.json"), Ct), StringComparison.Ordinal);
         Assert.False(Directory.Exists(Path.Combine(factory.StateRoot, "agents", "ea")));
+    }
+
+    [Fact]
+    public void Agent_mode_hosts_only_that_agents_runtime_and_supervisor()
+    {
+        using var dirs = new GatewayFactory();
+        var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings { EnvironmentName = "Testing", DisableDefaults = true });
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Capybara:ConfigRoot"] = dirs.ConfigRoot,
+            ["Capybara:StateRoot"] = dirs.StateRoot,
+        });
+        builder.Services.AddLogging();
+        builder.Services.AddCapybaraAgentHost(builder.Configuration, AgentId.Parse("research"));
+        builder.ConfigureContainer(new DefaultServiceProviderFactory(new ServiceProviderOptions { ValidateOnBuild = true, ValidateScopes = true }));
+
+        using var host = builder.Build();
+
+        var hosted = host.Services.GetServices<IHostedService>().Select(h => h.GetType()).ToList();
+        Assert.Equal([typeof(AgentRuntimeHostedService), typeof(RuntimeSupervisorService)], hosted);
+        Assert.Equal(["research"], host.Services.GetRequiredService<AgentRuntimePool>().All.Select(r => r.Agent.Value));
+        Assert.IsType<FileAlertSink>(host.Services.GetRequiredService<IAlertSink>());
     }
 
     [Fact]

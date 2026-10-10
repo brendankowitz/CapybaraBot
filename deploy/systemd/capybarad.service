@@ -2,12 +2,12 @@
 # MemoryDenyWriteExecute is intentionally NOT set: the .NET JIT and the Copilot CLI's Node runtime need W^X pages.
 [Unit]
 Description=Capybara agent fleet gateway (capybarad)
-After=network-online.target tailscaled.service
-Wants=network-online.target
+# The broker must be up first: agents with broker tools fail their start-up self-test (and are paused) without it.
+After=network-online.target tailscaled.service capybara-broker.service
+Wants=network-online.target capybara-broker.service
 
 [Service]
-# Type=notify requires the capybarad composition to call AddSystemd(); that, the `backup` dispatch and the `agent <id>` mode are
-# wired in capybarad's Program.cs (WP10). Until then the notify handshake never completes and `systemctl start` times out.
+# Type=notify: capybarad calls AddSystemd() and reports readiness once every hosted service has started.
 Type=notify
 NotifyAccess=main
 User=capybara
@@ -32,13 +32,21 @@ IPAddressAllow=localhost
 IPAddressAllow=100.64.0.0/10
 IPAddressAllow=fd7a:115c:a1e0::/48
 
-# The Copilot PAT is an encrypted credential, never an env var or config file (FR-HST-03).
+# Secrets are encrypted credentials, never env vars or config files (FR-HST-03): the Copilot PAT and the shared broker API key.
 LoadCredentialEncrypted=github-token:/etc/capybara/credentials/github-token.cred
+LoadCredentialEncrypted=broker-api-key:/etc/capybara/credentials/broker-api-key.cred
+# Optional channels; add only the ones configured under Capybara:Channels (a missing file fails the unit).
+#LoadCredentialEncrypted=telegram-bot-token:/etc/capybara/credentials/telegram-bot-token.cred
+#LoadCredentialEncrypted=webpush-vapid-private-key:/etc/capybara/credentials/webpush-vapid-private-key.cred
 
 StateDirectory=capybara
 StateDirectoryMode=0700
 ConfigurationDirectory=capybara
-ReadOnlyPaths=/etc/capybara
+# capybarad is the single writer of the config tree: approved proposals and lifecycle operations (create, archive, delete) are
+# validated, written and git-committed by CapybaraConfigurationHost (FR-AGT-06/07). The encrypted credentials stay read-only.
+# Agents never see /etc/capybara: srt denies it to every sandbox.
+ReadWritePaths=/etc/capybara
+ReadOnlyPaths=/etc/capybara/credentials
 ReadWritePaths=/var/lib/capybara
 # Only needed when the in-process nightly backup writes archives here (see deploy/README.md); "-" ignores a missing directory.
 ReadWritePaths=-/var/backups/capybara
