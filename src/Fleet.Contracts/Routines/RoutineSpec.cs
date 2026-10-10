@@ -14,6 +14,9 @@ public sealed record RoutineSpec
     /// <summary>Interval for heartbeat/cron routines. Must be at least five minutes.</summary>
     public TimeSpan? Interval { get; init; }
 
+    /// <summary>Cron expression (Quartz syntax, seconds first) for cron routines. Takes precedence over <see cref="Interval"/>.</summary>
+    public string? Cron { get; init; }
+
     /// <summary>Event filter for event triggers. Must be narrow (FR-RTN-07).</summary>
     public string? EventFilter { get; init; }
 
