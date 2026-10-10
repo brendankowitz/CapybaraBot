@@ -1,5 +1,6 @@
 using Fleet.Contracts.Agents;
 using Fleet.Contracts.Routines;
+using Fleet.Scheduling.Triggers;
 
 namespace Fleet.Scheduling.Validation;
 
@@ -47,8 +48,16 @@ public static class RoutineValidator
                 case TriggerKind.Heartbeat or TriggerKind.Cron when routine.Interval < RoutineLimits.MinimumInterval:
                     errors.Add($"{routine.Id}: interval {routine.Interval} is below the {RoutineLimits.MinimumInterval.TotalMinutes}-minute minimum.");
                     break;
-                case TriggerKind.Event when string.IsNullOrWhiteSpace(routine.EventFilter) || routine.EventFilter.Trim() == "*":
-                    errors.Add($"{routine.Id}: event triggers require a narrow filter.");
+                case TriggerKind.Event:
+                    try
+                    {
+                        _ = EventFilter.Parse(routine.EventFilter ?? string.Empty);
+                    }
+                    catch (FormatException ex)
+                    {
+                        errors.Add($"{routine.Id}: event triggers require a narrow filter: {ex.Message}");
+                    }
+
                     break;
             }
 

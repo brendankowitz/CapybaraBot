@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <UsePolicyTestKit>true</UsePolicyTestKit>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Fleet.Connections\Fleet.Connections.csproj" />
+  </ItemGroup>
+</Project>

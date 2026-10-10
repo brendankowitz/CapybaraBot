@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using Fleet.Contracts.Agents;
 using Fleet.Contracts.Approvals;
+using Fleet.Contracts.Diagnostics;
 using Fleet.Contracts.Messaging;
 using Fleet.Policy.Rules;
 
@@ -16,6 +17,15 @@ public sealed class ApprovalService(RulesEngine rules, ApprovalOptions options, 
 
     public event EventHandler<ApprovalRequest>? Requested;
 
+    /// <summary>Raised once when an unanswered approval fails closed on expiry (FR-OBS-05 alert source).</summary>
+    public event EventHandler<ApprovalRequest>? Expired;
+
+    /// <summary>Raised after a human settles an approval.</summary>
+    public event EventHandler<ApprovalRequest>? Decided;
+
+    /// <summary>Expires overdue approvals so their events fire even if nobody looks at them.</summary>
+    public int Sweep() => _approvals.Values.Count(r => r.Status is ApprovalStatus.Pending && Refresh(r).Status == ApprovalStatus.Expired);
+
     public ApprovalRequest Request(
         AgentId agent,
         string sessionId,
@@ -27,6 +37,9 @@ public sealed class ApprovalService(RulesEngine rules, ApprovalOptions options, 
         string? reviewerVerdict = null,
         string? reviewerRationale = null)
     {
+        using var activity = FleetTelemetry.Policy.StartActivity("approval.request");
+        activity?.SetTag("fleet.agent", agent.Value);
+        activity?.SetTag("fleet.tool", tool);
         var now = time.GetUtcNow();
         var ttl = origin == MessageOrigin.User ? options.InteractiveTtl : options.UnattendedTtl;
         var request = new ApprovalRequest
@@ -98,6 +111,14 @@ public sealed class ApprovalService(RulesEngine rules, ApprovalOptions options, 
             return ApprovalOutcome.AlreadyDecided;
         }
 
+        using (var activity = FleetTelemetry.Policy.StartActivity("approval.decide"))
+        {
+            activity?.SetTag("fleet.agent", current.Agent.Value);
+            activity?.SetTag("fleet.approval.decision", decision.ToString());
+        }
+
+        Decided?.Invoke(this, current with { Status = status });
+
         if (decision == ApprovalDecision.AlwaysAllow)
         {
             rules.Add(new PolicyRule
@@ -138,7 +159,12 @@ public sealed class ApprovalService(RulesEngine rules, ApprovalOptions options, 
         if (request.Status is ApprovalStatus.Pending or ApprovalStatus.Approved && time.GetUtcNow() >= request.ExpiresAt)
         {
             var expired = request with { Status = ApprovalStatus.Expired };
-            _approvals.TryUpdate(request.Id, expired, request);
+            if (_approvals.TryUpdate(request.Id, expired, request))
+            {
+                FleetTelemetry.ApprovalsExpired.Add(1, new KeyValuePair<string, object?>("agent", request.Agent.Value));
+                Expired?.Invoke(this, expired);
+            }
+
             return expired;
         }
 

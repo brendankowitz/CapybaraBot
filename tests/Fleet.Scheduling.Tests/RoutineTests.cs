@@ -62,7 +62,7 @@ public sealed class RoutineTests
     public void Event_routines_have_no_schedule()
     {
         var planner = new RoutinePlanner(new Random(1));
-        var routine = new RoutineSpec { Id = "e", Owner = Ea, Kind = TriggerKind.Event, EventFilter = "github.issue", Prompt = "triage" };
+        var routine = new RoutineSpec { Id = "e", Owner = Ea, Kind = TriggerKind.Event, EventFilter = "github:issue.opened repo=owner/name", Prompt = "triage" };
         Assert.Null(planner.NextFire(routine, DateTimeOffset.UnixEpoch));
     }
 

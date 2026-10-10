@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Fleet.Channels\Fleet.Channels.csproj" />
+    <ProjectReference Include="..\..\src\Fleet.Channels.Ntfy\Fleet.Channels.Ntfy.csproj" />
+    <ProjectReference Include="..\..\src\Fleet.Channels.Telegram\Fleet.Channels.Telegram.csproj" />
+  </ItemGroup>
+</Project>

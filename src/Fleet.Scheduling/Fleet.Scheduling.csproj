@@ -5,5 +5,16 @@
   <ItemGroup>
     <ProjectReference Include="..\Fleet.Contracts\Fleet.Contracts.csproj" />
     <ProjectReference Include="..\Fleet.Observability\Fleet.Observability.csproj" />
+    <ProjectReference Include="..\Fleet.Policy\Fleet.Policy.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Quartz" />
+    <PackageReference Include="Quartz.Extensions.Hosting" />
+    <PackageReference Include="Quartz.Serialization.SystemTextJson" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\tables_sqlite.sql" />
   </ItemGroup>
 </Project>

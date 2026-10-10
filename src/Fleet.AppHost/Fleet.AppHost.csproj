@@ -1,0 +1,11 @@
+<Project Sdk="Aspire.AppHost.Sdk/13.6.1">
+  <PropertyGroup>
+    <Description>Development-only Aspire AppHost for the fleet gateway.</Description>
+    <OutputType>Exe</OutputType>
+    <NoWarn>$(NoWarn);ASPIRE010</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Aspire.Hosting.AppHost" />
+    <ProjectReference Include="..\Fleet.Gateway\Fleet.Gateway.csproj" />
+  </ItemGroup>
+</Project>

@@ -38,6 +38,19 @@ public static class FleetConfigurationLoader
         var known = agents.Select(a => a.Id).ToHashSet();
         foreach (var agent in agents)
         {
+            if (!Hosts.Contains(agent.Host, StringComparer.Ordinal))
+            {
+                errors.Add($"{agent.Id}: host must be one of {string.Join(", ", Hosts)}.");
+            }
+
+            foreach (var tool in agent.Tools.Where(t => t.StartsWith("mcp:", StringComparison.Ordinal)))
+            {
+                if (!agent.McpServers.SelectMany(m => m.QualifiedTools()).Contains(tool, StringComparer.Ordinal))
+                {
+                    errors.Add($"{agent.Id}: tool '{tool}' does not name an enabled tool of a declared MCP server.");
+                }
+            }
+
             errors.AddRange(TrifectaValidator.Validate(agent));
             foreach (var peer in agent.Peers.Consult.Concat(agent.Peers.Message).Concat(agent.Peers.Task).Distinct(StringComparer.Ordinal))
             {
@@ -74,6 +87,11 @@ public static class FleetConfigurationLoader
         foreach (var dir in Directory.EnumerateDirectories(agentsDir).Order(StringComparer.Ordinal))
         {
             var folder = Path.GetFileName(dir);
+            if (folder.StartsWith('.') || folder.StartsWith('_'))
+            {
+                continue;
+            }
+
             var file = Path.Combine(dir, "agent.yaml");
             if (!File.Exists(file))
             {
@@ -147,6 +165,13 @@ public static class FleetConfigurationLoader
                     Constraints = g.Constraints.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<string>)kv.Value, StringComparer.Ordinal),
                 })],
                 EgressDomains = yaml.Egress,
+                Hidden = yaml.Hidden,
+                Host = string.IsNullOrWhiteSpace(yaml.Host) ? "systemd" : yaml.Host,
+                Provider = ToProvider(id, yaml.Provider, errors),
+                McpServers = [.. yaml.McpServers.Select(m => ToMcpServer(id, m, errors)).OfType<McpServerSpec>()],
+                EnableRemoteSessions = yaml.RemoteSessions,
+                Notifications = yaml.Notifications ?? true,
+                Skills = SkillCardReader.Read(Path.Combine(dir, "skills")),
                 Budget = new AgentBudget
                 {
                     DailyCredits = yaml.Budget?.DailyCredits ?? budget.DailyCredits,
@@ -239,6 +264,7 @@ public static class FleetConfigurationLoader
             Owner = owner,
             Kind = kind,
             Interval = interval,
+            Cron = string.IsNullOrWhiteSpace(yaml.Cron) ? null : yaml.Cron.Trim(),
             EventFilter = yaml.Event,
             ActiveFrom = from,
             ActiveTo = to,
@@ -253,6 +279,110 @@ public static class FleetConfigurationLoader
             Model = yaml.Model ?? "auto",
             Enabled = yaml.Enabled ?? true,
             DryRun = yaml.DryRun,
+        };
+    }
+
+    private static readonly string[] Hosts = ["systemd", "podman", "aca", "remote"];
+
+    private static ModelProviderSpec? ToProvider(AgentId id, ProviderYaml? yaml, List<string> errors)
+    {
+        if (yaml is null)
+        {
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(yaml.Type) || !Uri.TryCreate(yaml.BaseUrl, UriKind.Absolute, out var baseUrl))
+        {
+            errors.Add($"{id}: provider needs a type and an absolute baseUrl.");
+            return null;
+        }
+
+        if (baseUrl.Scheme != Uri.UriSchemeHttps && !baseUrl.IsLoopback)
+        {
+            errors.Add($"{id}: provider baseUrl must use https unless it is loopback.");
+            return null;
+        }
+
+        if (yaml.ApiKeySecret is not null && !SecretName.IsValid(yaml.ApiKeySecret))
+        {
+            errors.Add($"{id}: provider apiKeySecret '{yaml.ApiKeySecret}' is not a valid secret name.");
+            return null;
+        }
+
+        return new ModelProviderSpec
+        {
+            Type = yaml.Type,
+            BaseUrl = baseUrl.ToString(),
+            WireApi = yaml.WireApi,
+            ApiKeySecret = yaml.ApiKeySecret,
+            ModelId = yaml.Model,
+            AzureApiVersion = yaml.AzureApiVersion,
+        };
+    }
+
+    /// <summary>FR-SKL-04: MCP servers are vendored and pinned; FR-CON-03: tools are enabled one by one.</summary>
+    private static McpServerSpec? ToMcpServer(AgentId id, McpServerYaml yaml, List<string> errors)
+    {
+        if (string.IsNullOrWhiteSpace(yaml.Name) || !AgentId.TryParse(yaml.Name, out _))
+        {
+            errors.Add($"{id}: MCP server name '{yaml.Name}' must be lower-case letters, digits and dashes.");
+            return null;
+        }
+
+        var prefix = $"{id}: MCP server '{yaml.Name}'";
+        if (yaml.Tools.Count == 0)
+        {
+            errors.Add($"{prefix} must enable at least one tool explicitly.");
+            return null;
+        }
+
+        switch (yaml.Type)
+        {
+            case "stdio":
+                if (string.IsNullOrWhiteSpace(yaml.Command) || !Path.IsPathFullyQualified(yaml.Command))
+                {
+                    errors.Add($"{prefix} needs an absolute path to a vendored command (no package-manager installs).");
+                    return null;
+                }
+
+                if (yaml.Sha256 is null || yaml.Sha256.Length != 64 || !yaml.Sha256.All(Uri.IsHexDigit))
+                {
+                    errors.Add($"{prefix} must be pinned with the sha256 of its command.");
+                    return null;
+                }
+
+                break;
+            case "http":
+                if (!Uri.TryCreate(yaml.Url, UriKind.Absolute, out var url) || (url.Scheme != Uri.UriSchemeHttps && !url.IsLoopback))
+                {
+                    errors.Add($"{prefix} needs an https or loopback url.");
+                    return null;
+                }
+
+                break;
+            default:
+                errors.Add($"{prefix} type must be stdio or http.");
+                return null;
+        }
+
+        if (yaml.TokenSecret is not null && !SecretName.IsValid(yaml.TokenSecret))
+        {
+            errors.Add($"{prefix} tokenSecret is not a valid secret name.");
+            return null;
+        }
+
+        return new McpServerSpec
+        {
+            Name = yaml.Name,
+            Type = yaml.Type,
+            Command = yaml.Command,
+            Args = yaml.Args,
+            Url = yaml.Url,
+            Tools = yaml.Tools,
+            Sha256 = yaml.Sha256?.ToLowerInvariant(),
+            Untrusted = yaml.Untrusted ?? true,
+            TokenSecret = yaml.TokenSecret,
+            TimeoutSeconds = yaml.Timeout,
         };
     }
 

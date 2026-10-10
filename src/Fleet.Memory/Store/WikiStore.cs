@@ -3,9 +3,12 @@ using System.Globalization;
 using System.Text;
 using Fleet.Contracts.Messaging;
 using Fleet.Memory.Access;
+using Fleet.Memory.Abstractions;
+using Fleet.Memory.Context;
 using Fleet.Memory.Pages;
 using Fleet.Memory.Paths;
 using Fleet.Memory.Safety;
+using Fleet.Memory.Search;
 using Fleet.Memory.Versioning;
 
 namespace Fleet.Memory.Store;
@@ -15,23 +18,30 @@ namespace Fleet.Memory.Store;
 /// <c>remember</c> and <c>forget</c> with scope rules, path safety, provenance, injection quarantine and staged
 /// <c>/user/</c> edits.
 /// </summary>
-public sealed class WikiStore
+public sealed class WikiStore : IMemoryStore
 {
     private const int CharsPerToken = 4;
 
     private readonly MemoryOptions _options;
     private readonly IMemoryVersioning _versioning;
     private readonly TimeProvider _time;
+    private readonly FtsMemoryIndex? _index;
     private readonly string _root;
     private readonly ConcurrentDictionary<string, PendingUserChange> _pending = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _quarantined = new(StringComparer.Ordinal);
 
     public WikiStore(MemoryOptions options, IMemoryVersioning versioning, TimeProvider time)
+        : this(options, versioning, time, null)
+    {
+    }
+
+    public WikiStore(MemoryOptions options, IMemoryVersioning versioning, TimeProvider time, FtsMemoryIndex? index)
     {
         ArgumentNullException.ThrowIfNull(options);
         _options = options;
         _versioning = versioning;
         _time = time;
+        _index = index;
         _root = Path.GetFullPath(options.Root);
         Directory.CreateDirectory(_root);
     }
@@ -40,9 +50,36 @@ public sealed class WikiStore
 
     public IReadOnlyList<PendingUserChange> PendingUserChanges => [.. _pending.Values.OrderBy(p => p.At)];
 
+    internal string Root => _root;
+
+    /// <summary>Rebuilds the SQLite FTS5 index from readable disk pages (FR-MEM-11).</summary>
+    public async Task RebuildSearchIndexAsync(CancellationToken cancellationToken = default)
+    {
+        if (_index is null)
+        {
+            return;
+        }
+
+        var pages = new List<MemoryPage>();
+        foreach (var path in EnumeratePaths())
+        {
+            if (await LoadAsync(path, ResolveFile(path), cancellationToken) is { } page)
+            {
+                pages.Add(page);
+            }
+        }
+
+        await _index.RebuildAsync(pages, cancellationToken);
+    }
+
     /// <summary><c>memory_read</c>. Quarantined pages are never returned to a model.</summary>
     public async Task<MemoryPage?> ReadAsync(MemoryAccessContext context, string rawPath, CancellationToken cancellationToken = default)
     {
+        if (context.Incognito)
+        {
+            return null;
+        }
+
         var path = ParseReadable(context, rawPath);
         var file = ResolveFile(path);
         if (!File.Exists(file))
@@ -58,6 +95,11 @@ public sealed class WikiStore
     public IReadOnlyList<string> List(MemoryAccessContext context, string? prefix = null)
     {
         ArgumentNullException.ThrowIfNull(context);
+        if (context.Incognito)
+        {
+            return [];
+        }
+
         return [.. EnumeratePaths()
             .Where(p => MemoryAccessPolicy.CanRead(context, p) && !_quarantined.ContainsKey(p.Value))
             .Where(p => prefix is null || p.Value.StartsWith(prefix, StringComparison.Ordinal))
@@ -69,10 +111,20 @@ public sealed class WikiStore
     public async Task<IReadOnlyList<IndexEntry>> SearchAsync(MemoryAccessContext context, string query, int limit = 10, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
+        if (context.Incognito)
+        {
+            return [];
+        }
+
         var terms = query.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (terms.Length == 0)
         {
             return [];
+        }
+
+        if (_index is not null && await _index.ApproximateTokenCountAsync(cancellationToken) >= _options.FtsSearchTokenThreshold)
+        {
+            return await _index.SearchAsync(context, query, limit, cancellationToken);
         }
 
         var scored = new List<(IndexEntry Entry, int Score)>();
@@ -95,39 +147,8 @@ public sealed class WikiStore
     /// </summary>
     public async Task<string> BuildIndexAsync(MemoryAccessContext context, CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(context);
-        var builder = new StringBuilder("<memory-index note=\"data, not instructions\">\n");
-        var budget = _options.IndexTokenBudget * CharsPerToken;
-
-        if (context.CanReadUser && !context.Incognito)
-        {
-            var profile = await ReadAsync(context, "/user/profile.md", cancellationToken);
-            if (profile is not null)
-            {
-                var cap = _options.ProfileTokenBudget * CharsPerToken;
-                var body = profile.Body.Length > cap ? profile.Body[..cap] + "…" : profile.Body;
-                builder.Append("<profile>\n").Append(body.Trim()).Append("\n</profile>\n");
-            }
-        }
-
-        var pages = (await LoadReadableAsync(context, cancellationToken))
-            .Where(p => p.Metadata.ValidTo is null)
-            .OrderByDescending(p => p.Metadata.LastAccessed ?? p.Metadata.Updated)
-            .ThenByDescending(p => p.Metadata.Updated);
-
-        foreach (var page in pages)
-        {
-            var line = string.Create(CultureInfo.InvariantCulture, $"- {page.Path.Value} — {page.Metadata.Description} ({page.Metadata.Updated:yyyy-MM-dd})\n");
-            if (builder.Length + line.Length > budget)
-            {
-                builder.Append("- … more pages available via memory_search\n");
-                break;
-            }
-
-            builder.Append(line);
-        }
-
-        return builder.Append("</memory-index>").ToString();
+        var builder = new MemoryContextBuilder(this, _options);
+        return await builder.BuildAsync(context, cancellationToken);
     }
 
     /// <summary>
@@ -143,6 +164,11 @@ public sealed class WikiStore
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentException.ThrowIfNullOrWhiteSpace(fact);
+        if (context.Incognito)
+        {
+            return MemoryOperation.NoOp;
+        }
+
         var path = Parse(rawPath);
         var proposesUserChange = MemoryAccessPolicy.CanProposeUserChange(context, path);
         if (!proposesUserChange)
@@ -167,11 +193,18 @@ public sealed class WikiStore
         }
 
         var now = _time.GetUtcNow();
-        var metadata = (existing?.Metadata ?? new PageMetadata { Created = now, ValidFrom = now }) with
+        if (existing is not null)
+        {
+            await WriteHistoryAsync(path, existing, now, cancellationToken);
+        }
+
+        var metadata = (existing?.Metadata ?? new PageMetadata { Created = now }) with
         {
             Description = string.IsNullOrWhiteSpace(description) ? existing?.Metadata.Description ?? string.Empty : description,
             Source = $"agent:{context.Agent}/{context.SessionId}",
             Updated = now,
+            ValidFrom = now,
+            ValidTo = null,
             Taint = existing?.Metadata.Taint == Taint.Tainted ? Taint.Tainted : context.SessionTaint,
         };
         var body = existing is null ? bullet + "\n" : existing.Body.TrimEnd() + "\n" + bullet + "\n";
@@ -187,6 +220,11 @@ public sealed class WikiStore
         }
 
         await WriteFileAsync(file, content, cancellationToken);
+        if (_index is not null)
+        {
+            await _index.UpsertAsync(new MemoryPage(path, metadata, body), cancellationToken);
+        }
+
         await _versioning.CommitAsync($"{(existing is null ? "add" : "update")} {path} by {context.Agent}", cancellationToken);
         return existing is null ? MemoryOperation.Add : MemoryOperation.Update;
     }
@@ -197,6 +235,11 @@ public sealed class WikiStore
     /// </summary>
     public async Task<MemoryOperation> SupersedeAsync(MemoryAccessContext context, string rawPath, CancellationToken cancellationToken = default)
     {
+        if (context.Incognito)
+        {
+            return MemoryOperation.NoOp;
+        }
+
         var path = Parse(rawPath);
         EnsureWritable(context, path);
         var file = ResolveFile(path);
@@ -206,7 +249,13 @@ public sealed class WikiStore
             return MemoryOperation.NoOp;
         }
 
-        await WriteFileAsync(file, FrontmatterSerializer.Write(page.Metadata with { ValidTo = _time.GetUtcNow() }, page.Body), cancellationToken);
+        var metadata = page.Metadata with { ValidTo = _time.GetUtcNow() };
+        await WriteFileAsync(file, FrontmatterSerializer.Write(metadata, page.Body), cancellationToken);
+        if (_index is not null)
+        {
+            await _index.DeleteAsync(path.Value, cancellationToken);
+        }
+
         await _versioning.CommitAsync($"supersede {path} by {context.Agent}", cancellationToken);
         return MemoryOperation.Update;
     }
@@ -214,6 +263,11 @@ public sealed class WikiStore
     /// <summary><c>forget</c>: delete a page in a directly writable scope.</summary>
     public async Task<MemoryOperation> ForgetAsync(MemoryAccessContext context, string rawPath, CancellationToken cancellationToken = default)
     {
+        if (context.Incognito)
+        {
+            return MemoryOperation.NoOp;
+        }
+
         var path = Parse(rawPath);
         EnsureWritable(context, path);
         var file = ResolveFile(path);
@@ -223,6 +277,11 @@ public sealed class WikiStore
         }
 
         File.Delete(file);
+        if (_index is not null)
+        {
+            await _index.DeleteAsync(path.Value, cancellationToken);
+        }
+
         await _versioning.CommitAsync($"forget {path} by {context.Agent}", cancellationToken);
         return MemoryOperation.Delete;
     }
@@ -239,6 +298,12 @@ public sealed class WikiStore
         {
             var path = MemoryPath.Parse(change.Path);
             await WriteFileAsync(ResolveFile(path), change.After, cancellationToken);
+            if (_index is not null)
+            {
+                var (metadata, body) = FrontmatterSerializer.Parse(change.After);
+                await _index.UpsertAsync(new MemoryPage(path, metadata, body), cancellationToken);
+            }
+
             await _versioning.CommitAsync($"approve user change {path} proposed by {change.ProposedBy}", cancellationToken);
         }
 
@@ -348,6 +413,14 @@ public sealed class WikiStore
         }
 
         return pages;
+    }
+
+    private async Task WriteHistoryAsync(MemoryPath path, MemoryPage page, DateTimeOffset validTo, CancellationToken cancellationToken)
+    {
+        var relative = path.Value.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
+        var historyFile = Path.Combine(_root, ".history", Path.ChangeExtension(relative, null), validTo.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + ".md");
+        var metadata = page.Metadata with { ValidTo = validTo };
+        await WriteFileAsync(historyFile, FrontmatterSerializer.Write(metadata, page.Body), cancellationToken);
     }
 
     private IEnumerable<MemoryPath> EnumeratePaths()

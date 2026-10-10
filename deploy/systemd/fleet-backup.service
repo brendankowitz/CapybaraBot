@@ -1,0 +1,26 @@
+# Nightly backup job for FR-HST-05. Trigger with fleet-backup.timer.
+[Unit]
+Description=CharcuterieBot fleet backup
+
+[Service]
+Type=oneshot
+User=fleet
+Group=fleet
+ExecStart=/opt/fleet/fleet-backup
+WorkingDirectory=/opt/fleet
+Environment=DOTNET_ENVIRONMENT=Production
+LoadCredentialEncrypted=github-token:/etc/fleet/credentials/github-token.cred
+StateDirectory=fleet
+ReadWritePaths=/var/lib/fleet /var/backups/fleet
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077

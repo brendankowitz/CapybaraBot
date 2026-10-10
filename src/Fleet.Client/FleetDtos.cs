@@ -1,0 +1,32 @@
+using System.Text.Json;
+
+namespace Fleet.Client;
+
+public sealed record AgentStatusDto(string Id, string Name, string Job, string Model, bool Paused, bool BudgetExhausted);
+public sealed record TurnRequestDto(string Prompt);
+public sealed record TurnResultDto(string Content, IReadOnlyList<object>? Artifacts = null, string? SessionId = null);
+public sealed record RuntimeStatusDto(string Id, string State, string? Reason = null);
+public sealed record ApprovalDecisionDto(string Nonce, string Decision);
+public sealed record ApprovalDto(string Id, string Nonce, string Agent, string Tool, string ArgsHash, string Preview, string Risk, bool OffersAlwaysAllow, DateTimeOffset CreatedAt, DateTimeOffset ExpiresAt);
+public sealed record KillSwitchDto(bool IsEngaged, string? Reason, DateTimeOffset? EngagedAt);
+public sealed record KillSwitchRequestDto(string Reason);
+public sealed record AuditVerifyDto(bool Valid);
+public sealed record LedgerDto(JsonElement Agents, JsonElement ByModel, JsonElement ByRoutine);
+public sealed record AlertDto(string Kind, string Severity, string Message, DateTimeOffset At, string? Agent = null);
+public sealed record ThreadEntryDto(DateTimeOffset At, string From, string To, string Operation, string Summary, string TraceId, int Depth, string Taint, bool Rejected);
+public sealed record PendingMemoryChangeDto(string Id, string Path, string Content);
+public sealed record PendingChangeDecisionDto(bool Apply);
+public sealed record MemoryPageInfoDto(string Path, long Size, DateTimeOffset? UpdatedAt = null);
+public sealed record MemoryPageDto(string Path, string Content);
+public sealed record SaveMemoryPageDto(string Path, string Content);
+public sealed record RoutineDto(string Id, string Owner, string Kind, bool Enabled, bool Paused, bool AutoPaused, decimal ProjectedMonthlyCredits, IReadOnlyList<RoutineRunDto> LastRuns);
+public sealed record RoutineRunDto(DateTimeOffset At, string Status, decimal Credits, string? Model = null);
+public sealed record EnableRoutineDto(decimal AcknowledgedMonthlyCredits);
+public sealed record BudgetsDto(JsonElement Daily, JsonElement Monthly, JsonElement Quota);
+public sealed record ProposalDto(string Id, string Title, string? Diff, string Risk, DateTimeOffset CreatedAt);
+public sealed record ProposalDecisionDto(bool Approve);
+public sealed record PresenceDto(bool Focused);
+public sealed record QuestionAnswerDto(string Answer);
+public sealed record PushSubscriptionDto(string Endpoint, JsonElement Keys);
+public sealed record ConnectionDto(string Id, string Kind, string DisplayName, bool Enabled);
+public sealed record TaskDto(string Id, string Agent, string Summary, string Status);

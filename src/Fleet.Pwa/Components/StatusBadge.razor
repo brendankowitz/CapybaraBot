@@ -1,0 +1,20 @@
+<span class="badge @Css">@Text</span>
+
+@code {
+    [Parameter] public string? State { get; set; }
+    [Parameter] public int Unread { get; set; }
+
+    private string Text => State switch
+    {
+        "working" => "Working",
+        "needsAttention" => $"Needs attention{(Unread > 0 ? $" · {Unread}" : string.Empty)}",
+        _ => Unread > 0 ? $"Unread · {Unread}" : "Idle",
+    };
+
+    private string Css => State switch
+    {
+        "working" => "working",
+        "needsAttention" => "attention",
+        _ => Unread > 0 ? "unread" : "idle",
+    };
+}

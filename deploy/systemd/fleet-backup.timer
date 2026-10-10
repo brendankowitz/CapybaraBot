@@ -1,0 +1,11 @@
+[Unit]
+Description=Run CharcuterieBot backups nightly
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 UTC
+Persistent=true
+RandomizedDelaySec=15m
+Unit=fleet-backup.service
+
+[Install]
+WantedBy=timers.target

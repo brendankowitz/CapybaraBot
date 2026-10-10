@@ -1,6 +1,9 @@
 using System.Security.Cryptography;
 using System.Text;
 using Fleet.Gateway.Configuration;
+using Fleet.Gateway.Pwa;
+using Fleet.Gateway.Realtime;
+using Fleet.Policy.Safety;
 using Microsoft.Extensions.Options;
 
 namespace Fleet.Gateway.Security;
@@ -54,14 +57,23 @@ public sealed partial class TailnetAuthenticationMiddleware(RequestDelegate next
             return "origin";
         }
 
+        if (PwaStaticAssetPolicy.AllowsTokenlessGet(context.Request.Path, context.Request.Method))
+        {
+            device = new DeviceIdentity(login, "pwa-bootstrap", ControlSurface.Phone);
+            return null;
+        }
+
         var authorization = context.Request.Headers.Authorization.ToString();
         const string BearerPrefix = "Bearer ";
-        if (!authorization.StartsWith(BearerPrefix, StringComparison.Ordinal) || authorization.Length <= BearerPrefix.Length)
+        var token = authorization.StartsWith(BearerPrefix, StringComparison.Ordinal) && authorization.Length > BearerPrefix.Length
+            ? authorization[BearerPrefix.Length..].Trim()
+            : HubAccessToken(context);
+        if (string.IsNullOrWhiteSpace(token))
         {
             return "token";
         }
 
-        var match = MatchDevice(authorization[BearerPrefix.Length..].Trim());
+        var match = MatchDevice(token);
         if (match is null)
         {
             return "token";
@@ -70,6 +82,11 @@ public sealed partial class TailnetAuthenticationMiddleware(RequestDelegate next
         device = new DeviceIdentity(login, match.Name, match.Surface);
         return null;
     }
+
+    private static string? HubAccessToken(HttpContext context) =>
+        context.Request.Path.StartsWithSegments(FleetRealtimeEndpointExtensions.HubPath, StringComparison.Ordinal)
+            ? context.Request.Query["access_token"].ToString()
+            : null;
 
     private DeviceTokenOptions? MatchDevice(string token)
     {

@@ -56,6 +56,27 @@ public sealed record AgentDefinition
 
     public bool Paused { get; init; }
 
+    /// <summary>Skills found in the agent's skill directory, advertised on its card.</summary>
+    public IReadOnlyList<AgentSkill> Skills { get; init; } = [];
+
+    /// <summary>Hidden agents keep running but are not listed in clients or <c>list_agents</c> (FR-AGT-07).</summary>
+    public bool Hidden { get; init; }
+
+    /// <summary>Which <c>IAgentHost</c> runs the agent: <c>systemd</c>, <c>podman</c>, <c>aca</c> or <c>remote</c> (FR-HST-01, NFR-09).</summary>
+    public string Host { get; init; } = "systemd";
+
+    /// <summary>Optional BYOK provider (FR-AGT-10).</summary>
+    public ModelProviderSpec? Provider { get; init; }
+
+    /// <summary>Vendored MCP servers attached to every session (FR-CON-03).</summary>
+    public IReadOnlyList<McpServerSpec> McpServers { get; init; } = [];
+
+    /// <summary>Allow GitHub remote sessions (Mission Control) when the working directory is a GitHub repo (FR-CLI-08).</summary>
+    public bool EnableRemoteSessions { get; init; }
+
+    /// <summary>Per-agent notification toggle (FR-CLI-07).</summary>
+    public bool Notifications { get; init; } = true;
+
     public AgentCard ToCard() => new()
     {
         Id = Id,
@@ -67,5 +88,6 @@ public sealed record AgentDefinition
         AcceptsTasks = AcceptsTasks,
         Model = Model,
         Trifecta = Trifecta,
+        Skills = Skills,
     };
 }

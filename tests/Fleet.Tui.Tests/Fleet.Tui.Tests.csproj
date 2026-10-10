@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Fleet.Contracts\Fleet.Contracts.csproj" />
+    <ProjectReference Include="..\..\src\Fleet.Tui\Fleet.Tui.csproj" />
+  </ItemGroup>
+</Project>

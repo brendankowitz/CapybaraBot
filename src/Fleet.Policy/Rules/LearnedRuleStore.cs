@@ -1,0 +1,44 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
+namespace Fleet.Policy.Rules;
+
+/// <summary>Persists rules created by "Always allow" approvals (FR-SAF-04) as JSON under the state root.</summary>
+public sealed class LearnedRuleStore(string path)
+{
+    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true,
+        Converters = { new JsonStringEnumConverter() },
+    };
+
+    private readonly Lock _gate = new();
+
+    public IReadOnlyList<PolicyRule> Load()
+    {
+        if (!File.Exists(path))
+        {
+            return [];
+        }
+
+        return JsonSerializer.Deserialize<List<PolicyRule>>(File.ReadAllText(path), Json) ?? [];
+    }
+
+    /// <summary>Saves the learned rules and subscribes to future additions.</summary>
+    public void Attach(RulesEngine engine)
+    {
+        ArgumentNullException.ThrowIfNull(engine);
+        engine.RuleLearned += (_, _) => Save(engine.LearnedRules);
+    }
+
+    public void Save(IReadOnlyList<PolicyRule> rules)
+    {
+        lock (_gate)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+            var temp = path + ".tmp";
+            File.WriteAllText(temp, JsonSerializer.Serialize(rules, Json));
+            File.Move(temp, path, overwrite: true);
+        }
+    }
+}

@@ -12,4 +12,10 @@ public sealed class MemoryOptions
 
     /// <summary>Cap for the always-injected <c>/user/profile.md</c> (~500 tokens).</summary>
     public int ProfileTokenBudget { get; init; } = 500;
+
+    /// <summary>Use SQLite FTS5 once the wiki index is larger than this approximate token count (FR-MEM-11).</summary>
+    public int FtsSearchTokenThreshold { get; init; } = 8_000;
+
+    /// <summary>Archive pages not accessed for this many days during consolidation (FR-MEM-08).</summary>
+    public int ArchiveAfterDays { get; init; } = 28;
 }

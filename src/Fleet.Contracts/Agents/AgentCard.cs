@@ -21,4 +21,9 @@ public sealed record AgentCard
     public string Model { get; init; } = "auto";
 
     public required TrifectaProfile Trifecta { get; init; }
+
+    public IReadOnlyList<AgentSkill> Skills { get; init; } = [];
+
+    /// <summary>Rough cost/latency class derived from the model: <c>economy</c> for <c>auto</c>, otherwise <c>premium</c>.</summary>
+    public string CostHint => string.Equals(Model, "auto", StringComparison.OrdinalIgnoreCase) ? "economy" : "premium";
 }

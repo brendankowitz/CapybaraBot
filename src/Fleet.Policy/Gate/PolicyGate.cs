@@ -1,4 +1,5 @@
 using Fleet.Contracts.Approvals;
+using Fleet.Contracts.Diagnostics;
 using Fleet.Policy.Approvals;
 using Fleet.Policy.Audit;
 using Fleet.Policy.Canonicalization;
@@ -25,6 +26,9 @@ public sealed class PolicyGate(
     public async Task<GateVerdict> EvaluateAsync(ToolCallContext call, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(call);
+        using var activity = FleetTelemetry.Policy.StartActivity("gate.evaluate");
+        activity?.SetTag("fleet.agent", call.Agent.Id.Value);
+        activity?.SetTag("fleet.tool", call.Tool);
         var argsHash = CanonicalJson.Hash(call.Args);
         GateVerdict verdict;
         try
@@ -38,6 +42,9 @@ public sealed class PolicyGate(
             verdict = GateVerdict.Deny("error", $"gate error: {ex.GetType().Name}");
         }
 
+        activity?.SetTag("fleet.gate.outcome", verdict.Outcome.ToString());
+        activity?.SetTag("fleet.gate.layer", verdict.Layer);
+        FleetTelemetry.GateDecisions.Add(1, new("outcome", verdict.Outcome.ToString()), new("layer", verdict.Layer), new("agent", call.Agent.Id.Value));
         await audit.AppendAsync(
             new AuditRecord(
                 Kind: "tool_call",
@@ -64,7 +71,7 @@ public sealed class PolicyGate(
         }
 
         // Layer 1: static deny. Tools outside the allowlist never run, whatever the rules say.
-        if (!agent.Tools.Any(pattern => Glob.IsMatch(pattern, call.Tool)))
+        if (!agent.Tools.Any(pattern => ToolPattern.IsMatch(pattern, call.Tool)))
         {
             return GateVerdict.Deny("static", $"'{call.Tool}' is not in {agent.Id}'s tool allowlist");
         }
@@ -82,7 +89,7 @@ public sealed class PolicyGate(
         }
 
         // Layer 2: deterministic rules. Approval-required tools are always ask-first.
-        var approvalRequired = agent.ApprovalRequiredTools.Any(pattern => Glob.IsMatch(pattern, call.Tool));
+        var approvalRequired = agent.ApprovalRequiredTools.Any(pattern => ToolPattern.IsMatch(pattern, call.Tool));
         if (approvalRequired || match?.Rule.Effect == RuleEffect.Ask)
         {
             return Ask(call, argsHash, RiskLevel.High, approvalRequired ? "approval-required tool" : match!.Rule.Reason ?? "ask-first rule");

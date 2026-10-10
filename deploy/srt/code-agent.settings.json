@@ -1,0 +1,12 @@
+{
+  "agentId": "code",
+  "denyByDefault": true,
+  "allowDomains": [
+    "github.com",
+    "api.github.com"
+  ],
+  "writeAllowlist": [
+    "/workspace",
+    "/var/lib/fleet/agents/code"
+  ]
+}

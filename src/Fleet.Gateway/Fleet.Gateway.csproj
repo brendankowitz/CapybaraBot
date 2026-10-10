@@ -5,6 +5,7 @@
     <RootNamespace>Fleet.Gateway</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.Server" />
     <ProjectReference Include="..\Fleet.Contracts\Fleet.Contracts.csproj" />
     <ProjectReference Include="..\Fleet.Policy\Fleet.Policy.csproj" />
     <ProjectReference Include="..\Fleet.Orchestration\Fleet.Orchestration.csproj" />
@@ -12,5 +13,6 @@
     <ProjectReference Include="..\Fleet.Observability\Fleet.Observability.csproj" />
     <ProjectReference Include="..\Fleet.Scheduling\Fleet.Scheduling.csproj" />
     <ProjectReference Include="..\Fleet.Runtime.Copilot\Fleet.Runtime.Copilot.csproj" />
+    <ProjectReference Include="..\Fleet.Pwa\Fleet.Pwa.csproj" />
   </ItemGroup>
 </Project>

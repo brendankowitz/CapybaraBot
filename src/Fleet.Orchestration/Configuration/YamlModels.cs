@@ -33,6 +33,56 @@ internal sealed class AgentYaml
     public BudgetYaml? Budget { get; set; }
 
     public MemoryYaml Memory { get; set; } = new();
+
+    public bool Hidden { get; set; }
+
+    public string? Host { get; set; }
+
+    public ProviderYaml? Provider { get; set; }
+
+    public List<McpServerYaml> McpServers { get; set; } = [];
+
+    public bool RemoteSessions { get; set; }
+
+    public bool? Notifications { get; set; }
+}
+
+internal sealed class ProviderYaml
+{
+    public string? Type { get; set; }
+
+    public string? BaseUrl { get; set; }
+
+    public string? WireApi { get; set; }
+
+    public string? ApiKeySecret { get; set; }
+
+    public string? Model { get; set; }
+
+    public string? AzureApiVersion { get; set; }
+}
+
+internal sealed class McpServerYaml
+{
+    public string? Name { get; set; }
+
+    public string? Type { get; set; }
+
+    public string? Command { get; set; }
+
+    public List<string> Args { get; set; } = [];
+
+    public string? Url { get; set; }
+
+    public List<string> Tools { get; set; } = [];
+
+    public string? Sha256 { get; set; }
+
+    public bool? Untrusted { get; set; }
+
+    public string? TokenSecret { get; set; }
+
+    public int? Timeout { get; set; }
 }
 
 internal sealed class TrifectaYaml
@@ -111,6 +161,8 @@ internal sealed class RoutineYaml
     public string? Kind { get; set; }
 
     public string? Every { get; set; }
+
+    public string? Cron { get; set; }
 
     public string? ActiveHours { get; set; }
 
