@@ -1,8 +1,10 @@
-# Coding agent. Reads issues (untrusted), works in private repos, and can push, so pushes and PRs need approval.
+# Coding agent. Reads issues (untrusted), works in private repos and writes to them, so it holds all three trifecta
+# legs. Writes go through the broker: the grant confines commits and branches to agent/* on allowlisted repos (the
+# spec's "push only to agent/* branches"), and opening a pull request needs human approval (FR-SAF-02).
 id: code
 name: Code
 job: Fix bugs and implement small changes in the user's repositories on agent/* branches.
-description: Only push to branches named agent/*. Never push to main or force-push.
+description: Only write to branches named agent/*. Never write to main. Open a pull request for review when done.
 model: auto
 tools:
   - list_agents
@@ -13,13 +15,22 @@ tools:
   - memory_search
   - remember
   - propose_change
-  - shell
-  - read_file
-  - edit_file
-  - git_push
+  # Copilot CLI built-ins, run inside the srt sandbox with the egress allowlist below.
+  - bash
+  - view
+  - create
+  - edit
+  - grep
+  - glob
+  # Broker tools, named {connection}_{operation}.
+  - github_list_issues
+  - github_list_prs
+  - github_read_file
+  - github_create_branch
+  - github_commit_file
   - github_create_pr
-externalActionTools: [git_push, github_create_pr]
-approvalRequiredTools: [git_push, github_create_pr]
+externalActionTools: [github_create_pr]
+approvalRequiredTools: [github_create_pr]
 trifecta:
   untrustedInput: true
   privateData: true
@@ -32,10 +43,17 @@ accepts:
   consults: true
   messages: true
   tasks: true
+# One grant per constraint set: reads are scoped to allowlisted repos; writes also to agent/* branches. There is no
+# push, force-push, merge or release operation at all.
 grants:
   - connection: github
-    operations: [read, push, pull_request]
+    operations: [list_issues, list_prs, read_file]
     constraints:
+      repo: ["brendankowitz/*"]
+  - connection: github
+    operations: [create_branch, commit_file, create_pr]
+    constraints:
+      repo: ["brendankowitz/*"]
       branch: ["agent/*"]
 egress: [github.com, api.github.com]
 budget:

@@ -1,16 +1,16 @@
 # Deterministic rules (FR-SAF-01). Precedence: deny > ask > allowUnlessTainted > allow.
 - effect: deny
   agent: code
-  tool: git_push
+  tool: github_commit_file
   argument: branch
   pattern: main
-  reason: Never push to main.
+  reason: Never commit to main (the broker grant also confines writes to agent/*).
 - effect: deny
   agent: code
-  tool: git_push
-  argument: force
-  pattern: "true"
-  reason: Never force-push.
+  tool: github_create_branch
+  argument: branch
+  pattern: main
+  reason: Never write to main.
 - effect: allow
   tool: memory_*
   reason: Memory reads are scoped by the store itself.

@@ -1,97 +1,95 @@
+using System.Net.Http.Headers;
 using Capybara.Connections.Broker;
-using Capybara.Connections.Client;
 using Capybara.Connections.Connectors;
 using Capybara.Connections.Grants;
 using Capybara.Connections.Health;
 using Capybara.Connections.Mcp;
+using Capybara.Connections.Model;
+using Capybara.Connections.OAuth;
 using Capybara.Connections.Vault;
 using Capybara.Contracts.Storage;
-using Capybara.Observability.Alerts;
 using Capybara.Policy.Audit;
-using Capybara.Policy.Safety;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Capybara.Connections.DependencyInjection;
 
-/// <summary>Options for registering Capybara.Connections (FR-CON-01).</summary>
-public sealed class ConnectionsOptions
-{
-    public string? CredentialsDirectory { get; set; }
-
-    public TimeSpan TokenExpiryLeadTime { get; set; } = TimeSpan.FromDays(3);
-}
-
 public static class ConnectionsServiceCollectionExtensions
 {
-    /// <summary>Adds the connection broker, grant enforcement, token vault, MCP façade and health monitor (FR-CON-01..10).</summary>
-    public static IServiceCollection AddCapybaraConnections(this IServiceCollection services, ConnectionsOptions options)
+    internal const string ConnectorHttpClient = "capybara-connector";
+    internal const string CapybaradHttpClient = "capybara-capybarad";
+
+    /// <summary>
+    /// Registers everything the capybara-broker process runs (FR-CON-01..10): connectors over long-lived HTTP clients,
+    /// read-only grants from config, the encrypted writable vault layered over systemd credentials, OAuth refresh and
+    /// consent, the hash-chained audit log, the persistent freeze, the tool catalog, MCP and the startup validator.
+    /// capybarad must not call this; it uses <see cref="BrokerClientServiceCollectionExtensions.AddCapybaraBrokerClient"/>.
+    /// </summary>
+    public static IServiceCollection AddCapybaraConnectionBroker(this IServiceCollection services, BrokerOptions options)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(options);
 
+        services.AddSingleton(options);
         services.TryAddSingleton(TimeProvider.System);
-        services.TryAddSingleton<IGrantProvider, InMemoryGrantProvider>();
-        services.TryAddSingleton<GrantEnforcer>();
-        services.TryAddSingleton<IConnectorRegistry, InMemoryConnectorRegistry>();
-        services.TryAddSingleton<TokenVault>();
-        services.TryAddSingleton<SecretRedactor>();
-        services.TryAddSingleton<PerAgentBearerTokenIssuer>();
-        services.TryAddSingleton<ICredentialHealthSource, InMemoryCredentialHealthSource>();
-        services.Configure<TokenHealthOptions>(o => o.LeadTime = options.TokenExpiryLeadTime);
-        services.TryAddSingleton<TokenHealthMonitor>();
-        services.AddHostedService<TokenHealthBackgroundService>();
-        services.TryAddSingleton<ConnectionBroker>();
-        services.TryAddSingleton<IBrokerToolSource, BrokerToolSource>();
-        services.TryAddSingleton<KillSwitch>();
-        services.TryAddSingleton<IAlertSink, InMemoryAlertSink>();
-        services.TryAddSingleton<IAuditLog, NullAuditLog>();
-
-        if (options.CredentialsDirectory is { Length: > 0 })
+        services.AddHttpClient(ConnectorHttpClient)
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(15) });
+        services.AddHttpClient(CapybaradHttpClient, client =>
         {
-            services.TryAddSingleton<ISecretStore>(_ => new CredentialsDirectorySecretStore(options.CredentialsDirectory));
-        }
+            client.BaseAddress = options.CapybaradUrl;
+            if (options.ReadApiKey() is { } key)
+            {
+                client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", key);
+            }
+        });
 
-        services.TryAddSingleton<ISecretStore, EmptySecretStore>();
-        services.AddHttpClient<BrokerClient>();
+        services.AddSingleton(sp =>
+        {
+            var factory = sp.GetRequiredService<IHttpClientFactory>();
+            return new ConnectorRegistry(options.Connections.Select(c => ConnectorRegistry.Create(ConnectionDefinition.Create(c.Id, c.Kind), factory.CreateClient(ConnectorHttpClient))));
+        });
+        services.AddSingleton(_ => ConfigGrantProvider.Load(options.ConfigRoot));
+        services.AddSingleton<IGrantProvider>(sp => sp.GetRequiredService<ConfigGrantProvider>());
+        services.AddSingleton<GrantEnforcer>();
+        services.AddSingleton<BrokerToolCatalog>();
+
+        services.AddSingleton<ISecretStore>(_ =>
+        {
+            var credentials = options.ResolveCredentialsDirectory();
+            var key = EncryptedFileSecretStore.LoadKey(Path.Combine(credentials, options.VaultKeyCredential));
+            return new LayeredSecretStore(
+                new EncryptedFileSecretStore(Path.Combine(options.ResolveStateDirectory(), "vault"), key),
+                new CredentialsDirectorySecretStore(credentials));
+        });
+        services.AddSingleton<TokenVault>();
+        services.AddSingleton<IReadOnlyDictionary<CredentialProvider, OAuthClientOptions>>(_ => OAuthRegistrations(options));
+        services.AddSingleton(sp => new OAuthClient(sp.GetRequiredService<IHttpClientFactory>().CreateClient(ConnectorHttpClient)));
+        services.AddSingleton<IInteractiveAuthRouter>(sp => new CapybaradInteractiveAuthRouter(sp.GetRequiredService<IHttpClientFactory>().CreateClient(CapybaradHttpClient)));
+        services.AddSingleton<CredentialManager>();
+        services.AddSingleton<ICredentialHealthSource, VaultCredentialHealthSource>();
+
+        services.AddSingleton<IAuditLog>(sp => new FileAuditLog(Path.Combine(options.ResolveStateDirectory(), "audit", "broker-audit.jsonl"), sp.GetRequiredService<TimeProvider>()));
+        services.AddSingleton(sp => new BrokerFreeze(Path.Combine(options.ResolveStateDirectory(), "broker.frozen"), sp.GetRequiredService<IAuditLog>()));
+        services.AddSingleton<ConnectionBroker>();
+        services.AddSingleton(new McpServerCatalog([.. options.McpServers]));
+        services.AddCapybaraBrokerMcp();
+        services.AddHostedService<BrokerStartupValidator>();
         return services;
     }
-}
 
-internal sealed class NullAuditLog : IAuditLog
-{
-    public ValueTask<AuditEntry> AppendAsync(AuditRecord record, CancellationToken cancellationToken = default) => ValueTask.FromResult(new AuditEntry
+    private static Dictionary<CredentialProvider, OAuthClientOptions> OAuthRegistrations(BrokerOptions options)
     {
-        Sequence = 0,
-        At = DateTimeOffset.UnixEpoch,
-        Kind = record.Kind,
-        Decision = record.Decision,
-        Agent = record.Agent,
-        SessionId = record.SessionId,
-        Tool = record.Tool,
-        ArgsHash = record.ArgsHash,
-        Detail = record.Detail,
-        TraceId = record.TraceId,
-        PreviousHash = string.Empty,
-    });
+        var registrations = new Dictionary<CredentialProvider, OAuthClientOptions>();
+        foreach (var (name, registration) in options.OAuth)
+        {
+            if (!Enum.TryParse<CredentialProvider>(name, ignoreCase: true, out var provider) || provider == CredentialProvider.GitHub)
+            {
+                throw new InvalidOperationException($"Broker:OAuth:{name} is not an OAuth provider (Google, Microsoft).");
+            }
 
-    public async IAsyncEnumerable<AuditEntry> ReadAllAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
-    {
-        await Task.CompletedTask;
-        yield break;
+            registrations[provider] = registration;
+        }
+
+        return registrations;
     }
-
-    public ValueTask<bool> VerifyAsync(CancellationToken cancellationToken = default) => ValueTask.FromResult(true);
-}
-
-
-internal sealed class EmptySecretStore : ISecretStore
-{
-    public ValueTask<string?> GetAsync(string name, CancellationToken cancellationToken = default) => ValueTask.FromResult<string?>(null);
-
-    public ValueTask SetAsync(string name, string value, CancellationToken cancellationToken = default) => throw new NotSupportedException("No credential store is configured.");
-
-    public ValueTask DeleteAsync(string name, CancellationToken cancellationToken = default) => throw new NotSupportedException("No credential store is configured.");
-
-    public ValueTask<IReadOnlyList<string>> ListAsync(CancellationToken cancellationToken = default) => ValueTask.FromResult<IReadOnlyList<string>>([]);
 }

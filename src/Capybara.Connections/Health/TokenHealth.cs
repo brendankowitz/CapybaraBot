@@ -10,6 +10,7 @@ public sealed record CredentialHealth(string ConnectionId, CredentialKind Kind, 
 public enum CredentialKind
 {
     GoogleRefreshTokenTesting,
+    GoogleRefreshToken,
     MicrosoftRefreshToken,
     GitHubFineGrainedPat,
     GitHubAppInstallationToken,
@@ -56,7 +57,7 @@ public sealed class TokenHealthMonitor(ICredentialHealthSource source, IAlertSin
 
             if (item.ExpiresAt <= now.Add(lead))
             {
-                await alerts.PublishAsync(new Alert("token_expiry", item.ExpiresAt <= now ? AlertSeverity.Critical : AlertSeverity.Warning, $"{item.ConnectionId}: {item.Kind} expires at {item.ExpiresAt:O}.", now), cancellationToken);
+                await alerts.PublishAsync(new Alert("token_expiry", item.ExpiresAt <= now ? AlertSeverity.Critical : AlertSeverity.Warning, item.Detail is { } detail ? $"{item.ConnectionId}: {detail}" : $"{item.ConnectionId}: {item.Kind} expires at {item.ExpiresAt:O}.", now), cancellationToken);
             }
         }
     }

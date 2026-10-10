@@ -2,7 +2,11 @@ using Microsoft.Playwright;
 
 namespace Capybara.Connections.Browser;
 
-/// <summary>Per-agent persistent Playwright profile directories treated as secrets (FR-CON-09).</summary>
+/// <summary>
+/// Per-agent persistent Playwright profile directories, treated as secrets (FR-CON-09). A profile cannot be shared
+/// across browser instances, so each agent gets its own. The browser runs headed when a display (Xvfb) is present so
+/// the human can take over through noVNC; take-over itself is provided by the display server, not by Chromium.
+/// </summary>
 public sealed class BrowserProfileManager(string root)
 {
     public string GetProfileDirectory(string agentId)
@@ -13,13 +17,12 @@ public sealed class BrowserProfileManager(string root)
         return path;
     }
 
-    public BrowserTypeLaunchPersistentContextOptions CreateLaunchOptions(string agentId, Uri? noVncTakeoverUrl = null)
+    public BrowserTypeLaunchPersistentContextOptions CreateLaunchOptions(string agentId)
     {
         _ = GetProfileDirectory(agentId);
         return new BrowserTypeLaunchPersistentContextOptions
         {
             Headless = string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DISPLAY")),
-            Args = noVncTakeoverUrl is null ? [] : [$"--no-vnc-takeover-url={noVncTakeoverUrl}"],
         };
     }
 

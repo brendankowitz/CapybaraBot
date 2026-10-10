@@ -1,21 +1,32 @@
 using System.Security.Cryptography;
 using Capybara.Connections.Mcp;
+using Capybara.Testing;
 
 namespace Capybara.Connections.Tests;
 
 public sealed class McpServerCatalogTests
 {
     [Fact]
-    public async Task Refuses_hash_mismatch()
+    public async Task Startup_verification_reports_hash_mismatch_and_missing_files()
     {
-        var root = Path.Combine(Environment.CurrentDirectory, "test-artifacts", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(root);
-        var file = Path.Combine(root, "server.bin");
-        await File.WriteAllBytesAsync(file, RandomNumberGenerator.GetBytes(16), TestContext.Current.CancellationToken);
-        var catalog = new McpServerCatalog([]);
+        using var dir = new TempDirectory();
+        var good = Path.Combine(dir.Path, "good.bin");
+        var bad = Path.Combine(dir.Path, "bad.bin");
+        var bytes = RandomNumberGenerator.GetBytes(16);
+        await File.WriteAllBytesAsync(good, bytes, TestContext.Current.CancellationToken);
+        await File.WriteAllBytesAsync(bad, bytes, TestContext.Current.CancellationToken);
+        var pin = Convert.ToHexStringLower(SHA256.HashData(bytes));
+        var catalog = new McpServerCatalog(
+        [
+            new McpServerRegistration { Name = "good", ExecutablePath = good, Sha256 = pin },
+            new McpServerRegistration { Name = "bad", ExecutablePath = bad, Sha256 = new string('0', 64) },
+            new McpServerRegistration { Name = "gone", ExecutablePath = Path.Combine(dir.Path, "gone.bin"), Sha256 = pin },
+        ]);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(async () => await catalog.VerifyAsync(new McpServerRegistration("server", file, new string('0', 64), []), TestContext.Current.CancellationToken));
+        var errors = await catalog.VerifyAllAsync(TestContext.Current.CancellationToken);
 
-        Directory.Delete(root, recursive: true);
+        Assert.Equal(2, errors.Count);
+        Assert.Contains(errors, e => e.Contains("'bad'", StringComparison.Ordinal) && e.Contains("mismatch", StringComparison.Ordinal));
+        Assert.Contains(errors, e => e.Contains("'gone'", StringComparison.Ordinal));
     }
 }

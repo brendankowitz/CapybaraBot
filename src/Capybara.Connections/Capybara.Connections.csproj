@@ -11,8 +11,7 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="ModelContextProtocol" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" />
-    <PackageReference Include="Microsoft.Identity.Client" />
-    <PackageReference Include="Google.Apis.Auth" />
+    <PackageReference Include="YamlDotNet" />
     <PackageReference Include="Microsoft.Playwright" />
   </ItemGroup>
 </Project>

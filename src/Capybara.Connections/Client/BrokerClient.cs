@@ -1,55 +1,77 @@
-using System.ComponentModel;
 using System.Net.Http.Json;
-using System.Text.Json;
+using Capybara.Connections.Health;
 using Capybara.Connections.Model;
-using Microsoft.Extensions.AI;
+using Capybara.Connections.OAuth;
 
 namespace Capybara.Connections.Client;
 
-/// <summary>HTTP client used by capybarad to call the separate capybara-broker process (FR-CON-01).</summary>
+/// <summary>
+/// capybarad's client for the separate capybara-broker process (FR-CON-01). The <see cref="HttpClient"/> carries the
+/// broker base address and the broker API key. Every method throws <see cref="HttpRequestException"/> when the broker
+/// is unreachable or refuses the request; callers decide whether that fails closed.
+/// </summary>
+/// <remarks>Thread-safe; register as a singleton over a factory-created client.</remarks>
 public sealed class BrokerClient(HttpClient http)
 {
     public async ValueTask<BrokerResult> InvokeAsync(BrokerCall call, CancellationToken cancellationToken = default)
     {
-        using var response = await http.PostAsJsonAsync("/broker/invoke", call, cancellationToken);
+        using var response = await http.PostAsJsonAsync("/broker/invoke", call, BrokerJson.Options, cancellationToken);
         response.EnsureSuccessStatusCode();
-        return await response.Content.ReadFromJsonAsync<BrokerResult>(cancellationToken) ?? new BrokerResult(false, "empty broker response", Contracts.Messaging.Taint.Clean, 0, "empty response");
+        return await response.Content.ReadFromJsonAsync<BrokerResult>(BrokerJson.Options, cancellationToken)
+            ?? throw new HttpRequestException("The broker returned an empty result.");
     }
 
+    /// <summary>The broker tools the agent is granted, with input schemas (FR-CON-03).</summary>
+    public async ValueTask<IReadOnlyList<BrokerToolDescriptor>> ListToolsAsync(string agentId, CancellationToken cancellationToken = default) =>
+        await GetAsync<BrokerToolDescriptor[]>($"/broker/tools/{Uri.EscapeDataString(agentId)}", cancellationToken);
+
     public async ValueTask<IReadOnlyList<ConnectionStatus>> ListConnectionsAsync(CancellationToken cancellationToken = default) =>
-        await http.GetFromJsonAsync<IReadOnlyList<ConnectionStatus>>("/broker/connections", cancellationToken) ?? [];
-}
+        await GetAsync<ConnectionStatus[]>("/broker/connections", cancellationToken);
 
-/// <summary>Produces custom AI functions named connection_operation for granted broker tools (FR-CON-03).</summary>
-public interface IBrokerToolSource
-{
-    IReadOnlyList<AIFunctionDeclaration> GetTools(string agentId, IReadOnlyDictionary<string, IReadOnlyList<string>> operationsByConnection);
-}
+    /// <summary>Credential expiry metadata (no secrets) for the token health monitor (FR-CON-05).</summary>
+    public async ValueTask<IReadOnlyList<CredentialHealth>> ListCredentialHealthAsync(CancellationToken cancellationToken = default) =>
+        await GetAsync<CredentialHealth[]>("/broker/credentials/health", cancellationToken);
 
-public sealed class BrokerToolSource(BrokerClient client) : IBrokerToolSource
-{
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+    public ValueTask<BrokerHealth> GetHealthAsync(CancellationToken cancellationToken = default) => GetAsync<BrokerHealth>("/broker/health", cancellationToken);
 
-    public IReadOnlyList<AIFunctionDeclaration> GetTools(string agentId, IReadOnlyDictionary<string, IReadOnlyList<string>> operationsByConnection)
+    /// <summary>Denies every broker call until <see cref="UnfreezeAsync"/>; survives a broker restart (FR-SAF-06).</summary>
+    public ValueTask FreezeAsync(string reason, CancellationToken cancellationToken = default) => PostAsync("/broker/freeze", new BrokerFreezeRequest(reason), cancellationToken);
+
+    public ValueTask UnfreezeAsync(CancellationToken cancellationToken = default) => PostAsync<object?>("/broker/unfreeze", null, cancellationToken);
+
+    /// <summary>The agent's MCP path and bearer, for attaching the broker as an http MCP server to a session (FR-CON-03).</summary>
+    public async ValueTask<McpAgentEndpoint> GetMcpEndpointAsync(string agentId, CancellationToken cancellationToken = default)
     {
-        var tools = new List<AIFunctionDeclaration>();
-        foreach (var (connection, operations) in operationsByConnection)
-        {
-            foreach (var operation in operations)
-            {
-                var name = $"{connection}_{operation}";
-                var function = AIFunctionFactory.Create(
-                    async ([Description("JSON object arguments for the broker connector")] string argsJson, CancellationToken ct) =>
-                    {
-                        var result = await client.InvokeAsync(new BrokerCall(agentId, connection, operation, argsJson), ct);
-                        return JsonSerializer.Serialize(result, Json);
-                    },
-                    name,
-                    $"Invoke broker connection {connection} operation {operation}. Returns redacted data.");
-                tools.Add(function);
-            }
-        }
+        using var response = await http.PostAsync($"/broker/mcp/{Uri.EscapeDataString(agentId)}/token", content: null, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<McpAgentEndpoint>(BrokerJson.Options, cancellationToken)
+            ?? throw new HttpRequestException("The broker returned no MCP endpoint.");
+    }
 
-        return tools;
+    /// <summary>Starts consent for a connection; show <see cref="InteractiveAuthRequest.AuthorizationUri"/> to the human (FR-CON-08).</summary>
+    public async ValueTask<InteractiveAuthRequest> BeginAuthorizationAsync(string connectionId, CancellationToken cancellationToken = default)
+    {
+        using var response = await http.PostAsync($"/broker/connections/{Uri.EscapeDataString(connectionId)}/authorize", content: null, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<InteractiveAuthRequest>(BrokerJson.Options, cancellationToken)
+            ?? throw new HttpRequestException("The broker returned no authorization request.");
+    }
+
+    /// <summary>Forwards the provider redirect's <c>state</c> and <c>code</c> to the broker, which holds the PKCE verifier.</summary>
+    public async ValueTask<ConnectionStatus> CompleteAuthorizationAsync(string state, string code, CancellationToken cancellationToken = default)
+    {
+        using var response = await http.PostAsJsonAsync("/broker/oauth/complete", new OAuthCompletion(state, code), BrokerJson.Options, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<ConnectionStatus>(BrokerJson.Options, cancellationToken)
+            ?? throw new HttpRequestException("The broker returned no connection status.");
+    }
+
+    private async ValueTask<T> GetAsync<T>(string path, CancellationToken cancellationToken) =>
+        await http.GetFromJsonAsync<T>(path, BrokerJson.Options, cancellationToken) ?? throw new HttpRequestException($"The broker returned an empty response for {path}.");
+
+    private async ValueTask PostAsync<T>(string path, T body, CancellationToken cancellationToken)
+    {
+        using var response = await http.PostAsJsonAsync(path, body, BrokerJson.Options, cancellationToken);
+        response.EnsureSuccessStatusCode();
     }
 }
