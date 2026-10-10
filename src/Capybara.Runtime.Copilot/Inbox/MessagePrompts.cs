@@ -37,6 +37,14 @@ internal static class MessagePrompts
     /// <summary>Host-authored notices (approval outcomes) are passed as they are.</summary>
     public static string ForSystemMessage(FleetMessage message) => message.Body + Attachments(message);
 
+    /// <summary>
+    /// The follow-up after user messages were steered into background work (FR-AGT-05): they are already in the
+    /// conversation, so this only asks for the reply that goes back to the user.
+    /// </summary>
+    public const string ReplyToJoinedUserMessages =
+        "The user's message(s) above arrived while you were busy with background work. Reply to the user now; this reply "
+        + "is what they receive. Do not repeat the background work's report.";
+
     private static string Attachments(FleetMessage message)
     {
         if (message.Attachments.Count == 0)

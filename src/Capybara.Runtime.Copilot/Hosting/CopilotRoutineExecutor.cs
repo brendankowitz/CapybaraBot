@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Text.Json;
+using Capybara.Contracts.Agents;
 using System.Text;
 using Capybara.Contracts.Messaging;
 using Capybara.Runtime.Copilot.Configuration;
@@ -31,6 +33,8 @@ public sealed partial class CopilotRoutineExecutor(AgentRuntimePool runtimes, Co
     public const string UnverifiedMarker = "UNVERIFIED:";
 
     private const int MaxSummaryChars = 2_000;
+
+    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private const int RoutineToolCalls = 100;
 
     /// <summary>Raised with a successful, non-dry-run result for delivery to the routine's target (push, digest, ...).</summary>
@@ -61,9 +65,17 @@ public sealed partial class CopilotRoutineExecutor(AgentRuntimePool runtimes, Co
         };
 
         var result = await runtime.RunTurnAsync(request, cancellationToken);
-        if (target.Kind != SessionKind.Main && result.Evidence.PendingApprovals.Count == 0)
+        if (target.Kind != SessionKind.Main)
         {
-            await EndAsync(runtime, target);
+            if (result.Evidence.PendingApprovals.Count == 0)
+            {
+                await EndAsync(runtime, target);
+            }
+            else
+            {
+                // The approval outcome resumes this session through the inbox; it must still run as this routine.
+                SaveContinuation(new RoutineContinuation(routine, invocation.RunId, invocation.ModelTier, Math.Max(0m, routine.BudgetCreditsPerRun - result.Evidence.Credits), target.Key!));
+            }
         }
 
         var evidence = result.Evidence;
@@ -77,19 +89,92 @@ public sealed partial class CopilotRoutineExecutor(AgentRuntimePool runtimes, Co
             _ => RoutineExecutionStatus.Succeeded,
         };
 
-        if (status == RoutineExecutionStatus.Succeeded && !invocation.DryRun && result.Content is { } content)
+        // A user DM that joined the run (FR-AGT-05) gets its own reply from the inbox; the run's text may answer the user,
+        // so it never goes to the routine's delivery target.
+        var joined = result.UserMessagesJoined > 0;
+        if (status == RoutineExecutionStatus.Succeeded && !invocation.DryRun && !joined && result.Content is { } content)
         {
             Output?.Invoke(this, new RoutineOutputEventArgs(routine, invocation.RunId, content));
         }
 
         return new RoutineExecutionResult(
-            status,
-            Summarize(result),
+            joined && status == RoutineExecutionStatus.NothingToReport ? RoutineExecutionStatus.Succeeded : status,
+            joined ? $"[a user message joined this run; output not delivered] {Summarize(result)}" : Summarize(result),
             new RoutineEvidence(evidence.Sources, evidence.ActionLog, Unverified(result.Content), evidence.DeniedApprovals),
             evidence.Credits,
             evidence.Model ?? invocation.ModelTier,
             CreditsLedgered: true);
     }
+
+    /// <summary>
+    /// The routine run an isolated session belongs to, when that run is waiting for an approval; the inbox pump uses it
+    /// to resume the session as the routine (attribution, model, remaining budget).
+    /// </summary>
+    public RoutineContinuation? FindContinuation(AgentId agent, string sessionKey)
+    {
+        var path = ContinuationPath(agent, sessionKey);
+        try
+        {
+            return File.Exists(path) ? JsonSerializer.Deserialize<RoutineContinuation>(File.ReadAllText(path), Json) : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            LogContinuationUnreadable(logger, ex, agent.Value, sessionKey);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// After a resumed turn: delivers its output like the run's own, and once no approval is pending any more, forgets
+    /// the continuation and deletes the session.
+    /// </summary>
+    public async Task CompleteContinuationAsync(RoutineContinuation continuation, IAgentRuntime runtime, TurnResult result)
+    {
+        ArgumentNullException.ThrowIfNull(continuation);
+        ArgumentNullException.ThrowIfNull(runtime);
+        ArgumentNullException.ThrowIfNull(result);
+        if (result.Success && result.UserMessagesJoined == 0 && result.Content is { } content)
+        {
+            Output?.Invoke(this, new RoutineOutputEventArgs(continuation.Routine, continuation.RunId, content));
+        }
+
+        if (result.Evidence.PendingApprovals.Count > 0)
+        {
+            SaveContinuation(continuation with { RemainingCredits = Math.Max(0m, continuation.RemainingCredits - result.Evidence.Credits) });
+            return;
+        }
+
+        try
+        {
+            File.Delete(ContinuationPath(runtime.Agent, continuation.SessionKey));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            LogContinuationUnreadable(logger, ex, runtime.Agent.Value, continuation.SessionKey);
+        }
+
+        await EndAsync(runtime, TurnTarget.Isolated(continuation.SessionKey));
+    }
+
+    private void SaveContinuation(RoutineContinuation continuation)
+    {
+        var path = ContinuationPath(continuation.Routine.Owner, continuation.SessionKey);
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            var temp = $"{path}.{Guid.NewGuid():N}.tmp";
+            File.WriteAllText(temp, JsonSerializer.Serialize(continuation, Json));
+            File.Move(temp, path, overwrite: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // The resumed turn then runs unattributed in its session; the approval itself is unaffected.
+            LogContinuationUnreadable(logger, ex, continuation.Routine.Owner.Value, continuation.SessionKey);
+        }
+    }
+
+    private string ContinuationPath(AgentId agent, string sessionKey) =>
+        Path.Combine(options.AgentStateDirectory(agent), "routine-sessions", $"{TurnTarget.Isolated(sessionKey).Key}.json");
 
     /// <summary>The routine's instructions, plus an event payload as untrusted, delimited data (FR-RTN-07).</summary>
     internal static string PromptFor(RoutineInvocation invocation)
@@ -171,6 +256,9 @@ public sealed partial class CopilotRoutineExecutor(AgentRuntimePool runtimes, Co
             LogEndFailed(logger, ex, runtime.Agent.Value);
         }
     }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Routine continuation {SessionKey} of {Agent} could not be read or written")]
+    private static partial void LogContinuationUnreadable(ILogger logger, Exception exception, string agent, string sessionKey);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Could not delete the isolated routine session of {Agent}")]
     private static partial void LogEndFailed(ILogger logger, Exception exception, string agent);

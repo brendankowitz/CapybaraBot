@@ -17,24 +17,29 @@ namespace Capybara.Runtime.Copilot.Inbox;
 /// message is acknowledged only after its turn completed — the runtime has persisted it — so a crash loses nothing
 /// (NFR-02). A user DM pre-empts background work: it is taken before any queued background item, and while a
 /// main-session turn is in flight — the pump's own or a routine heartbeat — it is interjected into that turn in
-/// <c>immediate</c> mode and acknowledged once that turn has completed. Dry-run turns are never joined.
+/// <c>immediate</c> mode. A DM that joined background work then gets its own reply turn, and is acknowledged only once
+/// that reply exists. Dry-run turns are never joined.
 /// </summary>
 /// <remarks>
 /// <para>
 /// Routing: a message addressed to one of the agent's task sessions runs there (a delegated task's assignment, answers
 /// and approval outcomes, or a sub-task's question and result for the session that delegated it); an isolated routine
-/// run resumes for its approval outcome; everything else runs in the main session. A message about a task that has
-/// already finished is acknowledged without a turn. Finished task sessions are deleted.
+/// run resumes for its approval outcome, as its routine; everything else runs in the main session. A message about a
+/// task that has finished, expired or run out of budget is acknowledged without a turn.
 /// </para>
 /// <para>
-/// Failures: a paused or over-budget agent keeps its messages and is polled again; a failed turn is retried with
-/// exponential back-off, and after <see cref="InboxPumpOptions.MaxAttempts"/> the message is dead-lettered (kept on
-/// disk, out of the queue) and the user alerted, so one poisoned message cannot block the inbox forever.
+/// Failures never stop the pump: a paused, over-budget or throttled agent keeps its messages and is polled again; a
+/// failed turn, or a message the pump cannot even plan, is retried with exponential back-off and after
+/// <see cref="InboxPumpOptions.MaxAttempts"/> dead-lettered (kept on disk, out of the queue) with a content-free alert;
+/// an acknowledgement that fails is retried without re-running the turn; an unreadable message file is quarantined by
+/// the store and alerted. Anything else is logged and the loop continues.
 /// </para>
 /// </remarks>
 public sealed partial class InboxPump
 {
     public const string DeadLetterAlertKind = "inbox.dead_letter";
+
+    public const string QuarantineAlertKind = "inbox.quarantined";
 
     private readonly IAgentRuntime _runtime;
     private readonly IInboxStore _inbox;
@@ -43,10 +48,17 @@ public sealed partial class InboxPump
     private readonly InboxPumpOptions _options;
     private readonly TimeProvider _time;
     private readonly ILogger _logger;
+    private readonly CopilotRoutineExecutor? _routines;
     private readonly Channel<bool> _wake = Channel.CreateBounded<bool>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropWrite });
     private readonly Lock _gate = new();
     private readonly Dictionary<string, int> _attempts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTimeOffset> _notBefore = new(StringComparer.Ordinal);
+
+    /// <summary>Handled messages whose acknowledgement failed: never run again, acknowledged on a later pass.</summary>
+    private readonly HashSet<string> _handled = new(StringComparer.Ordinal);
+
+    /// <summary>Messages that could not even be dead-lettered: skipped for the life of this process.</summary>
+    private readonly HashSet<string> _skipped = new(StringComparer.Ordinal);
     private readonly HashSet<string> _claimed = new(StringComparer.Ordinal);
     private readonly List<FleetMessage> _steered = [];
     private readonly List<Task> _steering = [];
@@ -59,7 +71,8 @@ public sealed partial class InboxPump
         IAlertSink alerts,
         InboxPumpOptions options,
         TimeProvider time,
-        ILogger<InboxPump> logger)
+        ILogger<InboxPump> logger,
+        CopilotRoutineExecutor? routines = null)
     {
         ArgumentNullException.ThrowIfNull(runtime);
         _runtime = runtime;
@@ -69,43 +82,75 @@ public sealed partial class InboxPump
         _options = options;
         _time = time;
         _logger = logger;
+        _routines = routines;
     }
 
     public AgentId Agent => _runtime.Agent;
 
-    /// <summary>Raised after a message's turn completed and the message was acknowledged.</summary>
+    /// <summary>
+    /// Raised after a message's turn completed and the message was acknowledged. For user DMs that joined background
+    /// work, raised once more with their reply turn.
+    /// </summary>
     public event EventHandler<InboxTurnCompletedEventArgs>? TurnCompleted;
 
-    /// <summary>Consumes the inbox until <paramref name="stoppingToken"/> is cancelled. Call once.</summary>
+    /// <summary>
+    /// Consumes the inbox until <paramref name="stoppingToken"/> is cancelled. May be called again after it ended
+    /// (the hosted service restarts a pump that faulted); in-memory retry state carries over.
+    /// </summary>
     public async Task RunAsync(CancellationToken stoppingToken)
     {
         _inbox.MessageAvailable += OnMessageAvailable;
+        _inbox.MessageQuarantined += OnMessageQuarantined;
         try
         {
             while (!stoppingToken.IsCancellationRequested)
             {
-                var (next, wakeAt) = await NextAsync(stoppingToken);
-                if (next is null)
+                FleetMessage? current = null;
+                try
                 {
-                    await WaitAsync(wakeAt, stoppingToken);
-                    continue;
-                }
+                    await AcknowledgeHandledAsync(stoppingToken);
+                    var (next, wakeAt) = await NextAsync(stoppingToken);
+                    if (next is null)
+                    {
+                        await WaitAsync(wakeAt, stoppingToken);
+                        continue;
+                    }
 
-                await ProcessAsync(next, stoppingToken);
+                    current = next;
+                    await ProcessAsync(next, stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+#pragma warning disable CA1031 // One bad message or a passing I/O fault must never stop the agent's inbox (NFR-02).
+                catch (Exception ex)
+#pragma warning restore CA1031
+                {
+                    LogIterationFailed(_logger, ex, Agent.Value);
+                    if (current is not null)
+                    {
+                        await FailAsync(current, $"{ex.GetType().Name}: {ex.Message}");
+                    }
+                    else
+                    {
+                        await PauseAsync(_options.BlockedPollInterval, stoppingToken);
+                    }
+                }
             }
-        }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-        {
         }
         finally
         {
             _inbox.MessageAvailable -= OnMessageAvailable;
+            _inbox.MessageQuarantined -= OnMessageQuarantined;
         }
     }
 
     private static bool IsUserDm(FleetMessage message) => message.Origin == MessageOrigin.User;
 
     private static bool IsIncognito(FleetMessage message) => SessionIds.TryParseIncognito(message.SessionId, out _, out _);
+
+    private static bool Handled(TurnResult result) => result.Status is TurnStatus.Completed or TurnStatus.LimitExceeded;
 
     /// <summary>The oldest ready user DM, else the oldest ready background message, else when to look again.</summary>
     private async Task<(FleetMessage? Next, DateTimeOffset? WakeAt)> NextAsync(CancellationToken cancellationToken)
@@ -115,6 +160,7 @@ public sealed partial class InboxPump
         DateTimeOffset? wakeAt = null;
         lock (_gate)
         {
+            var open = pending.Where(m => !_handled.Contains(m.Id) && !_skipped.Contains(m.Id)).ToList();
             bool Ready(FleetMessage m)
             {
                 if (!_notBefore.TryGetValue(m.Id, out var at) || at <= now)
@@ -126,15 +172,22 @@ public sealed partial class InboxPump
                 return false;
             }
 
-            if (pending.Where(IsUserDm).FirstOrDefault(Ready) is { } dm)
+            if (open.Where(IsUserDm).FirstOrDefault(Ready) is { } dm)
             {
                 return (dm, null);
             }
 
             // Background work is strictly FIFO: a backing-off head blocks the messages behind it.
-            if (pending.FirstOrDefault(m => !IsUserDm(m)) is { } head && Ready(head))
+            if (open.FirstOrDefault(m => !IsUserDm(m)) is { } head && Ready(head))
             {
                 return (head, null);
+            }
+
+            if (_handled.Count > 0)
+            {
+                // Acknowledgements are still owed: come back for them.
+                var retry = now + _options.InitialRetryDelay;
+                wakeAt = wakeAt is { } w && w < retry ? w : retry;
             }
         }
 
@@ -162,47 +215,56 @@ public sealed partial class InboxPump
         if (plan is null)
         {
             LogSkipped(_logger, message.Id, Agent.Value);
-            await _inbox.AcknowledgeAsync(Agent, message.Id, CancellationToken.None);
+            await AcknowledgeAsync([message.Id]);
             Forget(message.Id);
             return;
         }
 
-        TurnResult result;
-        IReadOnlyList<FleetMessage> steered = [];
         if (IsUserDm(message) && plan.Request.Target.Kind == SessionKind.Main
-            && await _runtime.SteerAsync(message.Body, MessageOrigin.User, stoppingToken) is { } joined)
+            && await TrySteerAsync(message.Body, stoppingToken) is { } joined && Handled(joined))
         {
-            // A main turn that is not ours (a routine heartbeat) was in flight: the DM joined it and shares its outcome.
-            result = joined;
+            // A main turn the pump did not start (a routine heartbeat) was in flight and the DM joined it.
+            await AnswerJoinedDmsAsync([message], stoppingToken);
+            return;
         }
-        else
+
+        TurnResult result;
+        IReadOnlyList<FleetMessage> steered;
+        BeginTurn(message, plan.Request.Target);
+        try
         {
-            BeginTurn(message, plan.Request.Target);
-            try
-            {
-                result = await _runtime.RunTurnAsync(plan.Request, stoppingToken);
-            }
-            finally
-            {
-                steered = await EndTurnAsync();
-            }
+            result = await _runtime.RunTurnAsync(plan.Request, stoppingToken);
+        }
+        finally
+        {
+            steered = await EndTurnAsync();
         }
 
         switch (result.Status)
         {
             case TurnStatus.Completed or TurnStatus.LimitExceeded:
-                // A turn stopped at its own credit limit was handled as far as its budget allowed; rerunning it would
-                // only overspend again.
-                // The turn is persisted: only now may the messages leave the inbox (NFR-02).
-                await _inbox.AcknowledgeAsync(Agent, message.Id, CancellationToken.None);
-                foreach (var dm in steered)
+                // The turn is persisted: only now may the message leave the inbox (NFR-02). A turn stopped at its own
+                // credit limit was handled as far as its budget allowed; rerunning it would only overspend again.
+                if (IsUserDm(message))
                 {
-                    await _inbox.AcknowledgeAsync(Agent, dm.Id, CancellationToken.None);
+                    // A user turn answers every user message in it.
+                    await AcknowledgeAsync([message.Id, .. steered.Select(dm => dm.Id)]);
+                    Forget(message.Id);
+                    await AfterTurnAsync(plan, result);
+                    Raise(new InboxTurnCompletedEventArgs(Agent, message, result, steered));
+                }
+                else
+                {
+                    await AcknowledgeAsync([message.Id]);
+                    Forget(message.Id);
+                    await AfterTurnAsync(plan, result);
+                    Raise(new InboxTurnCompletedEventArgs(Agent, message, result, []));
+                    if (steered.Count > 0)
+                    {
+                        await AnswerJoinedDmsAsync(steered, stoppingToken);
+                    }
                 }
 
-                Forget(message.Id);
-                await AfterTurnAsync(plan, result);
-                Raise(new InboxTurnCompletedEventArgs(Agent, message, result, steered));
                 break;
 
             case TurnStatus.Blocked or TurnStatus.OverBudget or TurnStatus.Throttled:
@@ -211,8 +273,59 @@ public sealed partial class InboxPump
                 break;
 
             default:
-                await RetryOrDeadLetterAsync(message, result.Error);
+                await FailAsync(message, result.Error);
                 break;
+        }
+    }
+
+    /// <summary>
+    /// User DMs that joined background work are in the conversation but have no reply of their own: one more main turn
+    /// produces it (attributed to no routine). They are acknowledged only once that reply exists; if it fails they stay
+    /// queued and later run as turns of their own.
+    /// </summary>
+    private async Task AnswerJoinedDmsAsync(IReadOnlyList<FleetMessage> dms, CancellationToken stoppingToken)
+    {
+        var reply = await _runtime.RunTurnAsync(
+            new AgentTurnRequest
+            {
+                Prompt = MessagePrompts.ReplyToJoinedUserMessages,
+                Origin = MessageOrigin.System,
+                Principal = "user",
+                Target = TurnTarget.Main,
+            },
+            stoppingToken);
+
+        if (!Handled(reply))
+        {
+            LogReplyFailed(_logger, Agent.Value, reply.Error);
+            return;
+        }
+
+        await AcknowledgeAsync([.. dms.Select(dm => dm.Id)]);
+        foreach (var dm in dms)
+        {
+            Forget(dm.Id);
+        }
+
+        Raise(new InboxTurnCompletedEventArgs(Agent, dms[0], reply, [.. dms.Skip(1)]));
+    }
+
+    private async Task<TurnResult?> TrySteerAsync(string prompt, CancellationToken stoppingToken)
+    {
+        try
+        {
+            return await _runtime.SteerAsync(prompt, MessageOrigin.User, stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            throw;
+        }
+#pragma warning disable CA1031 // Not joined: the DM runs as its own turn instead.
+        catch (Exception ex)
+#pragma warning restore CA1031
+        {
+            LogSteerFailed(_logger, ex, Agent.Value);
+            return null;
         }
     }
 
@@ -220,6 +333,7 @@ public sealed partial class InboxPump
     {
         var target = TurnTarget.Main;
         var assignment = false;
+        RoutineContinuation? continuation = null;
         if (SessionIds.TryParseIncognito(message.SessionId, out var owner, out var conversation) && owner == Agent)
         {
             target = TurnTarget.Incognito(conversation);
@@ -230,6 +344,7 @@ public sealed partial class InboxPump
             {
                 // An isolated routine run, resumed for its approval outcome.
                 target = TurnTarget.Isolated(key);
+                continuation = _routines?.FindContinuation(Agent, key);
             }
             else if (await _coordinator.GetRunnableTaskAsync(Agent, key, cancellationToken) is { } task)
             {
@@ -262,16 +377,22 @@ public sealed partial class InboxPump
             {
                 Prompt = prompt,
                 Origin = message.Origin,
-                Principal = message.Envelope?.OriginPrincipal ?? (message.Origin == MessageOrigin.User ? "user" : "system"),
+                Principal = continuation is { } run
+                    ? $"routine:{run.Routine.Id}"
+                    : message.Envelope?.OriginPrincipal ?? (message.Origin == MessageOrigin.User ? "user" : "system"),
                 Target = target,
                 From = message.From,
                 Taint = message.Taint,
                 Envelope = message.Origin == MessageOrigin.Agent && target.Task is null ? message.Envelope : null,
+                RoutineId = continuation?.Routine.Id,
+                Model = continuation?.Model,
+                Budget = continuation is { } c ? new Budget(c.RemainingCredits, 100, TimeSpan.FromMinutes(20)) : null,
             },
-            assignment);
+            assignment,
+            continuation);
     }
 
-    /// <summary>Marks a started task as working and deletes sessions whose work has ended.</summary>
+    /// <summary>Marks a started task as working, debits its spend, and deletes sessions whose work has ended.</summary>
     private async Task AfterTurnAsync(TurnPlan plan, TurnResult result)
     {
         var target = plan.Request.Target;
@@ -291,6 +412,10 @@ public sealed partial class InboxPump
                     await _runtime.EndSessionAsync(target, CancellationToken.None);
                 }
             }
+            else if (plan.Continuation is { } continuation && _routines is { } routines)
+            {
+                await routines.CompleteContinuationAsync(continuation, _runtime, result);
+            }
             else if (target.Kind == SessionKind.Task && result.Evidence.PendingApprovals.Count == 0)
             {
                 await _runtime.EndSessionAsync(target, CancellationToken.None);
@@ -301,6 +426,81 @@ public sealed partial class InboxPump
 #pragma warning restore CA1031
         {
             LogHousekeepingFailed(_logger, ex, Agent.Value);
+        }
+    }
+
+    /// <summary>
+    /// Acknowledges handled messages. If the store fails, they are remembered as handled — never run again — and the
+    /// acknowledgement is retried on later passes.
+    /// </summary>
+    private async Task AcknowledgeAsync(IReadOnlyList<string> messageIds)
+    {
+        foreach (var id in messageIds)
+        {
+            try
+            {
+                await _inbox.AcknowledgeAsync(Agent, id, CancellationToken.None);
+            }
+#pragma warning disable CA1031 // Retried by AcknowledgeHandledAsync.
+            catch (Exception ex)
+#pragma warning restore CA1031
+            {
+                LogAckFailed(_logger, ex, id, Agent.Value);
+                lock (_gate)
+                {
+                    _handled.Add(id);
+                }
+            }
+        }
+    }
+
+    private async Task AcknowledgeHandledAsync(CancellationToken cancellationToken)
+    {
+        string[] owed;
+        lock (_gate)
+        {
+            owed = [.. _handled];
+        }
+
+        foreach (var id in owed)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                await _inbox.AcknowledgeAsync(Agent, id, CancellationToken.None);
+                lock (_gate)
+                {
+                    _handled.Remove(id);
+                }
+            }
+#pragma warning disable CA1031 // Still owed; tried again next pass.
+            catch (Exception ex)
+#pragma warning restore CA1031
+            {
+                LogAckFailed(_logger, ex, id, Agent.Value);
+            }
+        }
+    }
+
+    /// <summary>Retries with back-off, then dead-letters; a message that cannot even be dead-lettered is skipped.</summary>
+    private async Task FailAsync(FleetMessage message, string? error)
+    {
+        try
+        {
+            await RetryOrDeadLetterAsync(message, error);
+        }
+#pragma warning disable CA1031 // The store is failing: skip the message rather than spin on it.
+        catch (Exception ex)
+#pragma warning restore CA1031
+        {
+            LogDeadLetterFailed(_logger, ex, message.Id, Agent.Value);
+            lock (_gate)
+            {
+                _skipped.Add(message.Id);
+            }
+
+            Forget(message.Id);
+            await PublishAsync(new Alert(DeadLetterAlertKind, AlertSeverity.Warning, $"A message for {Agent} kept failing and could not be moved to its dead-letter folder; it is skipped until capybarad restarts.", _time.GetUtcNow(), Agent.Value));
         }
     }
 
@@ -325,9 +525,33 @@ public sealed partial class InboxPump
         Forget(message.Id);
 
         // Content-free: the alert names the agent and the count, never the message.
-        await _alerts.PublishAsync(
-            new Alert(DeadLetterAlertKind, AlertSeverity.Warning, $"A message for {Agent} failed {attempts} times and was moved to its dead-letter folder.", _time.GetUtcNow(), Agent.Value),
-            CancellationToken.None);
+        await PublishAsync(new Alert(DeadLetterAlertKind, AlertSeverity.Warning, $"A message for {Agent} failed {attempts} times and was moved to its dead-letter folder.", _time.GetUtcNow(), Agent.Value));
+    }
+
+    private async Task PublishAsync(Alert alert)
+    {
+        try
+        {
+            await _alerts.PublishAsync(alert, CancellationToken.None);
+        }
+#pragma warning disable CA1031 // Alerting is best effort here; the pump goes on.
+        catch (Exception ex)
+#pragma warning restore CA1031
+        {
+            LogAlertFailed(_logger, ex, Agent.Value);
+        }
+    }
+
+    private async Task PauseAsync(TimeSpan delay, CancellationToken stoppingToken)
+    {
+        try
+        {
+            await Task.Delay(delay, _time, stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Stopping.
+        }
     }
 
     private void Defer(string messageId, TimeSpan delay)
@@ -397,6 +621,17 @@ public sealed partial class InboxPump
         }
     }
 
+    private void OnMessageQuarantined(object? sender, AgentId agent)
+    {
+        if (agent != Agent)
+        {
+            return;
+        }
+
+        LogQuarantined(_logger, Agent.Value);
+        _ = PublishAsync(new Alert(QuarantineAlertKind, AlertSeverity.Warning, $"An unreadable message for {Agent} was moved to its dead-letter folder.", _time.GetUtcNow(), Agent.Value));
+    }
+
     /// <summary>FR-AGT-05: user DMs that arrive during a main-session turn are interjected into it.</summary>
     private async Task SteerPendingDmsAsync(string inFlight)
     {
@@ -407,7 +642,7 @@ public sealed partial class InboxPump
             {
                 lock (_gate)
                 {
-                    if (_mainTurnMessageId == inFlight && _claimed.Add(dm.Id))
+                    if (_mainTurnMessageId == inFlight && !_handled.Contains(dm.Id) && !_skipped.Contains(dm.Id) && _claimed.Add(dm.Id))
                     {
                         claimed.Add(dm);
                     }
@@ -415,7 +650,7 @@ public sealed partial class InboxPump
             }
 
             // Sent in arrival order; each call then waits for the turn they all joined.
-            var outcomes = await Task.WhenAll(claimed.Select(dm => _runtime.SteerAsync(dm.Body, MessageOrigin.User, CancellationToken.None)));
+            var outcomes = await Task.WhenAll(claimed.Select(dm => TrySteerAsync(dm.Body, CancellationToken.None)));
             lock (_gate)
             {
                 for (var i = 0; i < claimed.Count; i++)
@@ -465,7 +700,7 @@ public sealed partial class InboxPump
 
     private static TimeSpan Max(TimeSpan a, TimeSpan b) => a > b ? a : b;
 
-    private sealed record TurnPlan(AgentTurnRequest Request, bool Assignment);
+    private sealed record TurnPlan(AgentTurnRequest Request, bool Assignment, RoutineContinuation? Continuation);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Message {MessageId} for {Agent} concerns a finished task; acknowledged without a turn")]
     private static partial void LogSkipped(ILogger logger, string messageId, string agent);
@@ -479,12 +714,30 @@ public sealed partial class InboxPump
     [LoggerMessage(Level = LogLevel.Error, Message = "Message {MessageId} of {Agent} failed {Attempts} times; dead-lettered: {Error}")]
     private static partial void LogDeadLetter(ILogger logger, string messageId, string agent, int attempts, string? error);
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Could not steer a DM into the turn in flight for {Agent}; it runs next")]
+    [LoggerMessage(Level = LogLevel.Error, Message = "Message {MessageId} of {Agent} could not be dead-lettered; skipping it")]
+    private static partial void LogDeadLetterFailed(ILogger logger, Exception exception, string messageId, string agent);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Could not acknowledge message {MessageId} of {Agent}; it will not run again and the acknowledgement is retried")]
+    private static partial void LogAckFailed(ILogger logger, Exception exception, string messageId, string agent);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "An inbox pass for {Agent} failed; continuing")]
+    private static partial void LogIterationFailed(ILogger logger, Exception exception, string agent);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "An unreadable message for {Agent} was quarantined")]
+    private static partial void LogQuarantined(ILogger logger, string agent);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Could not steer a DM into the turn in flight for {Agent}; it runs as its own turn")]
     private static partial void LogSteerFailed(ILogger logger, Exception exception, string agent);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "The reply turn for user messages that joined background work of {Agent} failed ({Error}); they will run as their own turns")]
+    private static partial void LogReplyFailed(ILogger logger, string agent, string? error);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Post-turn housekeeping for {Agent} failed")]
     private static partial void LogHousekeepingFailed(ILogger logger, Exception exception, string agent);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "A TurnCompleted subscriber failed for {Agent}")]
     private static partial void LogSubscriberFailed(ILogger logger, Exception exception, string agent);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Could not publish an inbox alert for {Agent}")]
+    private static partial void LogAlertFailed(ILogger logger, Exception exception, string agent);
 }

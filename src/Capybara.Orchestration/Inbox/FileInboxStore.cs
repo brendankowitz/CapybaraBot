@@ -23,6 +23,8 @@ public sealed class FileInboxStore : IInboxStore
 
     public event EventHandler<AgentId>? MessageAvailable;
 
+    public event EventHandler<AgentId>? MessageQuarantined;
+
     public async ValueTask EnqueueAsync(FleetMessage message, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(message);
@@ -45,7 +47,7 @@ public sealed class FileInboxStore : IInboxStore
     {
         foreach (var file in Files(agent))
         {
-            if (await TryReadAsync(file, cancellationToken) is { } message)
+            if (await TryReadAsync(agent, file, cancellationToken) is { } message)
             {
                 return message;
             }
@@ -59,7 +61,7 @@ public sealed class FileInboxStore : IInboxStore
         var messages = new List<FleetMessage>();
         foreach (var file in Files(agent).ToList())
         {
-            if (await TryReadAsync(file, cancellationToken) is { } message)
+            if (await TryReadAsync(agent, file, cancellationToken) is { } message)
             {
                 messages.Add(message);
             }
@@ -94,18 +96,39 @@ public sealed class FileInboxStore : IInboxStore
     public ValueTask<int> CountAsync(AgentId agent, CancellationToken cancellationToken = default) =>
         ValueTask.FromResult(Files(agent).Count());
 
-    /// <summary>A message acknowledged between listing and reading is simply gone.</summary>
-    private static async ValueTask<FleetMessage?> TryReadAsync(string file, CancellationToken cancellationToken)
+    /// <summary>
+    /// A message acknowledged between listing and reading is simply gone. One that cannot be deserialized is moved to
+    /// <c>dead/</c> and reported, instead of failing every read of the inbox.
+    /// </summary>
+    private async ValueTask<FleetMessage?> TryReadAsync(AgentId agent, string file, CancellationToken cancellationToken)
     {
         try
         {
-            await using var stream = File.OpenRead(file);
-            return await JsonSerializer.DeserializeAsync<FleetMessage>(stream, JsonOptions, cancellationToken);
+            FleetMessage? message;
+            await using (var stream = File.OpenRead(file))
+            {
+                message = await JsonSerializer.DeserializeAsync<FleetMessage>(stream, JsonOptions, cancellationToken);
+            }
+
+            if (message is not null)
+            {
+                return message;
+            }
         }
         catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
         {
             return null;
         }
+        catch (JsonException)
+        {
+            // Quarantined below.
+        }
+
+        var dead = Path.Combine(AgentDirectory(agent), "dead");
+        Directory.CreateDirectory(dead);
+        File.Move(file, Path.Combine(dead, Path.GetFileName(file)), overwrite: true);
+        MessageQuarantined?.Invoke(this, agent);
+        return null;
     }
 
     private List<string> FilesFor(AgentId agent, string messageId) =>

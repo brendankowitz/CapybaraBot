@@ -178,7 +178,7 @@ public sealed class InboxPumpTests
     }
 
     [Fact]
-    public async Task A_user_dm_during_a_background_main_turn_is_steered_into_it_and_acknowledged_with_it()
+    public async Task A_user_dm_during_a_background_main_turn_is_steered_into_it_and_then_gets_its_own_reply()
     {
         using var f = Fleet();
         var runtime = new FakeAgentRuntime(Ea.Id);
@@ -189,8 +189,8 @@ public sealed class InboxPumpTests
             return TurnResult.Completed("ok", TurnEvidence.Empty);
         };
         var pump = Pump(f, runtime);
-        InboxTurnCompletedEventArgs? completed = null;
-        pump.TurnCompleted += (_, e) => completed = e;
+        var completed = new List<InboxTurnCompletedEventArgs>();
+        pump.TurnCompleted += (_, e) => completed.Add(e);
         await f.Inbox.EnqueueAsync(Message(Ea.Id, "heartbeat-ish background work"), Ct);
 
         await RunningAsync(pump, async () =>
@@ -204,8 +204,14 @@ public sealed class InboxPumpTests
         });
 
         Assert.Equal(["stop, call me"], runtime.Steered);
-        Assert.Single(runtime.Requests);
-        Assert.Equal("stop, call me", Assert.Single(completed!.Steered).Body);
+        Assert.Equal(2, runtime.Requests.Count);
+        var reply = runtime.Requests.Last();
+        Assert.Equal(MessagePrompts.ReplyToJoinedUserMessages, reply.Prompt);
+        Assert.Equal(TurnTarget.Main, reply.Target);
+        Assert.Null(reply.RoutineId);
+        Assert.Equal(2, completed.Count);
+        Assert.Equal("stop, call me", completed[1].Message.Body);
+        Assert.Empty(completed[0].Steered);
     }
 
     [Fact]
@@ -237,8 +243,10 @@ public sealed class InboxPumpTests
         });
         await heartbeat;
 
-        Assert.Single(runtime.Requests);
-        Assert.Equal("brief + answer", completed!.Result.Content);
+        // The heartbeat itself, then the DM's own reply turn (not attributed to the routine).
+        Assert.Equal(2, runtime.Requests.Count);
+        Assert.Null(runtime.Requests.Last().RoutineId);
+        Assert.Equal("what's next?", completed!.Message.Body);
     }
 
     [Fact]
