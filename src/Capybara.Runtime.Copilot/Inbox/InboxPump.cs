@@ -208,7 +208,7 @@ public sealed partial class InboxPump
     {
         var target = TurnTarget.Main;
         var assignment = false;
-        if (message.Origin == MessageOrigin.User && SessionIds.TryParseIncognito(message.SessionId, out var owner, out var conversation) && owner == Agent)
+        if (SessionIds.TryParseIncognito(message.SessionId, out var owner, out var conversation) && owner == Agent)
         {
             target = TurnTarget.Incognito(conversation);
         }
