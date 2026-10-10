@@ -192,6 +192,19 @@ public sealed class ScheduleSynchronizer(
     /// </summary>
     internal DateTimeOffset? NextPlannedFire(RoutineSpec routine, DateTimeOffset after)
     {
+        try
+        {
+            return PlanNextFire(routine, after);
+        }
+        catch (Exception ex) when (ex is ArgumentOutOfRangeException or OverflowException)
+        {
+            // Date arithmetic (jitter, cron) ran off the end of the representable range.
+            throw new UnschedulableRoutineException($"its next fire after {after:O} cannot be computed: {ex.Message}");
+        }
+    }
+
+    private DateTimeOffset? PlanNextFire(RoutineSpec routine, DateTimeOffset after)
+    {
         if (routine.Kind == TriggerKind.Cron && !string.IsNullOrWhiteSpace(routine.Cron))
         {
             var analysis = _crons.GetOrAdd(routine.Cron, expression => CronAnalysis.Analyze(expression, options.TimeZone));
@@ -215,14 +228,7 @@ public sealed class ScheduleSynchronizer(
             throw new UnschedulableRoutineException($"interval {interval} is above the {RoutineLimits.MaximumInterval.TotalDays}-day maximum");
         }
 
-        try
-        {
-            return RoutineJitter.NextFire(routine, after);
-        }
-        catch (Exception ex) when (ex is ArgumentOutOfRangeException or OverflowException)
-        {
-            throw new UnschedulableRoutineException($"its next fire after {after:O} cannot be computed: {ex.Message}");
-        }
+        return RoutineJitter.NextFire(routine, after);
     }
 
     private void Attach()

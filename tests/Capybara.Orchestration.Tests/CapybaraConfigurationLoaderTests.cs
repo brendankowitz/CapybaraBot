@@ -76,6 +76,93 @@ public sealed class CapybaraConfigurationLoaderTests
         Assert.Empty(Assert.Single(config.Agents).Skills);
     }
 
+    [Fact]
+    public void Self_referential_skill_frontmatter_is_skipped_not_fatal()
+    {
+        // `&a [*a]` is a list containing itself; walking it recursed until the stack overflowed.
+        using var dir = new TempDirectory();
+        var skill = Directory.CreateDirectory(Path.Combine(dir.Path, "agents", "ea", "skills", "loop")).FullName;
+        File.WriteAllText(Path.Combine(dir.Path, "agents", "ea", "agent.yaml"), "id: ea\nname: EA\njob: assistant\n");
+        File.WriteAllText(Path.Combine(skill, "SKILL.md"), "---\nname: loop\ndescription: Loops.\nallowed-tools: &a [*a]\n---\nBody.\n");
+
+        var config = CapybaraConfigurationLoader.Load(dir.Path);
+
+        Assert.Empty(Assert.Single(config.Agents).Skills);
+    }
+
+    [Fact]
+    public void Alias_bomb_skill_frontmatter_is_skipped_quickly()
+    {
+        using var dir = new TempDirectory();
+        var skill = Directory.CreateDirectory(Path.Combine(dir.Path, "agents", "ea", "skills", "bomb")).FullName;
+        File.WriteAllText(Path.Combine(dir.Path, "agents", "ea", "agent.yaml"), "id: ea\nname: EA\njob: assistant\n");
+        File.WriteAllText(Path.Combine(skill, "SKILL.md"), "---\nname: bomb\ndescription: Bomb.\n" + AliasBomb("allowed-tools") + "---\nBody.\n");
+
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        var config = CapybaraConfigurationLoader.Load(dir.Path);
+
+        Assert.Empty(Assert.Single(config.Agents).Skills);
+        Assert.True(started.Elapsed < TimeSpan.FromSeconds(2), $"took {started.Elapsed}");
+    }
+
+    [Fact]
+    public void Skill_frontmatter_with_a_harmless_anchor_is_rejected_like_the_proposal_path_does()
+    {
+        Assert.False(SkillCardReader.TryReadFrontmatter("---\nname: a\ndescription: &d text\n---\nBody\n", out _));
+        Assert.True(SkillCardReader.TryReadFrontmatter("---\nname: a\ndescription: text\n---\nBody\n", out var plain));
+        Assert.Equal("a", plain.Name);
+    }
+
+    [Fact]
+    public void Null_scan_terminates_on_a_cyclic_graph()
+    {
+        var loop = new List<object?>();
+        loop.Add(loop);
+        loop.Add(null);
+
+        var found = YamlNulls.Find(loop);
+
+        Assert.Equal(["[1]"], found);
+    }
+
+    [Fact]
+    public void Null_scan_visits_shared_objects_once_instead_of_expanding_them()
+    {
+        // Eight levels, each holding ten references to the one below: 10^8 paths if every alias were expanded.
+        List<object?> level = [null];
+        for (var i = 0; i < 8; i++)
+        {
+            level = [.. Enumerable.Repeat<object?>(level, 10)];
+        }
+
+        var found = YamlNulls.Find(level);
+
+        Assert.Single(found);
+    }
+
+    [Fact]
+    public void Null_scan_stops_at_the_depth_cap()
+    {
+        object? node = new List<object?> { null };
+        for (var i = 0; i < YamlEditor.MaxDepth * 4; i++)
+        {
+            node = new List<object?> { node };
+        }
+
+        Assert.Empty(YamlNulls.Find(node!));
+    }
+
+    private static string AliasBomb(string key)
+    {
+        var yaml = new System.Text.StringBuilder("l0: &l0 [x]\n");
+        for (var i = 1; i < 8; i++)
+        {
+            yaml.Append(System.Globalization.CultureInfo.InvariantCulture, $"l{i}: &l{i} [{string.Join(", ", Enumerable.Repeat($"*l{i - 1}", 10))}]\n");
+        }
+
+        return yaml.Append(System.Globalization.CultureInfo.InvariantCulture, $"{key}: *l7\n").ToString();
+    }
+
     [Theory]
     [InlineData("agents/ea/agent.yaml", "id: ea\nname: EA\njob: assistant\ntools: ~\n", "tools")]
     [InlineData("agents/ea/agent.yaml", "id: ea\nname: EA\njob: assistant\ngrants: [~]\n", "grants[0]")]

@@ -24,6 +24,9 @@ internal static class FrontmatterSerializer
     /// <summary>The deepest YAML nesting accepted in frontmatter. Real frontmatter is a flat map of scalars.</summary>
     internal const int MaxDepth = 32;
 
+    /// <summary>Metadata for text with no frontmatter: no provenance, so untrusted (FR-SAF-03, FR-MEM-04).</summary>
+    private static PageMetadata Unattributed => new() { Taint = Contracts.Messaging.Taint.Tainted };
+
     /// <summary>
     /// Reads the frontmatter and body of a page.
     /// </summary>
@@ -34,13 +37,13 @@ internal static class FrontmatterSerializer
         var text = content.ReplaceLineEndings("\n");
         if (!text.StartsWith(Fence + "\n", StringComparison.Ordinal))
         {
-            return (new PageMetadata(), text);
+            return (Unattributed, text);
         }
 
         var end = text.IndexOf("\n" + Fence, Fence.Length, StringComparison.Ordinal);
         if (end < 0)
         {
-            return (new PageMetadata(), text);
+            return (Unattributed, text);
         }
 
         var yaml = text[(Fence.Length + 1)..end];

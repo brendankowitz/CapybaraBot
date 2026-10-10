@@ -420,9 +420,9 @@ public sealed class WikiStore : IMemoryStore, IDisposable
                 return PendingChangeResult.Stale;
             }
 
-            if (current is not null && FrontmatterSerializer.TryParse(current, out var previous))
+            if (current is not null)
             {
-                await WriteHistoryAsync(path, new MemoryPage(path, previous.Metadata, previous.Body), _time.GetUtcNow(), cancellationToken);
+                await SnapshotAsync(path, current, _time.GetUtcNow(), cancellationToken);
             }
 
             switch (change.Kind)
@@ -488,15 +488,19 @@ public sealed class WikiStore : IMemoryStore, IDisposable
             var file = ResolveFile(path);
             var now = _time.GetUtcNow();
             PageMetadata metadata;
-            if (File.Exists(file) && FrontmatterSerializer.TryParse(await File.ReadAllTextAsync(file, cancellationToken), out var previous))
+            var currentText = File.Exists(file) ? await File.ReadAllTextAsync(file, cancellationToken) : null;
+            if (currentText is not null)
             {
-                var (existing, existingBody) = previous;
-                await WriteHistoryAsync(path, new MemoryPage(path, existing, existingBody), now, cancellationToken);
-                metadata = existing with { Description = description, Updated = now, LastValidated = now, Source = "user:pwa" };
+                await SnapshotAsync(path, currentText, now, cancellationToken);
+            }
+
+            if (currentText is not null && FrontmatterSerializer.TryParse(currentText, out var previous))
+            {
+                metadata = previous.Metadata with { Description = description, Updated = now, LastValidated = now, Source = "user:pwa" };
             }
             else
             {
-                // New page, or an unparseable one a human is replacing: start from fresh provenance.
+                // New page, or an unparseable one a human is replacing (kept verbatim in history): start from fresh provenance.
                 metadata = new PageMetadata { Description = description, Source = "user:pwa", Created = now, Updated = now, LastValidated = now, ValidFrom = now };
             }
 
@@ -533,10 +537,8 @@ public sealed class WikiStore : IMemoryStore, IDisposable
                 return false;
             }
 
-            if (FrontmatterSerializer.TryParse(await File.ReadAllTextAsync(file, cancellationToken), out var previous))
-            {
-                await WriteHistoryAsync(path, new MemoryPage(path, previous.Metadata, previous.Body), _time.GetUtcNow(), cancellationToken);
-            }
+            var content = await File.ReadAllTextAsync(file, cancellationToken);
+            await SnapshotAsync(path, content, _time.GetUtcNow(), cancellationToken);
 
             File.Delete(file);
             _quarantined.TryRemove(path.Value, out _);
@@ -702,13 +704,13 @@ public sealed class WikiStore : IMemoryStore, IDisposable
             return null;
         }
 
-        _quarantined.TryRemove(path.Value, out _);
         if (!FrontmatterSerializer.TryParse(content, out var parsed))
         {
             _quarantined.TryAdd(path.Value, 0);
             return null;
         }
 
+        _quarantined.TryRemove(path.Value, out _);
         return new MemoryPage(path, parsed.Metadata, parsed.Body);
     }
 
@@ -726,12 +728,30 @@ public sealed class WikiStore : IMemoryStore, IDisposable
         return pages;
     }
 
+    /// <summary>Keeps the prior version of a page in history. Text that does not parse is kept verbatim, so a quarantined page is never unrecoverable.</summary>
+    private async Task SnapshotAsync(MemoryPath path, string current, DateTimeOffset validTo, CancellationToken cancellationToken)
+    {
+        if (FrontmatterSerializer.TryParse(current, out var page))
+        {
+            await WriteHistoryAsync(path, new MemoryPage(path, page.Metadata, page.Body), validTo, cancellationToken);
+        }
+        else
+        {
+            await WriteHistoryFileAsync(path, current, validTo, cancellationToken);
+        }
+    }
+
     private async Task WriteHistoryAsync(MemoryPath path, MemoryPage page, DateTimeOffset validTo, CancellationToken cancellationToken)
+    {
+        var metadata = page.Metadata with { ValidTo = validTo };
+        await WriteHistoryFileAsync(path, FrontmatterSerializer.Write(metadata, page.Body), validTo, cancellationToken);
+    }
+
+    private async Task WriteHistoryFileAsync(MemoryPath path, string content, DateTimeOffset validTo, CancellationToken cancellationToken)
     {
         var relative = path.Value.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
         var historyFile = Path.Combine(_root, ".history", Path.ChangeExtension(relative, null), validTo.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + ".md");
-        var metadata = page.Metadata with { ValidTo = validTo };
-        await WriteFileAsync(historyFile, FrontmatterSerializer.Write(metadata, page.Body), cancellationToken);
+        await WriteFileAsync(historyFile, content, cancellationToken);
     }
 
     private IEnumerable<MemoryPath> EnumeratePaths()

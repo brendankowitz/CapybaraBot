@@ -49,9 +49,9 @@ internal static partial class UnitFileValue
     /// </summary>
     public static string? IpOrCidr(string value)
     {
-        if (value.Any(char.IsControl))
+        if (value.Any(char.IsControl) || value.Contains('%'))
         {
-            throw new ArgumentException("An egress entry contains control characters.", nameof(value));
+            throw new ArgumentException("An egress entry contains control characters or an IPv6 scope id.", nameof(value));
         }
 
         if (System.Net.IPNetwork.TryParse(value, out var network))

@@ -101,6 +101,25 @@ public sealed class CliEnvironmentTests
     }
 
     [Fact]
+    public void Only_proxy_variables_are_screened_for_userinfo()
+    {
+        var host = new Dictionary<string, string>
+        {
+            ["PATH"] = "/usr/bin",
+            ["SSL_CERT_FILE"] = "/etc/ssl/certs/team@example/ca.pem",
+            ["https_proxy"] = "user:pass@proxy.internal:3128",
+            ["NO_PROXY"] = "localhost",
+        };
+        var options = Options();
+
+        var env = CliEnvironment.Build(Ea, options, host.GetValueOrDefault, windows: false);
+
+        Assert.Equal("/etc/ssl/certs/team@example/ca.pem", env["SSL_CERT_FILE"]);
+        Assert.False(env.ContainsKey("https_proxy"));
+        Assert.Equal("localhost", env["NO_PROXY"]);
+    }
+
+    [Fact]
     public void Windows_adds_its_loader_variables_and_agent_scoped_profile_and_temp()
     {
         var options = Options();

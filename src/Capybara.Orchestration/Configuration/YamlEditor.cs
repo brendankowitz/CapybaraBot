@@ -45,6 +45,23 @@ internal static class YamlEditor
         }
     }
 
+    /// <summary>
+    /// Throws <see cref="YamlException"/> when <paramref name="text"/> uses an anchor or alias. Aliases hand the deserializer
+    /// the same object again, which allows self-referential structures and expansion bombs; skill frontmatter has no use for
+    /// them (the proposal path rejects them too, see <see cref="FindUnsafeSyntax"/>).
+    /// </summary>
+    public static void ThrowIfAliased(string text)
+    {
+        var parser = new Parser(new StringReader(text));
+        while (parser.MoveNext())
+        {
+            if (parser.Current is AnchorAlias || (parser.Current is NodeEvent node && !node.Anchor.IsEmpty))
+            {
+                throw new YamlException(parser.Current.Start, parser.Current.End, "YAML anchors and aliases are not allowed");
+            }
+        }
+    }
+
     public static YamlNode? Parse(string text)
     {
         ThrowIfTooDeep(text);

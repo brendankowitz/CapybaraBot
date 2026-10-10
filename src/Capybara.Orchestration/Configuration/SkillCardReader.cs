@@ -53,6 +53,7 @@ internal static class SkillCardReader
         try
         {
             YamlEditor.ThrowIfTooDeep(yaml);
+            YamlEditor.ThrowIfAliased(yaml);
             var parsed = Yaml.Deserialize<SkillFrontmatter?>(yaml) ?? new SkillFrontmatter();
             if (YamlNulls.Find(parsed).Count > 0)
             {

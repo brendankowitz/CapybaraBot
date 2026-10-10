@@ -56,6 +56,13 @@ public sealed class HostRenderingTests
         Assert.Throws<ArgumentException>(() => SystemdHost.RenderDropIn(Spec with { MemoryMaxBytes = -1 }));
     }
 
+    [Theory]
+    [InlineData("fe80::1%eth0")]
+    [InlineData("fe80::1%25eth0")]
+    [InlineData("10.0.0.1%x")]
+    public void Systemd_drop_in_rejects_ipv6_scope_ids(string entry) =>
+        Assert.Throws<ArgumentException>(() => SystemdHost.RenderDropIn(Spec with { EgressDomains = [entry] }));
+
     [Fact]
     public void Podman_quadlet_rejects_control_characters_in_every_interpolated_value()
     {

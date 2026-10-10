@@ -15,7 +15,8 @@ namespace Capybara.Runtime.Copilot.Hosting;
 /// <c>TMPDIR</c> (<c>TEMP</c>/<c>TMP</c> on Windows).</para>
 /// <para>Passed through when present on the host: <see cref="CopilotRuntimeOptions.CliEnvironmentPassthrough"/> (proxy
 /// and CA settings by default) and, on Windows only, the variables the OS loader needs. A passthrough name that looks
-/// like a credential is always dropped, as is a proxy URL carrying a user name or password.</para>
+/// like a credential is always dropped, as is a value of a <c>*_PROXY</c> variable (any case) containing '@', which is how a
+/// user name or password is embedded, with or without a scheme. Other variables, such as a CA path, may contain '@'.</para>
 /// </remarks>
 public static class CliEnvironment
 {
@@ -63,7 +64,7 @@ public static class CliEnvironment
 
         foreach (var name in options.CliEnvironmentPassthrough.Where(n => !IsDenied(n)))
         {
-            if (host(name) is { Length: > 0 } value && !HasUserInfo(value))
+            if (host(name) is { Length: > 0 } value && !(IsProxyName(name) && HasUserInfo(value)))
             {
                 env.TryAdd(name, value);
             }
@@ -85,6 +86,8 @@ public static class CliEnvironment
 
     /// <summary>A proxy value with userinfo is a credential, not a setting. Any '@' drops it, scheme-less forms included (<see cref="Uri"/> reads the user part of such a value as a scheme).</summary>
     private static bool HasUserInfo(string value) => value.Contains('@');
+
+    private static bool IsProxyName(string name) => name.EndsWith("_PROXY", StringComparison.OrdinalIgnoreCase);
 
     private static void CopyFromHost(Dictionary<string, string> env, Func<string, string?> host, string name)
     {

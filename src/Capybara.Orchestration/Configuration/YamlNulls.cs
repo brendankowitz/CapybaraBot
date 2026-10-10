@@ -24,12 +24,16 @@ internal static class YamlNulls
         var found = new List<string>();
 
         // NullabilityInfoContext is not thread-safe; config loads are rare, so one per call.
-        Visit(model, null, string.Empty, new NullabilityInfoContext(), found);
+        Visit(model, null, string.Empty, 0, new NullabilityInfoContext(), new HashSet<object>(ReferenceEqualityComparer.Instance), found);
         return found;
     }
 
-    /// <summary><paramref name="info"/> is the declaring property's nullability, or null for a collection entry, which must never be null.</summary>
-    private static void Visit(object? value, NullabilityInfo? info, string path, NullabilityInfoContext context, List<string> found)
+    /// <summary>
+    /// <paramref name="info"/> is the declaring property's nullability, or null for a collection entry, which must never be null.
+    /// A YAML alias hands back the same object, so a self-referential list (<c>&amp;a [*a]</c>) is a cycle and shared
+    /// aliases multiply; <paramref name="visited"/> visits each object once, and <paramref name="depth"/> is a backstop.
+    /// </summary>
+    private static void Visit(object? value, NullabilityInfo? info, string path, int depth, NullabilityInfoContext context, HashSet<object> visited, List<string> found)
     {
         if (value is null)
         {
@@ -41,21 +45,24 @@ internal static class YamlNulls
             return;
         }
 
+        if (value is string || value is ValueType || depth > YamlEditor.MaxDepth || !visited.Add(value))
+        {
+            return;
+        }
+
         switch (value)
         {
-            case string:
-                return;
             case IDictionary map:
                 foreach (DictionaryEntry entry in map)
                 {
-                    Visit(entry.Value, null, $"{path}.{entry.Key}", context, found);
+                    Visit(entry.Value, null, $"{path}.{entry.Key}", depth + 1, context, visited, found);
                 }
 
                 return;
             case IList list:
                 for (var i = 0; i < list.Count; i++)
                 {
-                    Visit(list[i], null, $"{path}[{i}]", context, found);
+                    Visit(list[i], null, $"{path}[{i}]", depth + 1, context, visited, found);
                 }
 
                 return;
@@ -69,7 +76,7 @@ internal static class YamlNulls
         foreach (var property in value.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance).Where(p => p.CanWrite))
         {
             var name = property.GetCustomAttribute<YamlMemberAttribute>()?.Alias ?? CamelCaseNamingConvention.Instance.Apply(property.Name);
-            Visit(property.GetValue(value), context.Create(property), path.Length == 0 ? name : $"{path}.{name}", context, found);
+            Visit(property.GetValue(value), context.Create(property), path.Length == 0 ? name : $"{path}.{name}", depth + 1, context, visited, found);
         }
     }
 }

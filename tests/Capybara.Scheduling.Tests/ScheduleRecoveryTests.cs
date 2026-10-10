@@ -176,6 +176,17 @@ public sealed class ScheduleRecoveryTests
     }
 
     [Fact]
+    public void Planning_a_cron_at_the_end_of_time_never_throws_an_arithmetic_exception()
+    {
+        using var harness = new Harness();
+        using var synchronizer = SynchronizerFor(harness);
+
+        var ex = Record.Exception(() => synchronizer.NextPlannedFire(Kit.Cron("0 0 * * * ?"), DateTimeOffset.MaxValue.AddMinutes(-1)));
+
+        Assert.True(ex is null or UnschedulableRoutineException, $"unexpected {ex}");
+    }
+
+    [Fact]
     public async Task The_registry_keeps_an_enormous_interval_out_so_the_scheduler_still_starts()
     {
         await using var harness = await QuartzHarness.StartAsync(Options);
