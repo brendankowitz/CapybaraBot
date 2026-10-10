@@ -31,6 +31,7 @@
     <Project Path="tests/Capybara.Observability.Tests/Capybara.Observability.Tests.csproj" />
     <Project Path="tests/Capybara.Orchestration.Tests/Capybara.Orchestration.Tests.csproj" />
     <Project Path="tests/Capybara.Policy.Tests/Capybara.Policy.Tests.csproj" />
+    <Project Path="tests/Capybara.Pwa.Tests/Capybara.Pwa.Tests.csproj" />
     <Project Path="tests/Capybara.Runtime.Copilot.Tests/Capybara.Runtime.Copilot.Tests.csproj" />
     <Project Path="tests/Capybara.Scheduling.Tests/Capybara.Scheduling.Tests.csproj" />
     <Project Path="tests/Capybara.Tui.Tests/Capybara.Tui.Tests.csproj" />

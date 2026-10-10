@@ -34,8 +34,14 @@ public abstract class CapybaraPage : ComponentBase
     /// <summary>Runs an API read; returns <see langword="default"/> and sets <see cref="Error"/> on failure.</summary>
     protected async Task<T?> TryAsync<T>(Func<Task<T>> read)
     {
-        T? result = default;
-        await TryAsync(async () => result = await read());
-        return result;
+        try
+        {
+            return await read();
+        }
+        catch (HttpRequestException ex)
+        {
+            Error = ex.Message;
+            return default;
+        }
     }
 }

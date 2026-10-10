@@ -29,8 +29,8 @@
         }
         </ul>
         <label><input type="checkbox" @bind="_quietEnabled" /> Quiet hours</label>
-        <label>From <input type="time" @bind="_quietStart" /></label>
-        <label>Until <input type="time" @bind="_quietEnd" /></label>
+        <label>From <input type="time" value="@_quietStart" @onchange="e => _quietStart = e.Value?.ToString() ?? _quietStart" /></label>
+        <label>Until <input type="time" value="@_quietEnd" @onchange="e => _quietEnd = e.Value?.ToString() ?? _quietEnd" /></label>
         <button type="button" @onclick="SaveSettingsAsync">Save notification settings</button>
     }
 </section>
