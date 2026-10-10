@@ -1,5 +1,4 @@
 using Capybara.Observability.Alerts;
-using Capybara.Policy.Safety;
 using Capybara.Runtime.Copilot.Supervision;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -18,14 +17,11 @@ namespace Capybara.Runtime.Copilot.Hosting;
 public sealed partial class AgentRuntimeHostedService(
     AgentRuntimePool pool,
     IAlertSink alerts,
-    KillSwitch killSwitch,
+    SelfTestGuard selfTest,
     TimeProvider time,
     ILogger<AgentRuntimeHostedService> logger,
-    ILogger<SelfTestGuard> selfTestLogger,
     ISessionReconciler? reconciler = null) : IHostedService
 {
-    private readonly SelfTestGuard _selfTest = new(killSwitch, alerts, time, selfTestLogger);
-
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         if (reconciler is null)
@@ -52,7 +48,7 @@ public sealed partial class AgentRuntimeHostedService(
             }
 
             await ReconcileAsync(runtime, cancellationToken);
-            await _selfTest.VerifyAsync(runtime, cancellationToken);
+            await selfTest.VerifyAsync(runtime, cancellationToken);
         }
     }
 

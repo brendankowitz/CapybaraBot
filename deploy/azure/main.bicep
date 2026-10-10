@@ -92,7 +92,8 @@ resource capybara 'Microsoft.App/containerApps@2024-03-01' = {
               value: 'true'
             }
             {
-              name: 'GitHubToken'
+              // Read in-process by capybarad; the agent CLIs get an allowlisted environment and never inherit it.
+              name: 'Capybara__Runtime__GitHubToken'
               secretRef: 'github-token'
             }
           ]

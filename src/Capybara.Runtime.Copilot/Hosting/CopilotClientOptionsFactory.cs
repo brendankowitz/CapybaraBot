@@ -12,17 +12,30 @@ public static class CopilotClientOptionsFactory
     /// <summary>Span source name for the CLI's own OpenTelemetry spans, under the fleet prefix.</summary>
     public const string TelemetrySourceName = CapybaraTelemetry.Prefix + ".Copilot";
 
+    /// <remarks>
+    /// Creates the agent's temp directory, because the CLI's <c>TMPDIR</c> points at it (<see cref="CliEnvironment"/>).
+    /// </remarks>
     public static CopilotClientOptions Create(AgentDefinition agent, CopilotRuntimeOptions options, ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(agent);
         ArgumentNullException.ThrowIfNull(options);
 
-        var clientOptions = new CopilotClientOptions
+        Directory.CreateDirectory(options.AgentTempDirectory(agent.Id));
+
+        // Always an explicit child-process connection: its Environment replaces capybarad's, so host secrets such as
+        // CREDENTIALS_DIRECTORY never reach the CLI or the shell and MCP processes it spawns (FR-SAF-08).
+        // A null path launches the CLI bundled with the SDK; a configured path is typically the sandbox wrapper (FR-AGT-07).
+        var connection = RuntimeConnection.ForStdio(options.CliPath is { Length: > 0 } cli ? cli : null, [.. options.CliArgs]);
+        connection.Environment = CliEnvironment.Build(agent.Id, options);
+
+        return new CopilotClientOptions
         {
             // Empty mode: nothing ambient. No default tools, no discovered config, no shared ~/.copilot.
             Mode = CopilotClientMode.Empty,
+            Connection = connection,
             BaseDirectory = options.AgentBaseDirectory(agent.Id),
             WorkingDirectory = options.AgentWorkingDirectory(agent.Id),
+
             // Session-scoped by default: a process-level token is put in the CLI's environment, which every child inherits.
             GitHubToken = options.SessionScopedGitHubToken ? null : options.GitHubToken,
             UseLoggedInUser = false,
@@ -32,14 +45,6 @@ public static class CopilotClientOptionsFactory
             Telemetry = TelemetryFor(options),
             Logger = logger,
         };
-
-        if (options.CliPath is { Length: > 0 } cli)
-        {
-            // Typically the sandbox wrapper, which in turn launches the CLI (FR-AGT-07).
-            clientOptions.Connection = RuntimeConnection.ForStdio(cli, [.. options.CliArgs]);
-        }
-
-        return clientOptions;
     }
 
     /// <summary>

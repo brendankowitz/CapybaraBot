@@ -84,5 +84,10 @@ public sealed class CapybaraConfigurationLoaderTests
 
         File.WriteAllText(Path.Combine(agentDir, "agent.yaml"), Agent($"    scriptSha256: {new string('B', 64)}"));
         Assert.Equal(new string('b', 64), CapybaraConfigurationLoader.Load(dir.Path).Agents.Single().McpServers.Single().ScriptSha256);
+
+        // Both together would mean one of them is silently ignored, so the combination is rejected.
+        File.WriteAllText(Path.Combine(agentDir, "agent.yaml"), Agent($"    scriptSha256: {new string('b', 64)}\n    selfContained: true"));
+        var both = Assert.Throws<CapybaraConfigurationException>(() => CapybaraConfigurationLoader.Load(dir.Path));
+        Assert.Contains(both.Errors, e => e.Contains("cannot both", StringComparison.Ordinal));
     }
 }

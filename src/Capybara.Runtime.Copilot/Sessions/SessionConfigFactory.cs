@@ -196,9 +196,17 @@ public sealed partial class SessionConfigFactory(
             return null;
         }
 
-        return _ => options.GitHubToken is { Length: > 0 } current
-            ? Task.FromResult(GitHubTokenProviderResult.FromToken(new GitHubToken { AccessToken = current, ExpiresIn = GitHubTokenLifetimeSeconds }))
-            : Task.FromResult(GitHubTokenProviderResult.Cancel());
+        return _ =>
+        {
+            if (options.GitHubToken is not { Length: > 0 } current)
+            {
+                return Task.FromResult(GitHubTokenProviderResult.Cancel());
+            }
+
+            // A rotated token is registered too, so it is redacted like the one the factory first saw.
+            handlers.Redactor.AddKnownSecret(current);
+            return Task.FromResult(GitHubTokenProviderResult.FromToken(new GitHubToken { AccessToken = current, ExpiresIn = GitHubTokenLifetimeSeconds }));
+        };
     }
 
     /// <summary>FR-SAF-01 layer 1: the runtime enforces static deny/ask itself, as defense in depth.</summary>

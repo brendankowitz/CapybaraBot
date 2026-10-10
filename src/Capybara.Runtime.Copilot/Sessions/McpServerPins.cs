@@ -25,13 +25,15 @@ internal static class McpServerPins
         }
 
         VerifyFile(name, command, pinned);
-        if (server.SelfContained)
+
+        // A configured script pin is always enforced, even on a self-contained server: a pin is never silently ignored.
+        if (server.ScriptSha256 is not { } scriptPin)
         {
-            return command;
+            return server.SelfContained
+                ? command
+                : throw new InvalidOperationException($"{name} must pin the script it runs (scriptSha256) or be declared selfContained.");
         }
 
-        var scriptPin = server.ScriptSha256
-            ?? throw new InvalidOperationException($"{name} must pin the script it runs (scriptSha256) or be declared selfContained.");
         var script = ScriptArgument(server.Args)
             ?? throw new InvalidOperationException($"{name} has no script argument to check against its scriptSha256 pin.");
         if (!Path.IsPathFullyQualified(script))

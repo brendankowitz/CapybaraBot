@@ -34,7 +34,8 @@ public sealed record McpServerSpec
     /// <summary>
     /// Declares <see cref="Command"/> a self-contained binary whose own pin covers all the code it runs. Without it a
     /// stdio server must also pin its script, so an unlisted interpreter or launcher (<c>bash</c>, <c>npx</c>,
-    /// <c>nodejs</c>) can never run unpinned code.
+    /// <c>nodejs</c>) can never run unpinned code. Mutually exclusive with <see cref="ScriptSha256"/> in config; if both
+    /// are set anyway, the script pin is still enforced.
     /// </summary>
     public bool SelfContained { get; init; }
 

@@ -32,10 +32,22 @@ public sealed class CopilotRuntimeOptions
     public bool SessionScopedGitHubToken { get; set; } = true;
 
     /// <summary>
+    /// Host variables copied into each agent CLI's environment when present (see <see cref="Hosting.CliEnvironment"/>).
+    /// Everything else in capybarad's environment is withheld. Credential-like names (<c>*TOKEN*</c>, <c>*SECRET*</c>,
+    /// <c>*_KEY</c>, <c>CREDENTIALS_DIRECTORY</c>, <c>Capybara__*</c>, ...) are dropped even if listed here, as are
+    /// proxy URLs that embed a user name or password.
+    /// </summary>
+    public IList<string> CliEnvironmentPassthrough { get; } =
+        ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR"];
+
+    /// <summary>
     /// How stdio MCP servers are launched (FR-SAF-08). The SDK's per-server <c>Env</c> is merged into the CLI's
-    /// environment, so it cannot hide host variables; isolation therefore wraps the command in <c>env -i</c>.
+    /// environment, so it cannot hide anything; isolation therefore wraps the command in <c>env -i</c>.
     /// Defaults to <see cref="StdioMcpIsolation.ClearEnvironment"/> on Unix and <see cref="StdioMcpIsolation.Refuse"/>
-    /// on Windows, which has no equivalent launcher.
+    /// on Windows. Windows stays refused even though the CLI's own environment is now an allowlist
+    /// (<see cref="Hosting.CliEnvironment"/>): without an <c>env -i</c> equivalent, a server would still inherit the
+    /// CLI's private variables (<c>COPILOT_HOME</c>, and the token itself under the
+    /// <see cref="SessionScopedGitHubToken"/> rollback), and Windows is not a production host.
     /// </summary>
     public StdioMcpIsolation StdioMcpIsolation { get; set; } =
         OperatingSystem.IsWindows() ? StdioMcpIsolation.Refuse : StdioMcpIsolation.ClearEnvironment;
@@ -91,4 +103,7 @@ public sealed class CopilotRuntimeOptions
 
     /// <summary>Host-owned per-agent state that is neither the CLI's home nor the agent's workspace.</summary>
     public string AgentStateDirectory(string agentId) => Path.Combine(StateRoot, "agents", agentId, "host");
+
+    /// <summary>The agent's private temp directory, exported to its CLI as <c>TMPDIR</c>.</summary>
+    public string AgentTempDirectory(string agentId) => Path.Combine(StateRoot, "agents", agentId, "tmp");
 }

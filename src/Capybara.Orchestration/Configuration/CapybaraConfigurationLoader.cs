@@ -363,6 +363,12 @@ public static class CapybaraConfigurationLoader
                     return null;
                 }
 
+                if (yaml.ScriptSha256 is not null && yaml.SelfContained)
+                {
+                    errors.Add($"{prefix} cannot both pin a script (scriptSha256) and declare selfContained: true.");
+                    return null;
+                }
+
                 break;
             case "http":
                 if (!Uri.TryCreate(yaml.Url, UriKind.Absolute, out var url) || (url.Scheme != Uri.UriSchemeHttps && !url.IsLoopback))

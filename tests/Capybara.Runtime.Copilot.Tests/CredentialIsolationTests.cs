@@ -17,6 +17,9 @@ public sealed class CredentialIsolationTests
 {
     private const string Token = "github_pat_0123456789abcdefghijklmnopqrstuvwxyz";
 
+    /// <summary>Deliberately not token-shaped, so only registration with the redactor can make it a known secret.</summary>
+    private const string Rotated = "rotated-opaque-credential-42";
+
     private static GitHubTokenProviderArgs TokenRequest(GitHubTokenRequestReason reason) => new() { Host = "github.com", Reason = reason };
 
     private static CapybaraSession SessionWith(RuntimeFixture f, McpServerSpec server) =>
@@ -163,13 +166,41 @@ public sealed class CredentialIsolationTests
             Assert.True(result.Token?.ExpiresIn > 0);
         }
 
-        // A rotated token is picked up on the next request; the token is never let back out through tool output.
-        f.Options.GitHubToken = Token + "rotated";
-        var rotated = await f.Configs.CreateConfig(f.Session(agent)).GitHubTokenProvider!(TokenRequest(GitHubTokenRequestReason.Refresh));
-        Assert.Equal(Token + "rotated", rotated.Token?.AccessToken);
-        Assert.True(f.Redactor.ContainsSecret($"x{Token}x"));
+        // A token rotated after the session was built is served on the next request and registered with the redactor,
+        // so it can never come back out through tool output either.
+        var built = f.Configs.CreateConfig(f.Session(agent));
+        f.Options.GitHubToken = Rotated;
+        Assert.False(f.Redactor.ContainsSecret(Rotated));
+        var rotated = await built.GitHubTokenProvider!(TokenRequest(GitHubTokenRequestReason.Refresh));
+        Assert.Equal(Rotated, rotated.Token?.AccessToken);
+        Assert.True(f.Redactor.ContainsSecret($"leaked {Rotated} here"));
     }
 
+    [Fact]
+    public async Task Session_token_lifetime_is_long_enough_not_to_churn()
+    {
+        using var f = new RuntimeFixture();
+        f.Options.GitHubToken = Token;
+
+        var result = await f.Configs.CreateConfig(f.Session(TestAgents.Create("ea"))).GitHubTokenProvider!(TokenRequest(GitHubTokenRequestReason.Initial));
+
+        Assert.True(result.Token!.ExpiresIn > 3600, $"ExpiresIn was {result.Token.ExpiresIn}s");
+    }
+
+    [Fact]
+    public void A_configured_script_pin_is_enforced_even_on_a_self_contained_server()
+    {
+        using var f = new RuntimeFixture();
+        var exe = WriteExecutable(f, "server.bin");
+        var script = WriteExecutable(f, "plugin.js");
+        var pin = Sha256(script);
+        var server = Server(exe, pin, selfContained: true, args: [script]);
+
+        Assert.Single(f.Configs.CreateConfig(SessionWith(f, server)).McpServers!);
+
+        File.AppendAllText(script, "// trojan");
+        Assert.Throws<InvalidOperationException>(() => f.Configs.CreateConfig(SessionWith(f, server)));
+    }
     [Fact]
     public void Process_level_token_is_only_a_rollback_switch()
     {
