@@ -8,6 +8,8 @@ using Capybara.Orchestration.Configuration;
 using Capybara.Orchestration.Lifecycle;
 using Capybara.Orchestration.Skills;
 using Capybara.Policy.Audit;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using YamlDotNet.Core;
 using YamlDotNet.RepresentationModel;
 
@@ -33,7 +35,12 @@ namespace Capybara.Orchestration.Proposals;
 /// service lock is always taken before the host's write lock.
 /// </para>
 /// </remarks>
-public sealed partial class ProposalService(IProposalStore store, CapybaraConfigurationHost config, IAuditLog audit, TimeProvider time)
+public sealed partial class ProposalService(
+    IProposalStore store,
+    CapybaraConfigurationHost config,
+    IAuditLog audit,
+    TimeProvider time,
+    ILogger<ProposalService>? logger = null)
     : IAgentLifecycleObserver, IDisposable
 {
     /// <summary>Caps how many undecided proposals one agent can put in the human's inbox.</summary>
@@ -54,6 +61,8 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
 
     private readonly SemaphoreSlim _lock = new(1, 1);
 
+    private readonly ILogger _logger = logger ?? NullLogger<ProposalService>.Instance;
+
     /// <summary>Raised after a proposal is recorded, so it can be pushed to the approval inbox.</summary>
     public event EventHandler<ChangeProposal>? Proposed;
 
@@ -65,7 +74,11 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
     /// skill name for <see cref="ProposalKind.Routine"/> and <see cref="ProposalKind.Skill"/>, ignored otherwise.
     /// For <see cref="ProposalKind.Routine"/> the content is one YAML mapping; for the others it is the whole file.
     /// </summary>
-    /// <exception cref="ProposalRejectedException">The proposal is not allowed or would not validate; it is audited, not recorded.</exception>
+    /// <exception cref="ProposalRejectedException">
+    /// The proposal is not allowed, would not validate, or could not be processed; it is audited, not recorded. Any
+    /// failure other than cancellation surfaces as this exception (unexpected ones are logged with the original).
+    /// </exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
     public async ValueTask<ChangeProposal> ProposeAsync(
         AgentId agent,
         ProposalKind kind,
@@ -88,14 +101,29 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
             {
                 proposal = await CreateAsync(agent, kind, name, content, rationale, cancellationToken);
             }
-            catch (Exception ex) when (ex is ProposalRejectedException or YamlException or FormatException or OverflowException)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                // Backstop for the contract above: a parser or converter that fails on agent input without a specific
-                // check is still a rejection, audited like any other, never an unaudited exception.
-                var rejection = ex as ProposalRejectedException
-                    ?? new ProposalRejectedException($"The proposal could not be parsed: {Clip(ex.Message, MaxEchoedError)}", ex);
+                // The contract above: whatever processing the agent's input throws, the caller sees an audited
+                // rejection. Parser and converter failures echo their (clipped) message back to the agent; anything
+                // else is a defect, so the agent gets a generic message and the operator gets the log.
+                var parseFailure = ex is YamlException or FormatException or OverflowException;
+                var rejection = ex as ProposalRejectedException ?? new ProposalRejectedException(
+                    parseFailure
+                        ? $"The proposal could not be parsed: {Clip(ex.Message, MaxEchoedError)}"
+                        : "The proposal could not be processed; the error was logged for the operator.",
+                    ex);
+                var unexpected = rejection != ex && !parseFailure;
+                if (unexpected)
+                {
+                    LogUnexpected(_logger, agent.Value, kind, ex);
+                }
+
                 await audit.AppendAsync(
-                    new AuditRecord(AuditKind, "proposal_rejected", agent.Value, Detail: $"{kind} {Clip(name)}: {Clip(rejection.Message, 512)}"),
+                    new AuditRecord(
+                        AuditKind,
+                        "proposal_rejected",
+                        agent.Value,
+                        Detail: $"{kind} {Clip(name)}: {Clip(rejection.Message, 512)}{(unexpected ? $" ({ex.GetType().Name})" : string.Empty)}"),
                     cancellationToken);
                 if (rejection == ex)
                 {
@@ -488,7 +516,7 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
             throw new ProposalRejectedException("A skill proposal needs a name of lower-case letters, digits and dashes.");
         }
 
-        var nameMismatch = $"The skill's frontmatter name must be '{name}', matching its folder.";
+        var nameMismatch = $"The skill's frontmatter name must be '{name}', matching its folder, and no frontmatter value may be null.";
         if (SkillCardReader.FrontmatterText(content) is not { } frontmatter)
         {
             throw new ProposalRejectedException(nameMismatch);
@@ -656,6 +684,9 @@ public sealed partial class ProposalService(IProposalStore store, CapybaraConfig
 
     [GeneratedRegex("^[a-z0-9][a-z0-9-]{0,63}$", RegexOptions.CultureInvariant)]
     private static partial Regex SkillName();
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Unexpected failure while processing a {Kind} proposal from {Agent}; rejected")]
+    private static partial void LogUnexpected(ILogger logger, string agent, ProposalKind kind, Exception exception);
 
     /// <summary>The target no longer matches the proposal's base; thrown out of the edit to abort the apply.</summary>
     private sealed class StaleProposalException(string message) : Exception(message);

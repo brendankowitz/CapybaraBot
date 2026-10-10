@@ -42,6 +42,84 @@ public sealed class CapybaraConfigurationLoaderTests
         Assert.Contains(ex.Errors, e => e.Contains("cannot parse interval", StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData("agents/ea/agent.yaml", "id: ea\nname: EA\njob: assistant\nx:\n {0}")]
+    [InlineData("routines.yaml", "{0}")]
+    [InlineData("rules.yaml", "{0}")]
+    public void Deep_nesting_fails_closed_instead_of_overflowing_the_stack(string file, string template)
+    {
+        var flow = new string('[', 10_000) + new string(']', 10_000);
+        var block = string.Concat(Enumerable.Repeat("- ", 10_000)) + "a";
+        foreach (var deep in new[] { flow, block })
+        {
+            using var dir = new TempDirectory();
+            Directory.CreateDirectory(Path.Combine(dir.Path, "agents", "ea"));
+            File.WriteAllText(Path.Combine(dir.Path, "agents", "ea", "agent.yaml"), "id: ea\nname: EA\njob: assistant\n");
+            File.WriteAllText(Path.Combine(dir.Path, file), string.Format(System.Globalization.CultureInfo.InvariantCulture, template, deep));
+
+            var ex = Assert.Throws<CapybaraConfigurationException>(() => CapybaraConfigurationLoader.Load(dir.Path));
+
+            Assert.Contains(ex.Errors, e => e.Contains("nested deeper than", StringComparison.Ordinal));
+        }
+    }
+
+    [Fact]
+    public void Deeply_nested_skill_frontmatter_is_skipped_not_fatal()
+    {
+        using var dir = new TempDirectory();
+        var skill = Directory.CreateDirectory(Path.Combine(dir.Path, "agents", "ea", "skills", "deep")).FullName;
+        File.WriteAllText(Path.Combine(dir.Path, "agents", "ea", "agent.yaml"), "id: ea\nname: EA\njob: assistant\n");
+        File.WriteAllText(Path.Combine(skill, "SKILL.md"), "---\nname: deep\nx: " + new string('[', 10_000) + new string(']', 10_000) + "\n---\nBody.\n");
+
+        var config = CapybaraConfigurationLoader.Load(dir.Path);
+
+        Assert.Empty(Assert.Single(config.Agents).Skills);
+    }
+
+    [Theory]
+    [InlineData("agents/ea/agent.yaml", "id: ea\nname: EA\njob: assistant\ntools: ~\n", "tools")]
+    [InlineData("agents/ea/agent.yaml", "id: ea\nname: EA\njob: assistant\ngrants: [~]\n", "grants[0]")]
+    [InlineData("agents/ea/agent.yaml", "id: ea\nname: EA\njob: assistant\ngrants: [{connection: c, constraints: {to: [a, ~]}}]\n", "grants[0].constraints.to[1]")]
+    [InlineData("routines.yaml", "- ~\n", "[0]")]
+    [InlineData("routines.yaml", "- id: r\n  owner: ea\n  kind: heartbeat\n  every: 1h\n  prompt: hi\n  approvalBoundary: ~\n", "[0].approvalBoundary")]
+    [InlineData("rules.yaml", "- ~\n", "[0]")]
+    [InlineData("rules.yaml", "- effect: allow\n  tool: x\n  destinationAllowlist: [~]\n", "[0].destinationAllowlist[0]")]
+    public void Yaml_nulls_fail_closed_with_their_path(string file, string content, string path)
+    {
+        using var dir = new TempDirectory();
+        Directory.CreateDirectory(Path.Combine(dir.Path, "agents", "ea"));
+        File.WriteAllText(Path.Combine(dir.Path, "agents", "ea", "agent.yaml"), "id: ea\nname: EA\njob: assistant\n");
+        File.WriteAllText(Path.Combine(dir.Path, file), content);
+
+        var ex = Assert.Throws<CapybaraConfigurationException>(() => CapybaraConfigurationLoader.Load(dir.Path));
+
+        Assert.Contains(ex.Errors, e => e.Contains($"'{path}' is null", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("hidden: ~")]
+    [InlineData("budget: ~")]
+    [InlineData("budget: {dailyCredits: ~}")]
+    [InlineData("provider: ~")]
+    [InlineData("trifecta: {untrustedInput: ~}")]
+    [InlineData("accepts: {consults: ~}")]
+    [InlineData("notifications: ~")]
+    [InlineData("grants: [{connection: ~}]")]
+    [InlineData("grants: [{connection: c, constraints: {~: [a]}}]")]
+    [InlineData("mcpServers: [{name: m, type: stdio, command: ~, timeout: ~, args: [~]}]")]
+    [InlineData("provider: {type: ~, baseUrl: ~}")]
+    [InlineData("~: x")]
+    public void Any_null_in_agent_yaml_loads_or_fails_closed(string field)
+    {
+        using var dir = new TempDirectory();
+        Directory.CreateDirectory(Path.Combine(dir.Path, "agents", "ea"));
+        File.WriteAllText(Path.Combine(dir.Path, "agents", "ea", "agent.yaml"), "id: ea\nname: EA\njob: assistant\n" + field + "\n");
+
+        var ex = Record.Exception(() => CapybaraConfigurationLoader.Load(dir.Path));
+
+        Assert.True(ex is null or CapybaraConfigurationException, ex?.ToString());
+    }
+
     [Fact]
     public void Invalid_config_fails_closed_with_every_error()
     {

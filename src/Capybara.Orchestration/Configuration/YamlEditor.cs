@@ -11,8 +11,43 @@ namespace Capybara.Orchestration.Configuration;
 /// </summary>
 internal static class YamlEditor
 {
+    /// <summary>
+    /// Deepest collection nesting accepted anywhere. YamlDotNet's node model and deserializer recurse once per level,
+    /// so a few thousand levels (~30 KB of <c>[</c>) overflow the stack, which kills the process and no catch can stop.
+    /// Real config nests a handful of levels.
+    /// </summary>
+    public const int MaxDepth = 32;
+
+    private static readonly string TooDeep = $"YAML collections are nested deeper than {MaxDepth} levels";
+
+    /// <summary>
+    /// Throws <see cref="YamlException"/> when collections in <paramref name="text"/> nest deeper than
+    /// <see cref="MaxDepth"/>, flow or block. Streams parser events, which does not recurse, so it is safe at any depth.
+    /// Run it before every recursive parse or deserialize of config text.
+    /// </summary>
+    public static void ThrowIfTooDeep(string text)
+    {
+        var parser = new Parser(new StringReader(text));
+        var depth = 0;
+        while (parser.MoveNext())
+        {
+            if (parser.Current is MappingStart or SequenceStart)
+            {
+                if (++depth > MaxDepth)
+                {
+                    throw new YamlException(parser.Current.Start, parser.Current.End, TooDeep);
+                }
+            }
+            else if (parser.Current is MappingEnd or SequenceEnd)
+            {
+                depth--;
+            }
+        }
+    }
+
     public static YamlNode? Parse(string text)
     {
+        ThrowIfTooDeep(text);
         var stream = new YamlStream();
         stream.Load(new StringReader(text));
         return stream.Documents.Count == 0 ? null : stream.Documents[0].RootNode;
@@ -72,7 +107,8 @@ internal static class YamlEditor
 
     /// <summary>
     /// Agent-authored YAML must be plain so that what the reviewer reads is what the loader sees: one document, no
-    /// directives, no tags, anchors or aliases, and every mapping key a plain scalar. Tagged or quoted keys
+    /// directives, no tags, anchors or aliases, every mapping key a plain scalar, and nesting at most
+    /// <see cref="MaxDepth"/> deep. Tagged or quoted keys
     /// (<c>!!str grants:</c>) compare unequal to plain ones in the node model but bind to the same property in the
     /// deserializer. Returns the first problem, or null.
     /// </summary>
@@ -123,6 +159,11 @@ internal static class YamlEditor
 
                             open.Pop();
                             open.Push(!isKey);
+                        }
+
+                        if (node is MappingStart or SequenceStart && open.Count >= MaxDepth)
+                        {
+                            return TooDeep;
                         }
 
                         if (node is MappingStart)

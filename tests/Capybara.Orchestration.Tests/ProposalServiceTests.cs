@@ -795,6 +795,159 @@ public sealed class ProposalServiceTests : IDisposable
         Assert.Equal("Sweep the inbox and summarize.\n", Assert.Single(_fixture.Host.Current.Routines, r => r.Id == "alpha-evening").Prompt);
     }
 
+    // ---- Round 5: nesting depth cannot overflow the stack; YAML nulls are collected errors; catch-all ----
+
+    /// <summary>Flow nesting <paramref name="depth"/> deep, in lines short enough to pass the line-length check.</summary>
+    private static string DeepFlow(int depth, string indent) =>
+        string.Concat(Enumerable.Repeat(indent + new string('[', 400) + "\n", depth / 400))
+        + string.Concat(Enumerable.Repeat(indent + new string(']', 400) + "\n", depth / 400));
+
+    [Theory]
+    [InlineData(ProposalKind.AgentConfig)]
+    [InlineData(ProposalKind.Routine)]
+    [InlineData(ProposalKind.Skill)]
+    public async Task Deep_flow_nesting_is_an_audited_rejection_not_a_crash(ProposalKind kind)
+    {
+        var (name, content) = kind switch
+        {
+            ProposalKind.AgentConfig => ((string?)null, ConfigFixture.Alpha + "\nx:\n" + DeepFlow(10_000, " ")),
+            ProposalKind.Routine => ("alpha-evening", "id: alpha-evening\nowner: alpha\nkind: heartbeat\nevery: 2h\nprompt: Hi.\nx:\n" + DeepFlow(10_000, " ")),
+            _ => ("triage", "---\nname: triage\nx:\n" + DeepFlow(10_000, " ") + "---\n# Steps\nRead.\n"),
+        };
+
+        var ex = await Assert.ThrowsAsync<ProposalRejectedException>(() => _service.ProposeAsync(Alpha, kind, name, content, "x", Ct).AsTask());
+
+        Assert.Contains("nested deeper than", ex.Message, StringComparison.Ordinal);
+        Assert.Single(_fixture.Audit.Entries, e => e.Decision == "proposal_rejected");
+    }
+
+    [Fact]
+    public async Task Deep_block_nesting_is_an_audited_rejection()
+    {
+        // Block nesting deepens with the column, so the line-length cap bounds it; the depth cap fires well before.
+        var content = ConfigFixture.Alpha + "\nx:\n" + string.Concat(Enumerable.Repeat("- ", 200)) + "a\n";
+
+        var ex = await Assert.ThrowsAsync<ProposalRejectedException>(() => _service.ProposeAsync(Alpha, ProposalKind.AgentConfig, null, content, "x", Ct).AsTask());
+
+        Assert.Contains("nested deeper than", ex.Message, StringComparison.Ordinal);
+        Assert.Single(_fixture.Audit.Entries, e => e.Decision == "proposal_rejected");
+    }
+
+    [Theory]
+    [InlineData("tools: [list_agents, email_read]", "tools: ~")]
+    [InlineData("tools: [list_agents, email_read]", "tools:")]
+    [InlineData("tools: [list_agents, email_read]", "tools: [~]")]
+    [InlineData("tools: [list_agents, email_read]", "tools: [list_agents, null]")]
+    [InlineData("approvalRequiredTools: [email_read]", "approvalRequiredTools: [email_read]\nexternalActionTools: [~]")]
+    [InlineData("approvalRequiredTools: [email_read]", "approvalRequiredTools: ~")]
+    [InlineData("trifecta:\n  untrustedInput: true\n  privateData: true\n  externalAction: false", "trifecta: ~")]
+    [InlineData("peers:\n  consult: [beta]", "peers: ~")]
+    [InlineData("  consult: [beta]", "  consult: ~")]
+    [InlineData("  consult: [beta]", "  consult: [~]")]
+    [InlineData("job: Reads mail.", "job: Reads mail.\naccepts: ~")]
+    [InlineData("job: Reads mail.", "job: Reads mail.\nmemory: ~")]
+    [InlineData("grants:\n  - connection: gmail\n    operations: [read]", "grants: ~")]
+    [InlineData("grants:\n  - connection: gmail\n    operations: [read]", "grants: [~]")]
+    [InlineData("    operations: [read]", "    operations: [~]")]
+    [InlineData("    operations: [read]", "    operations: [read]\n    constraints: ~")]
+    [InlineData("    operations: [read]", "    operations: [read]\n    constraints: {to: ~}")]
+    [InlineData("    operations: [read]", "    operations: [read]\n    constraints: {to: [~]}")]
+    [InlineData("job: Reads mail.", "job: Reads mail.\negress: ~")]
+    [InlineData("job: Reads mail.", "job: Reads mail.\negress: [~]")]
+    [InlineData("job: Reads mail.", "job: Reads mail.\nmcpServers: ~")]
+    [InlineData("job: Reads mail.", "job: Reads mail.\nmcpServers: [~]")]
+    [InlineData("job: Reads mail.", "job: Reads mail.\nmcpServers: [{name: m, type: http, url: 'https://m.example.com', tools: [~]}]")]
+    public async Task Yaml_nulls_in_agent_config_are_an_audited_rejection(string from, string to)
+    {
+        var content = ConfigFixture.Alpha.Replace(from, to, StringComparison.Ordinal);
+        Assert.NotEqual(ConfigFixture.Alpha, content);
+
+        var ex = await Assert.ThrowsAsync<ProposalRejectedException>(() => _service.ProposeAsync(Alpha, ProposalKind.AgentConfig, null, content, "x", Ct).AsTask());
+
+        Assert.Contains("null", ex.Message, StringComparison.Ordinal);
+        Assert.Single(_fixture.Audit.Entries, e => e.Decision == "proposal_rejected");
+        Assert.Empty(await _service.ListAsync(cancellationToken: Ct));
+    }
+
+    [Theory]
+    [InlineData("approvalBoundary: ~")]
+    [InlineData("approvalBoundary: [~]")]
+    [InlineData("approvalBoundary: [email_send, ~]")]
+    public async Task Yaml_nulls_in_a_routine_are_an_audited_rejection(string field)
+    {
+        var routine = "id: alpha-evening\nowner: alpha\nkind: heartbeat\nevery: 2h\nprompt: Evening sweep.\n" + field + "\n";
+
+        var ex = await Assert.ThrowsAsync<ProposalRejectedException>(() => _service.ProposeAsync(Alpha, ProposalKind.Routine, "alpha-evening", routine, "x", Ct).AsTask());
+
+        Assert.Contains("approvalBoundary", ex.Message, StringComparison.Ordinal);
+        Assert.Single(_fixture.Audit.Entries, e => e.Decision == "proposal_rejected");
+    }
+
+    [Theory]
+    [InlineData("examples: ~")]
+    [InlineData("examples: [~]")]
+    public async Task Yaml_nulls_in_skill_frontmatter_are_an_audited_rejection(string field)
+    {
+        var skill = ConfigFixture.ValidSkill.ReplaceLineEndings("\n").Replace("name: triage", "name: triage\n" + field, StringComparison.Ordinal);
+
+        await Assert.ThrowsAsync<ProposalRejectedException>(() => _service.ProposeAsync(Alpha, ProposalKind.Skill, "triage", skill, "x", Ct).AsTask());
+
+        Assert.Single(_fixture.Audit.Entries, e => e.Decision == "proposal_rejected");
+    }
+
+    [Fact]
+    public async Task Any_unexpected_failure_is_an_audited_rejection_and_is_logged()
+    {
+        var logger = new ListLogger();
+        using var service = new ProposalService(new ThrowingStore(new InvalidOperationException("boom")), _fixture.Host, _fixture.Audit, _fixture.Time, logger);
+
+        var ex = await Assert.ThrowsAsync<ProposalRejectedException>(() => service.ProposeAsync(Alpha, ProposalKind.Soul, null, "Calm.\n", "x", Ct).AsTask());
+
+        Assert.IsType<InvalidOperationException>(ex.InnerException);
+        Assert.DoesNotContain("boom", ex.Message, StringComparison.Ordinal);
+        Assert.Single(_fixture.Audit.Entries, e => e.Decision == "proposal_rejected");
+        Assert.Contains(logger.Entries, e => e.Exception is InvalidOperationException);
+    }
+
+    [Fact]
+    public async Task Cancellation_propagates_and_is_not_a_rejection()
+    {
+        using var service = new ProposalService(new ThrowingStore(new OperationCanceledException()), _fixture.Host, _fixture.Audit, _fixture.Time);
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => service.ProposeAsync(Alpha, ProposalKind.Soul, null, "Calm.\n", "x", Ct).AsTask());
+
+        Assert.DoesNotContain(_fixture.Audit.Entries, e => e.Decision == "proposal_rejected");
+    }
+
+    private sealed class ThrowingStore(Exception error) : IProposalStore
+    {
+        public ValueTask SaveAsync(ChangeProposal proposal, CancellationToken cancellationToken = default) => throw error;
+
+        public ValueTask<ChangeProposal?> GetAsync(string id, CancellationToken cancellationToken = default) => throw error;
+
+#pragma warning disable CS1998 // An iterator that only throws.
+        public async IAsyncEnumerable<ChangeProposal> ListAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            throw error;
+#pragma warning disable CS0162
+            yield break;
+#pragma warning restore CS0162
+        }
+#pragma warning restore CS1998
+    }
+
+    private sealed class ListLogger : Microsoft.Extensions.Logging.ILogger<ProposalService>
+    {
+        public List<(Microsoft.Extensions.Logging.LogLevel Level, Exception? Exception)> Entries { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Entries.Add((logLevel, exception));
+    }
+
     private const int ReviewableTextLimit = 8;
 
     private ProposalService NewService() =>

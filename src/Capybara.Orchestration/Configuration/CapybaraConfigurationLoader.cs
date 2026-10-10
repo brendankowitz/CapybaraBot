@@ -103,7 +103,9 @@ public static class CapybaraConfigurationLoader
             AgentYaml? yaml;
             try
             {
-                yaml = Yaml.Deserialize<AgentYaml?>(File.ReadAllText(file));
+                var text = File.ReadAllText(file);
+                YamlEditor.ThrowIfTooDeep(text);
+                yaml = Yaml.Deserialize<AgentYaml?>(text);
             }
             catch (YamlException ex)
             {
@@ -114,6 +116,12 @@ public static class CapybaraConfigurationLoader
             if (yaml is null)
             {
                 errors.Add($"{folder}/agent.yaml is empty.");
+                continue;
+            }
+
+            if (NullErrors($"{folder}/agent.yaml", yaml) is { Count: > 0 } nulls)
+            {
+                errors.AddRange(nulls);
                 continue;
             }
 
@@ -194,7 +202,16 @@ public static class CapybaraConfigurationLoader
 
         try
         {
-            return Yaml.Deserialize<List<T>?>(File.ReadAllText(file)) ?? [];
+            var text = File.ReadAllText(file);
+            YamlEditor.ThrowIfTooDeep(text);
+            var items = Yaml.Deserialize<List<T>?>(text) ?? [];
+            if (NullErrors(Path.GetFileName(file), items) is { Count: > 0 } nulls)
+            {
+                errors.AddRange(nulls);
+                return [];
+            }
+
+            return items;
         }
         catch (YamlException ex)
         {
@@ -202,6 +219,10 @@ public static class CapybaraConfigurationLoader
             return [];
         }
     }
+
+    /// <summary>An explicit YAML null where the model needs a value; see <see cref="YamlNulls"/>.</summary>
+    private static List<string> NullErrors(string file, object model) =>
+        [.. YamlNulls.Find(model).Select(path => $"{file}: '{path}' is null (~ or an empty value); omit the key or give it a value.")];
 
     private static PolicyRule? ToRule(RuleYaml yaml, List<string> errors)
     {

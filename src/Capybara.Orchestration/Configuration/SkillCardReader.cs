@@ -52,7 +52,14 @@ internal static class SkillCardReader
 
         try
         {
-            frontmatter = Yaml.Deserialize<SkillFrontmatter?>(yaml) ?? new SkillFrontmatter();
+            YamlEditor.ThrowIfTooDeep(yaml);
+            var parsed = Yaml.Deserialize<SkillFrontmatter?>(yaml) ?? new SkillFrontmatter();
+            if (YamlNulls.Find(parsed).Count > 0)
+            {
+                return false;
+            }
+
+            frontmatter = parsed;
             return true;
         }
         catch (YamlDotNet.Core.YamlException)
