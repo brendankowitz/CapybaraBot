@@ -11,6 +11,7 @@ using Capybara.Memory.Safety;
 using Capybara.Memory.Search;
 using Capybara.Memory.Versioning;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Capybara.Memory.Store;
 
@@ -19,10 +20,11 @@ namespace Capybara.Memory.Store;
 /// <c>remember</c> and <c>forget</c> with scope rules, path safety, provenance, injection quarantine and staged
 /// <c>/user/</c> edits.
 /// </summary>
-public sealed class WikiStore : IMemoryStore, IDisposable
+public sealed partial class WikiStore : IMemoryStore, IDisposable
 {
     private const int CharsPerToken = 4;
 
+    private readonly ILogger _logger;
     private readonly MemoryOptions _options;
     private readonly IMemoryVersioning _versioning;
     private readonly TimeProvider _time;
@@ -46,8 +48,12 @@ public sealed class WikiStore : IMemoryStore, IDisposable
         _index = index;
         _root = Path.GetFullPath(options.Root);
         Directory.CreateDirectory(_root);
+        _logger = logger ?? NullLogger<WikiStore>.Instance;
         _pending = new FilePendingChangeStore(_root, logger);
     }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Refused {Agent}'s write to {Path}: the existing page is quarantined and a human must review it.")]
+    private partial void LogQuarantinedWriteRefused(string agent, string path);
 
     public IReadOnlyCollection<string> Quarantined => [.. _quarantined.Keys];
 
@@ -223,7 +229,7 @@ public sealed class WikiStore : IMemoryStore, IDisposable
         EnsureNoSensitiveData(fact);
 
         var file = ResolveFile(path);
-        var existing = File.Exists(file) ? await LoadAsync(path, file, cancellationToken) : null;
+        var existing = await LoadForAgentWriteAsync(context, path, file, cancellationToken);
         var bullet = "- " + fact.Trim();
 
         string body;
@@ -368,7 +374,7 @@ public sealed class WikiStore : IMemoryStore, IDisposable
         try
         {
             var file = ResolveFile(path);
-            if (!File.Exists(file))
+            if (await LoadForAgentWriteAsync(context, path, file, cancellationToken) is null)
             {
                 return MemoryOperation.NoOp;
             }
@@ -686,6 +692,27 @@ public sealed class WikiStore : IMemoryStore, IDisposable
         }
 
         return full;
+    }
+
+    /// <summary>
+    /// Loads the page an agent is about to overwrite or delete; <c>null</c> when there is no file. A file that exists but
+    /// is quarantined (oversize, injected, unparseable) is refused: only a human path may replace it, because only those
+    /// paths snapshot the raw text into history first.
+    /// </summary>
+    private async Task<MemoryPage?> LoadForAgentWriteAsync(MemoryAccessContext context, MemoryPath path, string file, CancellationToken cancellationToken)
+    {
+        if (!File.Exists(file))
+        {
+            return null;
+        }
+
+        if (await LoadAsync(path, file, cancellationToken) is { } page)
+        {
+            return page;
+        }
+
+        LogQuarantinedWriteRefused(context.Agent.Value, path.Value);
+        throw new MemoryAccessDeniedException("page is quarantined; a human must review it");
     }
 
     private async Task<MemoryPage?> LoadAsync(MemoryPath path, string file, CancellationToken cancellationToken)
