@@ -1,7 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <!-- GHCP001: PermissionDecision is marked evaluation-only, but it is the only fail-closed permission API. -->
-    <NoWarn>$(NoWarn);GHCP001</NoWarn>
     <Description>Per-agent GitHub Copilot SDK runtime: Empty mode, isolated BaseDirectory, re-registration on resume, supervision.</Description>
   </PropertyGroup>
   <ItemGroup>
@@ -10,6 +8,9 @@
     <ProjectReference Include="..\Capybara.Observability\Capybara.Observability.csproj" />
     <ProjectReference Include="..\Capybara.Memory\Capybara.Memory.csproj" />
     <ProjectReference Include="..\Capybara.Orchestration\Capybara.Orchestration.csproj" />
+    <ProjectReference Include="..\Capybara.Scheduling\Capybara.Scheduling.csproj" />
+    <ProjectReference Include="..\Capybara.Channels\Capybara.Channels.csproj" />
+    <ProjectReference Include="..\Capybara.Connections\Capybara.Connections.csproj" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="GitHub.Copilot.SDK" />

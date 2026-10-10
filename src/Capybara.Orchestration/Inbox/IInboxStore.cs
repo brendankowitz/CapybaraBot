@@ -11,11 +11,26 @@ public interface IInboxStore
 {
     event EventHandler<AgentId>? MessageAvailable;
 
+    /// <summary>
+    /// Raised when a stored message could not be read back (corrupt or truncated) and was moved out of the queue into
+    /// dead-letter storage, so it cannot block the inbox (NFR-02).
+    /// </summary>
+    event EventHandler<AgentId>? MessageQuarantined;
+
     ValueTask EnqueueAsync(FleetMessage message, CancellationToken cancellationToken = default);
 
     ValueTask<FleetMessage?> PeekAsync(AgentId agent, CancellationToken cancellationToken = default);
 
+    /// <summary>Every pending message for <paramref name="agent"/>, oldest first (a snapshot).</summary>
+    ValueTask<IReadOnlyList<FleetMessage>> ListAsync(AgentId agent, CancellationToken cancellationToken = default);
+
     ValueTask AcknowledgeAsync(AgentId agent, string messageId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Moves a message that repeatedly failed out of the queue into durable dead-letter storage, so it neither blocks
+    /// the inbox nor is lost (NFR-02).
+    /// </summary>
+    ValueTask DeadLetterAsync(AgentId agent, string messageId, CancellationToken cancellationToken = default);
 
     ValueTask<int> CountAsync(AgentId agent, CancellationToken cancellationToken = default);
 }

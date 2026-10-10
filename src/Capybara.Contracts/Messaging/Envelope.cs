@@ -31,5 +31,13 @@ public sealed record Envelope
 
     public Taint Taint { get; init; }
 
+    /// <summary>
+    /// Who started the chain: <see cref="MessageOrigin.User"/> (the person), <see cref="MessageOrigin.System"/> (a host
+    /// routine), <see cref="MessageOrigin.Event"/> (an external trigger) or <see cref="MessageOrigin.Agent"/>. Carried to
+    /// every hop and resumed turn, so only a chain the user or the host started can ever reach the user (FR-A2A-07).
+    /// <see langword="null"/> (unknown, e.g. older records) counts as not user-facing.
+    /// </summary>
+    public MessageOrigin? RootOrigin { get; init; }
+
     public bool IsAtMaxDepth => Depth >= MaxDepth;
 }

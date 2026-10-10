@@ -36,7 +36,7 @@ public sealed class FleetToolsTests
     public void Session_ids_are_deterministic()
     {
         var id = AgentId.Parse("ea");
-        Assert.Equal("agent:ea:main", SessionIds.Main(id));
+        Assert.Equal("agent_ea_main", SessionIds.Main(id));
         Assert.True(SessionIds.IsMain(SessionIds.Main(id)));
         Assert.False(SessionIds.IsMain(SessionIds.Consult(id, Guid.NewGuid())));
     }

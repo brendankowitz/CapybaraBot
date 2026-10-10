@@ -1,5 +1,6 @@
 using System.Text;
 using Capybara.Contracts.Agents;
+using Capybara.Memory.Context;
 using GitHub.Copilot;
 
 namespace Capybara.Runtime.Copilot.Sessions;
@@ -31,9 +32,22 @@ public static class SystemMessageBuilder
         }
 
         rules.AppendLine(FleetRules);
-        if (kind == SessionKind.Consult)
+        switch (kind)
         {
-            rules.AppendLine(ConsultRules);
+            case SessionKind.Consult:
+                rules.AppendLine(ConsultRules);
+                break;
+            case SessionKind.Task:
+                rules.AppendLine(TaskRules);
+                break;
+            case SessionKind.Incognito:
+                rules.AppendLine(IncognitoRules);
+                break;
+        }
+
+        if (kind != SessionKind.Incognito)
+        {
+            rules.AppendLine(MemoryGuidance.NotAuthoritative);
         }
 
         return new SystemMessageConfig
@@ -62,5 +76,18 @@ public static class SystemMessageBuilder
         """
         This is a read-only consult from another agent. Answer the question concisely. Do not take external actions
         and do not write memory.
+        """;
+
+    internal const string TaskRules =
+        """
+        This session works on one task. If it was delegated by another agent: when you need a decision, call
+        request_input and end the turn (the answer arrives as a new message); when done, verify the result against the
+        objective and output schema, then call complete_task with the result, how you verified it, and anything you
+        could not verify. Only you can complete your task. A routine run reports its result as its final answer.
+        """;
+
+    internal const string IncognitoRules =
+        """
+        This is an incognito conversation: no memory is read or written, and nothing from it may be remembered.
         """;
 }

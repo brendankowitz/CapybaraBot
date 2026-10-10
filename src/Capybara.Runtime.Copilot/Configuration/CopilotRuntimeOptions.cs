@@ -97,6 +97,56 @@ public sealed class CopilotRuntimeOptions
     /// <summary>Upper bound for one main-session turn.</summary>
     public TimeSpan TurnTimeout { get; set; } = TimeSpan.FromMinutes(20);
 
+    /// <summary>
+    /// How long a stopped turn's abort may take to reach idle. Past it the session is discarded and rebuilt, so no run
+    /// outlives its turn.
+    /// </summary>
+    public TimeSpan AbortTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How long a failed turn waits for its run's own <c>session.idle</c> before aborting it. After <c>session.error</c>
+    /// the SDK throws and the idle follows within milliseconds; aborting an already idle session never signals idle.
+    /// </summary>
+    public TimeSpan IdleGrace { get; set; } = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>
+    /// How long a finished turn looks for a run started by a steering message that reached the CLI after the turn's run
+    /// ended (FR-AGT-05). A steering message the CLI merged into the run shows no further activity.
+    /// </summary>
+    public TimeSpan LateRunGrace { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// How long the post-start self-test waits for the runtime to report its tools (they are null until tools
+    /// initialize). Running out fails the self-test, which pauses the agent (fail closed, FR-AGT-09).
+    /// </summary>
+    public TimeSpan SelfTestToolsTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    public TimeSpan SelfTestPollInterval { get; set; } = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>The agent that receives conversational-channel DMs (FR-CLI-04): the default front door.</summary>
+    public string FrontDoorAgent { get; set; } = "ea";
+
+    /// <summary>How long a delivered channel message id is remembered, so a redelivery is dropped (FR-CLI-04).</summary>
+    public TimeSpan InboundDedupeRetention { get; set; } = TimeSpan.FromDays(7);
+
+    /// <summary>How long a root agent's <c>ask_user</c> waits for the human on the phone channel (FR-A2A-07).</summary>
+    public TimeSpan UserEscalationTimeout { get; set; } = TimeSpan.FromMinutes(30);
+
+    /// <summary>Cheap model for the tool-less reviewer session (FR-SAF-05).</summary>
+    public string ReviewerModel { get; set; } = "gpt-5-mini";
+
+    /// <summary>Upper bound for one review; running out escalates the call to a human.</summary>
+    public TimeSpan ReviewerTimeout { get; set; } = TimeSpan.FromSeconds(45);
+
+    /// <summary>
+    /// Credit cap for one reviewer session, sent to the SDK raised to its 30-credit minimum. In practice a review is
+    /// bounded by having no tools (one model reply) and by <see cref="ReviewerTimeout"/>.
+    /// </summary>
+    public decimal ReviewerMaxCredits { get; set; } = 0.5m;
+
+    /// <summary>The reviewer's own CLI state, outside every agent's directories.</summary>
+    public string ReviewerDirectory => Path.Combine(StateRoot, "reviewer");
+
     public string AgentBaseDirectory(string agentId) => Path.Combine(StateRoot, "agents", agentId, "copilot");
 
     public string AgentWorkingDirectory(string agentId) => Path.Combine(StateRoot, "agents", agentId, "workspace");

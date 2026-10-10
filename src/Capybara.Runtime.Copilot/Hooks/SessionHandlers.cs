@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Capybara.Contracts.Agents;
 using Capybara.Observability.Alerts;
 using Capybara.Policy.Gate;
 using Capybara.Policy.Provenance;
@@ -7,6 +8,7 @@ using Capybara.Runtime.Copilot.Configuration;
 using Capybara.Runtime.Copilot.Sessions;
 using GitHub.Copilot;
 using GitHub.Copilot.Rpc;
+using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 
 namespace Capybara.Runtime.Copilot.Hooks;
@@ -29,7 +31,8 @@ public sealed partial class SessionHandlers(
     ILogger<SessionHandlers> logger,
     IAlertSink alerts,
     TimeProvider time,
-    SecretRedactor? redactor = null)
+    SecretRedactor? redactor = null,
+    ApprovalTurnStore? approvalTurns = null)
 {
     public const string UserUnavailableAnswer = "The user is not available right now. Continue without this input or stop and report what is blocked.";
 
@@ -43,25 +46,56 @@ public sealed partial class SessionHandlers(
 
     private static readonly IReadOnlyList<string> ConfirmChoices = ["Accept", "Decline"];
 
+    /// <summary>Tools a routine dry run never runs: they act outside the test (FR-RTN-08).</summary>
+    private static readonly HashSet<string> DryRunForbidden = new(
+        [.. FleetTools.AgentToAgent, .. FleetTools.TaskProtocol, FleetTools.AnswerTask, .. FleetTools.MemoryWrite, FleetTools.ProposeChange],
+        StringComparer.Ordinal);
+
     internal SecretRedactor Redactor { get; } = redactor ?? new SecretRedactor();
 
     /// <summary>
     /// <c>OnPreToolUse</c>: a call carrying a secret is denied outright (it could only be exfiltration of a leaked value,
-    /// FR-SAF-08); every other call goes through the layered policy gate.
+    /// FR-SAF-08); the task protocol tools of a session's own task are host-authorized; every other call goes through
+    /// the layered policy gate. Every decision is recorded on the turn as evidence (FR-OBS-06).
     /// </summary>
     public async Task<PreToolUseHookOutput> OnPreToolUseAsync(CapybaraSession session, PreToolUseHookInput input)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(input);
+        var turn = session.Turn;
 
         // Checked before the gate so no approval request is ever raised with the secret in its arguments.
         if (ContainsSecret(input.ToolArgs))
         {
             LogSecretInArguments(logger, input.ToolName, session.SessionId);
+            turn.RecordAction($"{input.ToolName}: denied (secret in arguments)");
             return Deny("the arguments contain a secret or credential; secrets must never be passed to tools");
         }
 
-        var call = new ToolCallContext(session.Agent, session.SessionId, input.ToolName, input.ToolArgs, session.TurnOrigin, session.Envelope.TraceId);
+        // FR-A2A-06: the tools are removed at max depth; this also covers a live session whose tools could not be swapped.
+        if (session.Envelope.IsAtMaxDepth && FleetTools.AgentToAgent.Contains(input.ToolName, StringComparer.Ordinal))
+        {
+            turn.RecordAction($"{input.ToolName}: denied (depth limit)");
+            return Deny($"depth limit reached ({Contracts.Messaging.Envelope.MaxDepth}); agent-to-agent calls are not available in this turn");
+        }
+
+        // FR-RTN-08: checked before the protocol bypass, so no dry run reaches another agent, memory or a proposal.
+        if (session.DryRun && DryRunForbidden.Contains(input.ToolName))
+        {
+            turn.RecordDeniedApproval(input.ToolName);
+            turn.RecordAction($"{input.ToolName}: denied ({PolicyGate.DryRunLayer})");
+            return Deny("dry run: tools that reach other agents, change memory or propose changes are not run in a test");
+        }
+
+        if (IsProtocolTool(session, input.ToolName))
+        {
+            // These only move data inside the session's own task tree; the coordinator authorizes and audits them.
+            Allow(session, input.ToolName);
+            turn.RecordAction($"{input.ToolName}: allowed (task protocol)");
+            return new PreToolUseHookOutput { PermissionDecision = "allow", PermissionDecisionReason = "task protocol" };
+        }
+
+        var call = new ToolCallContext(session.Agent, session.SessionId, input.ToolName, input.ToolArgs, session.TurnOrigin, session.Envelope.TraceId, session.DryRun);
         GateVerdict verdict;
         try
         {
@@ -72,13 +106,15 @@ public sealed partial class SessionHandlers(
 #pragma warning restore CA1031
         {
             LogGateFailure(logger, ex, input.ToolName);
+            turn.RecordAction($"{input.ToolName}: denied (policy gate unavailable)");
             return Deny("policy gate unavailable");
         }
 
         switch (verdict.Outcome)
         {
             case GateOutcome.Allow:
-                allowances.Grant(session.SessionId);
+                Allow(session, input.ToolName);
+                turn.RecordAction($"{input.ToolName}: allowed ({verdict.Layer})");
 
                 // Taint before the call runs, so parallel calls in the same turn are already judged as tainted.
                 if (IsUntrustedSource(session, input.ToolName))
@@ -89,10 +125,61 @@ public sealed partial class SessionHandlers(
                 return new PreToolUseHookOutput { PermissionDecision = "allow", PermissionDecisionReason = verdict.Reason };
 
             case GateOutcome.PendingApproval:
+                turn.RecordAction($"{input.ToolName}: waiting for approval");
+                if (verdict.Approval is { } approval)
+                {
+                    turn.RecordPendingApproval(approval.Id);
+
+                    // The resume after the decision continues this turn's chain, not a fresh root (FR-A2A-05/07).
+                    approvalTurns?.Save(approval.Id, new ApprovalTurnContext(session.Envelope, session.TurnOrigin, session.TurnFrom));
+                }
+
                 return Deny($"waiting for user approval ({verdict.Approval?.Id}); do not retry until the user has decided");
 
             default:
+                if (verdict.Layer == PolicyGate.DryRunLayer)
+                {
+                    turn.RecordDeniedApproval(input.ToolName);
+                }
+
+                turn.RecordAction($"{input.ToolName}: denied ({verdict.Layer})");
                 return Deny(verdict.Reason);
+        }
+    }
+
+    /// <summary>
+    /// Wraps a host-invoked function so it only runs after the gate allowed a call to it in <paramref name="session"/>
+    /// (see <see cref="GatedFunction"/>). Used for broker tools.
+    /// </summary>
+    internal AIFunction GateInvocation(CapybaraSession session, AIFunction function) =>
+        new GatedFunction(function, session.SessionId, allowances);
+
+    /// <summary>
+    /// <c>complete_task</c> and <c>request_input</c> in the session of the task they act on, and <c>answer_task</c>
+    /// wherever the host offered it. Never in consults, which cannot own or delegate work.
+    /// </summary>
+    private static bool IsProtocolTool(CapybaraSession session, string tool) => session.Kind switch
+    {
+        SessionKind.Consult => false,
+        SessionKind.Task when session.TaskId is not null && FleetTools.TaskProtocol.Contains(tool, StringComparer.Ordinal) => true,
+        _ => tool == FleetTools.AnswerTask && SessionConfigFactory.AvailableToolsFor(session).Contains(FleetTools.AnswerTask, StringComparer.Ordinal),
+    };
+
+    /// <summary>
+    /// A gate allow becomes exactly one credit of the kind the call will consume: a broker tool's wrapper consumes an
+    /// invocation credit; a built-in or MCP tool raises one permission request. Host tools need neither (the runtime
+    /// asks no permission for custom tools), so granting them a permission credit would leave it lying around for an
+    /// unrelated request.
+    /// </summary>
+    private void Allow(CapybaraSession session, string tool)
+    {
+        if (session.IsGatedTool(tool))
+        {
+            allowances.GrantInvocation(session.SessionId, tool);
+        }
+        else if (!session.IsHostTool(tool))
+        {
+            allowances.Grant(session.SessionId);
         }
     }
 
@@ -110,6 +197,7 @@ public sealed partial class SessionHandlers(
         if (IsUntrustedSource(session, input.ToolName))
         {
             taint.MarkTainted(session.SessionId);
+            session.Turn.RecordSource(input.ToolName);
         }
 
         try
@@ -182,6 +270,7 @@ public sealed partial class SessionHandlers(
     /// Explicit, fail-closed permission handler. Never <c>ApproveAll</c>: a request is approved once only if the gate
     /// just allowed the corresponding tool call.
     /// </summary>
+#pragma warning disable GHCP001 // PermissionDecision is evaluation-only, but it is the SDK's only fail-closed permission API.
     public Task<PermissionDecision> OnPermissionRequestAsync(CapybaraSession session, PermissionRequest request)
     {
         ArgumentNullException.ThrowIfNull(session);
@@ -189,6 +278,7 @@ public sealed partial class SessionHandlers(
             ? PermissionDecision.ApproveOnce()
             : PermissionDecision.Reject("not authorized by fleet policy"));
     }
+#pragma warning restore GHCP001
 
     /// <summary><c>ask_user</c> goes to the escalation path instead of a terminal prompt.</summary>
     public async Task<UserInputResponse> OnUserInputRequestAsync(CapybaraSession session, UserInputRequest request)
@@ -206,6 +296,7 @@ public sealed partial class SessionHandlers(
     /// the user as if it came from the fleet). URL elicitations are always declined: no server may steer the user to a
     /// link (OAuth consent goes through the broker instead).
     /// </summary>
+#pragma warning disable GHCP001 // UIElicitationResponseAction is evaluation-only; it is the only way to answer an elicitation.
     public async Task<ElicitationResult> OnElicitationRequestAsync(CapybaraSession session, ElicitationContext context)
     {
         ArgumentNullException.ThrowIfNull(session);
@@ -251,6 +342,7 @@ public sealed partial class SessionHandlers(
             Content = new Dictionary<string, object> { [field] = answer },
         };
     }
+#pragma warning restore GHCP001
 
     /// <summary>Tools configured as untrusted, and every tool of an MCP server marked untrusted.</summary>
     private bool IsUntrustedSource(CapybaraSession session, string tool) =>

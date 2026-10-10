@@ -19,29 +19,60 @@ public static class CopilotClientOptionsFactory
     {
         ArgumentNullException.ThrowIfNull(agent);
         ArgumentNullException.ThrowIfNull(options);
+        return Create(
+            options.AgentBaseDirectory(agent.Id),
+            options.AgentWorkingDirectory(agent.Id),
+            options.AgentTempDirectory(agent.Id),
+            CliEnvironment.Build(agent.Id, options),
+            agent.EnableRemoteSessions,
+            options,
+            logger);
+    }
 
-        Directory.CreateDirectory(options.AgentTempDirectory(agent.Id));
+    /// <summary>
+    /// The reviewer's own CLI process (FR-SAF-05): the same isolation as an agent's, under
+    /// <see cref="CopilotRuntimeOptions.ReviewerDirectory"/>, never exported as a remote session.
+    /// </summary>
+    public static CopilotClientOptions CreateForReviewer(CopilotRuntimeOptions options, ILogger? logger = null)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        var root = options.ReviewerDirectory;
+        var (home, temp) = (Path.Combine(root, "workspace"), Path.Combine(root, "tmp"));
+        Directory.CreateDirectory(home);
+        return Create(Path.Combine(root, "copilot"), home, temp, CliEnvironment.Build(home, temp, options), enableRemoteSessions: false, options, logger);
+    }
+
+    private static CopilotClientOptions Create(
+        string baseDirectory,
+        string workingDirectory,
+        string tempDirectory,
+        IReadOnlyDictionary<string, string> environment,
+        bool enableRemoteSessions,
+        CopilotRuntimeOptions options,
+        ILogger? logger)
+    {
+        Directory.CreateDirectory(tempDirectory);
 
         // Always an explicit child-process connection: its Environment replaces capybarad's, so host secrets such as
         // CREDENTIALS_DIRECTORY never reach the CLI or the shell and MCP processes it spawns (FR-SAF-08).
         // A null path launches the CLI bundled with the SDK; a configured path is typically the sandbox wrapper (FR-AGT-07).
         var connection = RuntimeConnection.ForStdio(options.CliPath is { Length: > 0 } cli ? cli : null, [.. options.CliArgs]);
-        connection.Environment = CliEnvironment.Build(agent.Id, options);
+        connection.Environment = environment;
 
         return new CopilotClientOptions
         {
             // Empty mode: nothing ambient. No default tools, no discovered config, no shared ~/.copilot.
             Mode = CopilotClientMode.Empty,
             Connection = connection,
-            BaseDirectory = options.AgentBaseDirectory(agent.Id),
-            WorkingDirectory = options.AgentWorkingDirectory(agent.Id),
+            BaseDirectory = baseDirectory,
+            WorkingDirectory = workingDirectory,
 
             // Session-scoped by default: a process-level token is put in the CLI's environment, which every child inherits.
             GitHubToken = options.SessionScopedGitHubToken ? null : options.GitHubToken,
             UseLoggedInUser = false,
 
             // Mission Control access is opt-in per agent; the runtime only offers it inside a GitHub repo (FR-CLI-08).
-            EnableRemoteSessions = agent.EnableRemoteSessions,
+            EnableRemoteSessions = enableRemoteSessions,
             Telemetry = TelemetryFor(options),
             Logger = logger,
         };

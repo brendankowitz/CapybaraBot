@@ -215,6 +215,21 @@ public sealed class LifecycleAndDurabilityTests
     }
 
     [Fact]
+    public async Task Credits_an_executor_already_ledgered_are_kept_for_history_but_not_recorded_twice()
+    {
+        var executor = new ScriptedExecutor(_ => new Execution.RoutineExecutionResult(Execution.RoutineExecutionStatus.Succeeded, "ok", CreditsUsed: 4m, Model: "auto", CreditsLedgered: true));
+        using var harness = new Harness(executor: executor);
+        var routine = Kit.Heartbeat();
+        harness.Registry.AddOrUpdate(routine, Kit.User);
+
+        var result = await harness.Dispatcher.DispatchAsync(new RoutineFiring(routine, Start, "run"), TestContext.Current.CancellationToken);
+
+        Assert.Equal(4m, result.CreditsUsed);
+        Assert.Empty(harness.Ledger.Records);
+        Assert.Equal(4m, Assert.Single(harness.History.Get(routine.Id)).CreditsSpent);
+    }
+
+    [Fact]
     public void The_registry_refuses_a_routine_that_would_be_an_agents_fifty_first()
     {
         var registry = new RoutineRegistry();

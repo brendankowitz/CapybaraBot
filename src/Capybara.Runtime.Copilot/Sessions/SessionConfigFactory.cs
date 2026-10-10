@@ -1,3 +1,4 @@
+using Capybara.Connections.Client;
 using Capybara.Contracts.Agents;
 using Capybara.Contracts.Storage;
 using Capybara.Orchestration.Skills;
@@ -8,8 +9,11 @@ using Capybara.Runtime.Copilot.Hooks;
 using Capybara.Runtime.Copilot.Tools;
 using Capybara.Runtime.Copilot.Usage;
 using GitHub.Copilot;
+using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
+using PermissionDecision = GitHub.Copilot.Rpc.PermissionDecision;
 using RemoteSessionMode = GitHub.Copilot.Rpc.RemoteSessionMode;
+using UIElicitationResponseAction = GitHub.Copilot.Rpc.UIElicitationResponseAction;
 
 namespace Capybara.Runtime.Copilot.Sessions;
 
@@ -30,7 +34,8 @@ public sealed partial class SessionConfigFactory(
     CopilotRuntimeOptions options,
     RulesEngine rules,
     ILogger<SessionConfigFactory> logger,
-    ISecretStore? secrets = null)
+    ISecretStore? secrets = null,
+    IBrokerToolSource? broker = null)
 {
     /// <summary>
     /// Runtime tools the host enables beyond the agent's allowlist. They may or may not be present at any moment
@@ -39,65 +44,178 @@ public sealed partial class SessionConfigFactory(
     /// <remarks>The name matches the SDK's internal <c>CopilotSession.ToolSearchToolName</c>, which is not public.</remarks>
     public static readonly IReadOnlyList<string> InfrastructureTools = ["tool_search_tool"];
 
+    /// <summary>
+    /// The smallest <c>SessionLimits.MaxAiCredits</c> the Copilot CLI accepts: <c>session.create</c> fails with
+    /// "Minimum session limit is 30 AI credits" below it (verified against the bundled CLI).
+    /// </summary>
+    public const decimal SdkMinimumSessionCredits = 30m;
+
     /// <summary>Lifetime advertised for the session-scoped token; the SDK requires a positive value (eight hours is typical).</summary>
     private const long GitHubTokenLifetimeSeconds = 8 * 60 * 60;
 
     private readonly SkillResolver _skills = new(options.BuiltInSkillDirectory, options.ConfigRoot);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _limitsLogged = new(StringComparer.Ordinal);
 
     public async ValueTask<SessionConfig> CreateConfigAsync(CapybaraSession session, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(session);
         var resolved = await ResolveSecretsAsync(session.Agent, cancellationToken);
-        return Apply(new SessionConfig { SessionId = session.SessionId }, session, resolved);
+        var brokerTools = await BrokerToolsAsync(session, cancellationToken);
+        return Apply(new SessionConfig { SessionId = session.SessionId }, session, resolved, brokerTools);
     }
 
     public async ValueTask<ResumeSessionConfig> ResumeConfigAsync(CapybaraSession session, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(session);
         var resolved = await ResolveSecretsAsync(session.Agent, cancellationToken);
-        return Apply(new ResumeSessionConfig { ContinuePendingWork = false }, session, resolved);
+        var brokerTools = await BrokerToolsAsync(session, cancellationToken);
+        return Apply(new ResumeSessionConfig { ContinuePendingWork = false }, session, resolved, brokerTools);
     }
 
-    /// <summary>Synchronous build for agents that need no secrets.</summary>
-    /// <exception cref="InvalidOperationException">The agent needs a secret; use <see cref="CreateConfigAsync"/>.</exception>
+    /// <summary>Synchronous build for agents that need no secrets, on hosts without a broker.</summary>
+    /// <exception cref="InvalidOperationException">The agent needs a secret, or broker tools exist; use <see cref="CreateConfigAsync"/>.</exception>
     public SessionConfig CreateConfig(CapybaraSession session)
     {
         ArgumentNullException.ThrowIfNull(session);
-        return Apply(new SessionConfig { SessionId = session.SessionId }, session, NoSecrets(session.Agent));
+        return Apply(new SessionConfig { SessionId = session.SessionId }, session, NoSecrets(session.Agent), NoBroker());
     }
 
-    /// <summary>Synchronous build for agents that need no secrets.</summary>
-    /// <exception cref="InvalidOperationException">The agent needs a secret; use <see cref="ResumeConfigAsync"/>.</exception>
+    /// <summary>Synchronous build for agents that need no secrets, on hosts without a broker.</summary>
+    /// <exception cref="InvalidOperationException">The agent needs a secret, or broker tools exist; use <see cref="ResumeConfigAsync"/>.</exception>
     public ResumeSessionConfig ResumeConfig(CapybaraSession session)
     {
         ArgumentNullException.ThrowIfNull(session);
-        return Apply(new ResumeSessionConfig { ContinuePendingWork = false }, session, NoSecrets(session.Agent));
+        return Apply(new ResumeSessionConfig { ContinuePendingWork = false }, session, NoSecrets(session.Agent), NoBroker());
     }
 
     /// <summary>
-    /// The tools the session may see, source-qualified as <c>AvailableTools</c> expects: removed (not merely denied) at
-    /// max depth and in consults.
+    /// The reviewer's session (FR-SAF-05): no tools of any kind, no MCP servers, skills or memory, every permission and
+    /// tool call refused, and nothing ever asked of a human. Its spend is charged to <paramref name="reviewed"/>.
+    /// </summary>
+#pragma warning disable GHCP001 // GitHubTokenProvider, SessionLimits and PermissionDecision are evaluation-only; the reviewer needs all three.
+    public SessionConfig CreateReviewerConfig(string sessionId, string model, AgentId reviewed)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(model);
+        return new SessionConfig
+        {
+            SessionId = sessionId,
+            Model = model,
+            AvailableTools = [],
+            Tools = [],
+            McpServers = new Dictionary<string, McpServerConfig>(StringComparer.Ordinal),
+            EnableSkills = false,
+            SkillDirectories = [],
+            EnableSessionStore = false,
+            InfiniteSessions = new InfiniteSessionConfig { Enabled = false },
+            RemoteSession = RemoteSessionMode.Off,
+            GitHubTokenProvider = GitHubTokenProvider(),
+            WorkingDirectory = options.ReviewerDirectory,
+            SystemMessage = new SystemMessageConfig
+            {
+                Mode = SystemMessageMode.Customize,
+                Sections = new Dictionary<SystemMessageSection, SectionOverride>
+                {
+                    [SystemMessageSection.Identity] = new() { Action = SectionOverrideAction.Replace, Content = "You are a security reviewer with no tools. You only classify the call you are shown." },
+                    [SystemMessageSection.Safety] = new() { Action = SectionOverrideAction.Preserve },
+                },
+            },
+            OnPermissionRequest = (_, _) => Task.FromResult(PermissionDecision.Reject("the reviewer has no tools")),
+            OnUserInputRequest = (_, _) => Task.FromResult(new UserInputResponse { Answer = "No one is available. Answer from the rubric.", WasFreeform = true }),
+            OnElicitationRequest = _ => Task.FromResult(new ElicitationResult { Action = UIElicitationResponseAction.Decline }),
+            Hooks = new SessionHooks
+            {
+                OnPreToolUse = (_, _) => Task.FromResult<PreToolUseHookOutput?>(new PreToolUseHookOutput { PermissionDecision = "deny", PermissionDecisionReason = "the reviewer has no tools" }),
+            },
+            OnEvent = e => usage.OnReviewerEvent(reviewed, model, sessionId, e),
+            SessionLimits = new SessionLimitsConfig { MaxAiCredits = (double)SdkSessionLimit(options.ReviewerMaxCredits) },
+        };
+    }
+#pragma warning restore GHCP001
+
+    /// <summary>
+    /// The tools the session may see, source-qualified as <c>AvailableTools</c> expects: agent-to-agent tools are removed
+    /// (not merely denied) at max depth (FR-A2A-06); consults lose memory writes and <c>propose_change</c>; incognito
+    /// sessions lose every memory tool (FR-MEM-12). The host adds the task protocol tools to the session of a delegated
+    /// task, and <c>answer_task</c> wherever the agent can delegate.
     /// </summary>
     public static IReadOnlyList<string> AvailableToolsFor(CapybaraSession session)
     {
         ArgumentNullException.ThrowIfNull(session);
-        return session.Kind == SessionKind.Consult
-            ? FleetTools.ForConsult(session.Agent.Tools, session.Depth)
-            : FleetTools.ForDepth(session.Agent.Tools, session.Depth);
+        var tools = session.Kind switch
+        {
+            SessionKind.Consult => FleetTools.ForConsult(session.Agent.Tools, session.Depth),
+            SessionKind.Incognito => FleetTools.ForIncognito(session.Agent.Tools, session.Depth),
+            _ => FleetTools.ForDepth(session.Agent.Tools, session.Depth),
+        };
+
+        if (session.Kind == SessionKind.Consult)
+        {
+            return tools;
+        }
+
+        var protocol = new List<string>();
+        if (session.Kind == SessionKind.Task && session.TaskId is not null)
+        {
+            protocol.AddRange(FleetTools.TaskProtocol);
+        }
+
+        if (tools.Contains(FleetTools.DelegateTask, StringComparer.Ordinal))
+        {
+            protocol.Add(FleetTools.AnswerTask);
+        }
+
+        return [.. tools, .. protocol.Where(t => !tools.Contains(t, StringComparer.Ordinal))];
     }
 
-    private T Apply<T>(T config, CapybaraSession session, SessionSecrets resolved)
+    /// <summary>
+    /// The SDK-side session limit for a configured budget: the budget itself, raised to the CLI's minimum. It is a soft
+    /// backstop only; the host's per-turn credit limit is what enforces budgets (FR-OBS-02).
+    /// </summary>
+    public static decimal SdkSessionLimit(decimal configured) => Math.Max(SdkMinimumSessionCredits, configured);
+
+    /// <summary>The host-implemented tools of <paramref name="session"/>, with their descriptions (for the self-test).</summary>
+    public IReadOnlyList<AIFunctionDeclaration> HostToolsFor(CapybaraSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        return tools.GetTools(session, [.. AvailableToolsFor(session)]);
+    }
+
+    /// <summary>
+    /// The custom tools for <paramref name="session"/> as it is now (its depth may have changed since it was built), for
+    /// <c>SetToolsAsync</c> on a live session. Lists broker tools afresh.
+    /// </summary>
+    public async ValueTask<IReadOnlyList<AIFunctionDeclaration>> BuildToolsAsync(CapybaraSession session, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        var brokerTools = await BrokerToolsAsync(session, cancellationToken);
+        return ComposeTools(session, AvailableToolsFor(session), brokerTools);
+    }
+
+    /// <summary>Host tools win a name clash: a broker tool can never shadow a fleet tool. Broker tools are gated.</summary>
+    private List<AIFunctionDeclaration> ComposeTools(CapybaraSession session, IReadOnlyList<string> available, IReadOnlyList<AIFunction> brokerTools)
+    {
+        var hostTools = tools.GetTools(session, [.. available]);
+        var hostNames = hostTools.Select(t => t.Name).ToHashSet(StringComparer.Ordinal);
+        var gated = brokerTools.Where(t => !hostNames.Contains(t.Name)).ToList();
+        session.SetCustomTools(hostNames, gated.Select(t => t.Name));
+        return [.. hostTools, .. gated.Select(t => handlers.GateInvocation(session, t))];
+    }
+
+#pragma warning disable GHCP001 // GitHubTokenProvider (FR-SAF-08) and SessionLimits (soft credit backstop) are evaluation-only.
+    private T Apply<T>(T config, CapybaraSession session, SessionSecrets resolved, IReadOnlyList<AIFunction> brokerTools)
         where T : SessionConfigBase
     {
         var agent = session.Agent;
         var available = AvailableToolsFor(session);
 
-        config.Model = agent.Model;
+        config.Model = session.Model;
         config.RemoteSession = RemoteSessionFor(session);
         config.Provider = ProviderFor(agent.Provider, resolved.ProviderKey);
         config.GitHubTokenProvider = GitHubTokenProvider();
         config.AvailableTools = [.. available, .. InfrastructureTools];
-        config.Tools = [.. tools.GetTools(session, [.. available])];
+
+        config.Tools = [.. ComposeTools(session, available, brokerTools)];
         config.McpServers = McpServersFor(agent, resolved.McpTokens);
         config.ToolSearch = new ToolSearchConfig { Enabled = true, DeferThreshold = options.ToolSearchDeferThreshold };
         config.ManagedSettings = ManagedSettingsFor(agent);
@@ -115,10 +233,16 @@ public sealed partial class SessionConfigFactory(
         };
         config.OnEvent = e => usage.OnEvent(session, e);
 
-        config.SessionLimits = new SessionLimitsConfig
-        {
-            MaxAiCredits = (double)Math.Min(agent.Budget.SessionMaxCredits, session.Envelope.Budget.Credits),
-        };
+        // Budgets are enforced by the host, per turn (the turn's credit limit aborts the run). The SDK limit is a soft
+        // backstop for sessions that live for one piece of work; the CLI refuses any below its minimum. Never for the main
+        // session: the SDK window is cumulative over a live session (verified live), so the long-lived main session would
+        // exhaust it within hours, lose its tools and fail every turn until a restart. It gets an explicitly empty limit, not
+        // none: resuming without one keeps whatever limit the session was created with (a main session from an earlier
+        // build carries one), while an empty one clears it (both verified live).
+        config.SessionLimits = session.Kind == SessionKind.Main
+            ? new SessionLimitsConfig()
+            : new SessionLimitsConfig { MaxAiCredits = (double)SdkSessionLimit(agent.Budget.SessionMaxCredits) };
+        LogEffectiveLimits(agent);
         config.InfiniteSessions = new InfiniteSessionConfig { Enabled = session.Kind == SessionKind.Main };
 
         // The SDK's cross-session store would bypass memory scoping; the wiki is the only memory (FR-MEM-01).
@@ -127,6 +251,7 @@ public sealed partial class SessionConfigFactory(
         ApplySkills(config, agent);
         return config;
     }
+#pragma warning restore GHCP001
 
     /// <summary>
     /// Tiered, pinned and scanned skills only (FR-SKL-01, FR-SKL-04); bodies load on demand (FR-SKL-02).
@@ -175,14 +300,17 @@ public sealed partial class SessionConfigFactory(
     /// inbox. Consult and task sessions are never exported. Always set explicitly, because the setting is not persisted
     /// across resume.
     /// </summary>
+#pragma warning disable GHCP001 // RemoteSessionMode is evaluation-only; it must be set explicitly on every build (FR-CLI-08).
     private static RemoteSessionMode RemoteSessionFor(CapybaraSession session) =>
         session.Kind == SessionKind.Main && session.Agent.EnableRemoteSessions ? RemoteSessionMode.Export : RemoteSessionMode.Off;
+#pragma warning restore GHCP001
 
     /// <summary>
     /// Supplies the GitHub token to the session over RPC, so it never sits in the CLI's environment where child
     /// processes inherit it (FR-SAF-08). The runtime asks again when the advertised lifetime runs out; the current
     /// option value is read each time, so a rotated token is picked up. The token is also registered with the redactor.
     /// </summary>
+#pragma warning disable GHCP001 // The session-scoped token provider is evaluation-only; it keeps the token out of child environments (FR-SAF-08).
     private Func<GitHubTokenProviderArgs, Task<GitHubTokenProviderResult>>? GitHubTokenProvider()
     {
         if (options.GitHubToken is not { Length: > 0 } token)
@@ -208,6 +336,7 @@ public sealed partial class SessionConfigFactory(
             return Task.FromResult(GitHubTokenProviderResult.FromToken(new GitHubToken { AccessToken = current, ExpiresIn = GitHubTokenLifetimeSeconds }));
         };
     }
+#pragma warning restore GHCP001
 
     /// <summary>FR-SAF-01 layer 1: the runtime enforces static deny/ask itself, as defense in depth.</summary>
     private ManagedSettings ManagedSettingsFor(AgentDefinition agent)
@@ -296,11 +425,58 @@ public sealed partial class SessionConfigFactory(
                 $"{agent.Id} needs secrets ({string.Join(", ", needed)}); build its session config with CreateConfigAsync or ResumeConfigAsync.");
     }
 
+    private IReadOnlyList<AIFunction> NoBroker() => broker is null
+        ? []
+        : throw new InvalidOperationException("Broker tools can only be listed asynchronously; build the session config with CreateConfigAsync or ResumeConfigAsync.");
+
+    /// <summary>
+    /// Broker tools come only from <see cref="IBrokerToolSource"/>, freshly on every create and resume (FR-AGT-03,
+    /// FR-CON-03): the broker's MCP endpoint and credentials are never attached to a session, where the sandboxed CLI
+    /// could read them. If the broker is unreachable the session is built without its tools and flagged, so the runtime
+    /// rebuilds it before the next turn rather than failing every turn in the meantime.
+    /// </summary>
+    private async ValueTask<IReadOnlyList<AIFunction>> BrokerToolsAsync(CapybaraSession session, CancellationToken cancellationToken)
+    {
+        session.BrokerToolsUnavailable = false;
+        if (broker is null)
+        {
+            return [];
+        }
+
+        try
+        {
+            return await broker.GetToolsAsync(session.Agent.Id.Value, session.SessionId, AvailableToolsFor(session), cancellationToken);
+        }
+        catch (HttpRequestException ex)
+        {
+            LogBrokerUnavailable(logger, ex, session.Agent.Id.Value, session.SessionId);
+            session.BrokerToolsUnavailable = true;
+            return [];
+        }
+    }
+
     private static IEnumerable<string> McpTokenNames(AgentDefinition agent) =>
         agent.McpServers.Where(s => s.Type == "http").Select(s => s.TokenSecret).OfType<string>().Distinct(StringComparer.Ordinal);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Skill {Skill} ({Tier} tier) disabled for {Agent}: {Reason}")]
     private static partial void LogSkillRejected(ILogger logger, string skill, SkillTier tier, string agent, string reason);
+
+    /// <summary>Once per agent: which limit actually applies, since the SDK value can differ from the configured one.</summary>
+    private void LogEffectiveLimits(AgentDefinition agent)
+    {
+        if (_limitsLogged.TryAdd(agent.Id.Value, 0))
+        {
+            var turnLimit = agent.Budget.SessionMaxCredits;
+            var sdkLimit = SdkSessionLimit(turnLimit);
+            LogLimits(logger, agent.Id.Value, turnLimit, sdkLimit);
+        }
+    }
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Credit limits for {Agent}: at most {TurnLimit} credits per turn, enforced by the host (abort); SDK backstop {SdkLimit} for task, consult and incognito sessions, none for the main session")]
+    private static partial void LogLimits(ILogger logger, string agent, decimal turnLimit, decimal sdkLimit);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Broker unreachable while building session {SessionId} of {Agent}; its broker tools are missing until the session is rebuilt")]
+    private static partial void LogBrokerUnavailable(ILogger logger, Exception exception, string agent, string sessionId);
 
     private sealed record SessionSecrets(string? ProviderKey, IReadOnlyDictionary<string, string> McpTokens);
 }

@@ -23,6 +23,9 @@ public sealed class PolicyGate(
     IAuditLog audit,
     IToolCallReviewer? reviewer = null)
 {
+    /// <summary><see cref="GateVerdict.Layer"/> of a call auto-denied because it would need approval in a dry run.</summary>
+    public const string DryRunLayer = "dry-run";
+
     public async Task<GateVerdict> EvaluateAsync(ToolCallContext call, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(call);
@@ -82,8 +85,8 @@ public sealed class PolicyGate(
             return GateVerdict.Deny("static", match.Rule.Reason ?? "deny rule");
         }
 
-        // A previously granted, single-use approval for these exact args.
-        if (approvals.TryConsume(agent.Id, call.SessionId, call.Tool, argsHash))
+        // A previously granted, single-use approval for these exact args. A dry run never spends a real approval.
+        if (!call.DryRun && approvals.TryConsume(agent.Id, call.SessionId, call.Tool, argsHash))
         {
             return GateVerdict.Allow("approval", "consumed matching approval");
         }
@@ -133,6 +136,12 @@ public sealed class PolicyGate(
 
     private GateVerdict Ask(ToolCallContext call, string argsHash, RiskLevel risk, string reason, ReviewResult? review = null)
     {
+        // FR-RTN-08: a dry run never prompts anyone; whatever would need a human is auto-denied.
+        if (call.DryRun)
+        {
+            return GateVerdict.Deny(DryRunLayer, $"dry run: would require approval ({reason})");
+        }
+
         var preview = $"{call.Agent.Id} → {call.Tool} {CanonicalJson.Serialize(call.Args)}";
         if (preview.Length > 2_000)
         {
