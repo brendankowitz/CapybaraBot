@@ -247,6 +247,38 @@ public sealed class A2ACoordinator : IDisposable
     }
 
     /// <summary>
+    /// <paramref name="agent"/> was deleted (FR-AGT-07): every open task it owns fails, and its requester is told, and
+    /// every open task it requested is cancelled, since nobody is left to receive the result. Idempotent; returns how
+    /// many tasks were ended.
+    /// </summary>
+    public async Task<int> EndTasksOfAsync(AgentId agent, CancellationToken cancellationToken = default)
+    {
+        var open = new List<FleetTask>();
+        await foreach (var task in _tasks.ListAsync(cancellationToken))
+        {
+            if (!task.State.IsTerminal() && (task.Owner == agent || task.RequestedBy == agent))
+            {
+                open.Add(task);
+            }
+        }
+
+        foreach (var task in open)
+        {
+            if (task.Owner == agent)
+            {
+                await FailAsync(task, $"{agent} was deleted", cancellationToken);
+            }
+            else
+            {
+                await _tasks.SaveAsync(task with { State = FleetTaskState.Canceled, FailureReason = $"{agent}, which requested it, was deleted", PendingQuestion = null, UpdatedAt = _time.GetUtcNow() }, cancellationToken);
+                await _audit.AppendAsync(new AuditRecord("a2a.task", "canceled", task.Owner, SessionIds.Task(task.Owner, task.Id), Detail: $"task {task.Id}: requester {agent} was deleted", TraceId: task.Envelope.TraceId), CancellationToken.None);
+            }
+        }
+
+        return open.Count;
+    }
+
+    /// <summary>
     /// The owned task as it may now run: a task past its deadline or out of budget is failed first (and its requester
     /// told), so callers see a terminal state. <see langword="null"/> when not owned.
     /// </summary>

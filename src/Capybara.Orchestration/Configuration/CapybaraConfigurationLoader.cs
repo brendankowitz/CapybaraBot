@@ -23,6 +23,9 @@ namespace Capybara.Orchestration.Configuration;
 /// </summary>
 public static class CapybaraConfigurationLoader
 {
+    /// <summary>Agent ids that name a host-side principal, never an agent.</summary>
+    public static readonly IReadOnlySet<string> ReservedIds = new HashSet<string>(["steward"], StringComparer.Ordinal);
+
     private static readonly IDeserializer Yaml = new DeserializerBuilder()
         .WithNamingConvention(CamelCaseNamingConvention.Instance)
         .WithDuplicateKeyChecking()
@@ -134,6 +137,12 @@ public static class CapybaraConfigurationLoader
             if (id.Value != folder)
             {
                 errors.Add($"{folder}: id '{id}' must match its folder name.");
+                continue;
+            }
+
+            if (ReservedIds.Contains(id.Value))
+            {
+                errors.Add($"{id}: the id is reserved for the memory steward (FR-MEM-08), whose proposals must never be mistaken for an agent's.");
                 continue;
             }
 

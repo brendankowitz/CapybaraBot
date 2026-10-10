@@ -2,7 +2,7 @@ using Capybara.Policy.Safety;
 
 namespace Capybara.Gateway.Configuration;
 
-/// <summary>Network and identity settings for <c>capybarad</c> (FR-HST-01, FR-HST-04).</summary>
+/// <summary>Network and identity settings for <c>capybarad</c> (FR-CLI-01).</summary>
 public sealed class GatewayOptions
 {
     public const string SectionName = "Capybara:Gateway";

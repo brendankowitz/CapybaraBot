@@ -2,7 +2,7 @@ using System.Net;
 
 namespace Capybara.Gateway.Security;
 
-/// <summary>The gateway binds to loopback only; Tailscale Serve is the sole way in (FR-HST-01).</summary>
+/// <summary>The gateway binds to loopback only; Tailscale Serve is the sole way in (FR-CLI-01).</summary>
 public static class LoopbackGuard
 {
     public static IWebHostBuilder UseLoopbackOnly(this IWebHostBuilder builder, int port)

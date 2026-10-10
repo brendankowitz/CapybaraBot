@@ -25,6 +25,18 @@ public sealed class CapybaraConfigurationLoaderTests
         Assert.False(research.ReadsUserMemory);
     }
 
+    [Fact]
+    public void The_memory_stewards_id_cannot_be_an_agent()
+    {
+        using var dir = new TempDirectory();
+        var agentDir = Directory.CreateDirectory(Path.Combine(dir.Path, "agents", "steward")).FullName;
+        File.WriteAllText(Path.Combine(agentDir, "agent.yaml"), "id: steward\nname: Steward\njob: tidies memory\n");
+
+        var ex = Assert.Throws<CapybaraConfigurationException>(() => CapybaraConfigurationLoader.Load(dir.Path));
+
+        Assert.Contains(ex.Errors, e => e.Contains("reserved", StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData("1e300m")]
     [InlineData("NaNm")]

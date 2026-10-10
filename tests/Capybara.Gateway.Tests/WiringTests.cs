@@ -82,7 +82,7 @@ public sealed class WiringTests
         // FR-AGT-07: cleanup order, ending with the very ProposalService singleton the endpoints use.
         var observers = factory.Services.GetServices<IAgentLifecycleObserver>().ToList();
         Assert.Equal(
-            [typeof(RevokeBrokerGrantsObserver), typeof(UnscheduleRoutinesObserver), typeof(StopRuntimeObserver), typeof(ClearAgentMemoryObserver), typeof(RemoveLearnedRulesObserver), typeof(Chat.ClearChatHistoryObserver), typeof(ProposalService)],
+            [typeof(RevokeBrokerGrantsObserver), typeof(UnscheduleRoutinesObserver), typeof(StopRuntimeObserver), typeof(ClearAgentQueuesObserver), typeof(ClearAgentMemoryObserver), typeof(RemoveLearnedRulesObserver), typeof(Chat.ClearChatHistoryObserver), typeof(ProposalService)],
             observers.Select(o => o.GetType()));
         Assert.Same(factory.Services.GetRequiredService<ProposalService>(), observers[^1]);
     }
@@ -225,10 +225,25 @@ public sealed class WiringTests
         await services.GetRequiredService<MemoryAdmin>().EditPageAsync(MemoryAdminPrincipal.Human, "/agents/ea/notes.md", "private notes", "notes", Ct);
         var registry = services.GetRequiredService<RoutineRegistry>();
         Assert.Contains(registry.Routines, r => r.Owner == Ea);
+        var inbox = services.GetRequiredService<Orchestration.Inbox.IInboxStore>();
+        await inbox.EnqueueAsync(new FleetMessage { To = Ea, Origin = MessageOrigin.User, Body = "queued before deletion", CreatedAt = factory.Time.GetUtcNow() }, Ct);
+        var research = AgentId.Parse("research");
+        var envelope = services.GetRequiredService<Orchestration.Envelopes.EnvelopeFactory>().CreateRoot("user", Ea, new Budget(1m, 10, TimeSpan.FromMinutes(10)), TimeSpan.FromMinutes(10), rootOrigin: MessageOrigin.User);
+        var owned = new Contracts.Tasks.FleetTask { Owner = Ea, RequestedBy = research, Objective = "brief", Envelope = envelope, CreatedAt = factory.Time.GetUtcNow() };
+        var requested = new Contracts.Tasks.FleetTask { Owner = research, RequestedBy = Ea, Objective = "dig", Envelope = envelope, CreatedAt = factory.Time.GetUtcNow() };
+        var tasks = services.GetRequiredService<Orchestration.Tasks.ITaskStore>();
+        await tasks.SaveAsync(owned, Ct);
+        await tasks.SaveAsync(requested, Ct);
+        services.GetRequiredService<PausedAgentsJournal>().Add(Ea);
 
         var result = await services.GetRequiredService<AgentLifecycleService>().DeleteAsync(Ea, ConfigPrincipal.Human("owner"), Ct);
 
         Assert.Empty(result.Errors);
+        Assert.Equal(0, await inbox.CountAsync(Ea, Ct));
+        Assert.Equal(Contracts.Tasks.FleetTaskState.Failed, (await tasks.GetAsync(owned.Id, Ct))!.State);
+        Assert.Equal(Contracts.Tasks.FleetTaskState.Canceled, (await tasks.GetAsync(requested.Id, Ct))!.State);
+        Assert.Contains(await inbox.ListAsync(research, Ct), m => m.TaskId == owned.Id);
+        Assert.Empty(new PausedAgentsJournal(Path.Combine(factory.StateRoot, "policy", "paused-agents.json")).Load([]));
         Assert.True(factory.Broker.Received("POST /broker/agents/ea/revoke"));
         Assert.DoesNotContain(registry.Routines, r => r.Owner == Ea);
         Assert.Null(services.GetRequiredService<AgentRuntimePool>().Find(Ea));

@@ -2,6 +2,8 @@ using Capybara.Connections.Client;
 using Capybara.Memory.Access;
 using Capybara.Memory.Admin;
 using Capybara.Memory.Store;
+using Capybara.Orchestration.Coordination;
+using Capybara.Orchestration.Inbox;
 using Capybara.Orchestration.Lifecycle;
 using Capybara.Policy.Rules;
 using Capybara.Policy.Safety;
@@ -47,15 +49,43 @@ public sealed class UnscheduleRoutinesObserver(RoutineRegistry registry) : IAgen
 
 /// <summary>
 /// Stops the agent's CLI and takes its runtime out of supervision, so its <c>BaseDirectory</c> is released before the
-/// state directory is deleted. The agent is also paused, so its inbox pump only ever sees "blocked" from now on.
+/// state directory is deleted. The agent is also paused, so its inbox pump only ever sees "blocked" from now on. A
+/// deleted agent's journaled human pause is forgotten, so a later agent with the same id does not start paused.
 /// </summary>
-public sealed class StopRuntimeObserver(AgentRuntimePool runtimes, KillSwitch killSwitch) : IAgentLifecycleObserver
+public sealed class StopRuntimeObserver(AgentRuntimePool runtimes, KillSwitch killSwitch, PausedAgentsJournal pausedAgents) : IAgentLifecycleObserver
 {
     public async ValueTask OnAgentRemovedAsync(AgentRemoval removal, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(removal);
         killSwitch.Pause(removal.Agent);
         await runtimes.RemoveAsync(removal.Agent);
+        if (removal.Kind == AgentRemovalKind.Deleted)
+        {
+            pausedAgents.Remove(removal.Agent);
+        }
+    }
+}
+
+/// <summary>
+/// A deleted agent's queues go with it, so a later agent with the same id inherits nothing: the tasks it owns fail (their
+/// requesters are told), the tasks it requested are cancelled, and its inbox is emptied. Archiving keeps them.
+/// </summary>
+public sealed class ClearAgentQueuesObserver(A2ACoordinator a2a, IInboxStore inbox) : IAgentLifecycleObserver
+{
+    public async ValueTask OnAgentRemovedAsync(AgentRemoval removal, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(removal);
+        if (removal.Kind != AgentRemovalKind.Deleted)
+        {
+            return;
+        }
+
+        // Tasks first: failing one the agent requested of itself queues a notice to its own inbox, emptied next.
+        await a2a.EndTasksOfAsync(removal.Agent, cancellationToken);
+        foreach (var message in await inbox.ListAsync(removal.Agent, cancellationToken))
+        {
+            await inbox.AcknowledgeAsync(removal.Agent, message.Id, cancellationToken);
+        }
     }
 }
 

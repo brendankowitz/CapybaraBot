@@ -3,7 +3,7 @@ using Capybara.Policy.Safety;
 
 namespace Capybara.Gateway.Endpoints;
 
-/// <summary>Endpoint-level authorization on top of <see cref="TailnetAuthenticationMiddleware"/> (FR-HST-04, FR-SAF-06).</summary>
+/// <summary>Endpoint-level authorization on top of <see cref="TailnetAuthenticationMiddleware"/> (FR-CLI-01, FR-SAF-06).</summary>
 public static class ApiAuthorization
 {
     /// <summary>

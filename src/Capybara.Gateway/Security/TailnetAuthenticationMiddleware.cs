@@ -11,7 +11,7 @@ namespace Capybara.Gateway.Security;
 
 /// <summary>
 /// Every request needs both the expected Tailscale identity <em>and</em> a per-device bearer token. Loopback origin is
-/// never trusted on its own, browser origins are checked, and WebSocket upgrades require an allowed Origin (FR-HST-04).
+/// never trusted on its own, browser origins are checked, and WebSocket upgrades require an allowed Origin (FR-CLI-01).
 /// </summary>
 /// <remarks>
 /// Two narrow exceptions, both decided here and nowhere else: the PWA shell is served to the tailnet identity without a

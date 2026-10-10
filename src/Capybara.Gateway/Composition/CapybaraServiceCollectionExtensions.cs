@@ -354,6 +354,7 @@ public static class CapybaraServiceCollectionExtensions
         services.AddSingleton<IAgentLifecycleObserver, RevokeBrokerGrantsObserver>();
         services.AddSingleton<IAgentLifecycleObserver, UnscheduleRoutinesObserver>();
         services.AddSingleton<IAgentLifecycleObserver, StopRuntimeObserver>();
+        services.AddSingleton<IAgentLifecycleObserver, ClearAgentQueuesObserver>();
         services.AddSingleton<IAgentLifecycleObserver, ClearAgentMemoryObserver>();
         services.AddSingleton<IAgentLifecycleObserver, RemoveLearnedRulesObserver>();
         services.AddSingleton<IAgentLifecycleObserver, ClearChatHistoryObserver>();
