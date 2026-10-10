@@ -57,10 +57,16 @@
         await Realtime.TryStartAsync();
     }
 
-    private void OnIncognitoChanged(ChangeEventArgs args)
+    // Leaving (or restarting) incognito ends the conversation, so its transcript is deleted rather than left to expire.
+    private async Task OnIncognitoChanged(ChangeEventArgs args)
     {
+        var ended = _conversationId;
         _incognito = args.Value is true;
         _conversationId = _incognito ? Guid.NewGuid().ToString("N") : null;
+        if (ended is not null)
+        {
+            await TryAsync(() => Api.EndIncognitoConversationAsync(Id, ended));
+        }
     }
 
     private async Task SendAsync()

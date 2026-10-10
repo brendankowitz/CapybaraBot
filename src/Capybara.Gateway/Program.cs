@@ -74,6 +74,7 @@ builder.Services.AddCapybaraTelemetry(builder.Configuration, instrumentRequests:
 var app = builder.Build();
 LogCompositionWarnings(app.Services);
 
+app.UseMiddleware<SecurityHeadersMiddleware>();
 app.UseExceptionHandler();
 app.UseWebSockets();
 app.UseMiddleware<TailnetAuthenticationMiddleware>();
@@ -81,12 +82,9 @@ app.UseBlazorFrameworkFiles();
 app.UseStaticFiles();
 
 app.MapGet(TailnetAuthenticationMiddleware.HealthPath, () => TypedResults.Text("ok"));
-app.MapPwaShellFallback();
-app.MapAgentEndpoints();
-app.MapSafetyEndpoints();
-app.MapObservabilityEndpoints();
+app.MapCapybaraApi();
 app.MapCapybaraRealtime();
-app.MapFallbackToFile("index.html");
+app.MapPwaShell();
 
 await app.RunAsync();
 return 0;

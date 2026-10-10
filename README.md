@@ -73,7 +73,9 @@ name a systemd credential read from `$CREDENTIALS_DIRECTORY`.
 | `Capybara:ConfigRoot` | Directory containing `agents/`, `rules.yaml` and `routines.yaml`. Invalid config stops startup (fail closed). capybarad validates, writes and git-commits approved proposals and lifecycle changes here. |
 | `Capybara:StateRoot` | Per-agent Copilot homes, memory wiki, inbox, tasks, approvals, ledger, alerts, audit log, scheduler database. Every layer must agree on it: `Capybara:Hosting:StateRoot` or `Capybara:Runtime:StateRoot` set to anything else stops startup. |
 | `Capybara:GitHubTokenCredential` | Credential holding the Copilot PAT (default `github-token`). |
-| `Capybara:Gateway:Port` / `AllowedLogin` / `Devices` / `AllowedOrigins` | Loopback port (Kestrel binds `127.0.0.1` only), the one Tailscale login accepted, per-device token hashes tied to a `Phone`/`Desktop`/`Tui` surface, and allowed browser origins. |
+| `Capybara:Gateway:Port` / `AllowedLogin` / `Devices` / `AllowedOrigins` | Loopback port (Kestrel binds `127.0.0.1` only), the one Tailscale login accepted, per-device token hashes tied to a `Phone`/`Desktop`/`Tui`/`EventRelay` surface, and allowed browser origins. An `EventRelay` token can only post webhook events. |
+| `Capybara:Events:Sources:{name}` | Webhook sources accepted at `POST /api/events/{name}/{type}`, each with its HMAC `SecretCredential`. A source without a readable secret is refused (startup warning). |
+| `Capybara:Incognito` | `IdleTimeout` (default 30 min) after which an unused incognito conversation's CLI session is deleted, and `SweepInterval` (default 5 min). Sessions from before a restart are deleted at start. |
 | `Capybara:Hosting` | `StateDatabasePath` and `BlobRoot` (backup archives; default `{StateRoot}/blobs`). |
 | `Capybara:Backup` | `Sources[]`, `RetainCount`, `ScheduleUtc`, shared with `capybarad backup`. `InProcess` (default `true`) runs the nightly job inside capybarad; set `false` when `capybara-backup.timer` runs it. |
 | `Capybara:Runtime` | `AutoStart`, `CliPath`/`CliArgs` (unsandboxed only), `TurnTimeout`, `FrontDoorAgent`, `ReviewerModel`, `ToolSearchDeferThreshold`, `BuiltInSkillDirectory`, plus the isolation settings below. |
@@ -99,6 +101,11 @@ Command-line modes: `capybarad backup`, `capybarad restore <archive> <destinatio
    capybarad; `broker-api-key`, `broker-vault-key`, `connection-*` and `oauth-*-client-secret` for capybara-broker.
 3. Install `deploy/systemd/capybara-broker.service` and `capybarad.service` (`Type=notify`, ordered after the broker) and, if you
    want out-of-process backups, the backup timer. `deploy/README.md` has the full steps, the egress drop-in and the srt notes.
+4. Webhooks from the internet (GitHub, mail push) reach capybarad only through a relay you run on the tailnet. Give that relay its
+   own device entry with `Surface: EventRelay` and nothing else: an `EventRelay` token is refused on every route except
+   `POST /api/events/**` (including approvals, proposals, memory, the kill switch and the hub), so a compromised relay can post
+   events, which are HMAC-checked and always tainted, but cannot act as you. Never give the relay a phone or desktop token.
+
 ## Security model at a glance
 
 - **Empty-mode sessions.** No built-in CLI tools are inherited. Every session lists `AvailableTools`
@@ -115,11 +122,6 @@ Command-line modes: `capybarad backup`, `capybarad restore <archive> <destinatio
 
 ## Not yet implemented
 
-- **REST surface for the PWA/TUI (WP11).** capybarad exposes agents, approvals, kill switch, audit verify, ledger, alerts, thread,
-  memory pending changes and runtimes. Still missing: memory pages/export, routines (enable with cost acknowledgement, dry run),
-  budgets, proposal decisions, lifecycle operations, `/questions`, push subscription, connections (consent requests), tasks, the
-  HMAC-verified event ingress, and `POST /api/approvals/{id}/act` for push action buttons. `POST /api/agents/{id}/turn` still calls the
-  runtime directly instead of going through the inbox.
 - **PWA and TUI completion (WP12):** rich approval previews, proposal diffs, routines and budget pages, Web Push subscription.
 - **Per-agent processes (Phase 2).** `capybarad agent <id>` starts and supervises one agent's CLI, but there is no gateway-to-agent RPC,
   so it receives no turns; every agent still runs inside capybarad. An agent created at runtime gets its runtime at the next restart.

@@ -775,6 +775,9 @@ public sealed partial class WikiStore : IMemoryStore, IDisposable
         await WriteFileAsync(historyFile, content, cancellationToken);
     }
 
+    /// <summary>Every page path on disk, whatever its scope or quarantine state; for human administration only.</summary>
+    internal IEnumerable<MemoryPath> AllPaths() => EnumeratePaths();
+
     private IEnumerable<MemoryPath> EnumeratePaths()
     {
         var options = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.Hidden | FileAttributes.ReparsePoint };

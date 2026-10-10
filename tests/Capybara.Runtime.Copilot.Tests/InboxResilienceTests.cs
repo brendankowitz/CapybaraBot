@@ -211,6 +211,8 @@ public sealed class InboxResilienceTests
 
         public Task EndSessionAsync(TurnTarget target, CancellationToken cancellationToken) => Task.CompletedTask;
 
+        public Task<IReadOnlyList<IncognitoSessionInfo>> ListIncognitoSessionsAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<IncognitoSessionInfo>>([]);
+
         public Task<Orchestration.Coordination.ConsultReply> ConsultAsync(string sessionId, string question, Envelope envelope, CancellationToken cancellationToken) =>
             _inner.ConsultAsync(sessionId, question, envelope, cancellationToken);
 

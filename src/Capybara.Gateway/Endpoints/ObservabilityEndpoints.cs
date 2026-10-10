@@ -1,40 +1,65 @@
-using Capybara.Memory.Admin;
-using Capybara.Memory.Store;
+using Capybara.Client;
 using Capybara.Observability.Alerts;
 using Capybara.Observability.Cost;
 using Capybara.Orchestration.Registry;
+using Capybara.Orchestration.Tasks;
 using Capybara.Orchestration.Thread;
-using Microsoft.AspNetCore.Http.HttpResults;
 
 namespace Capybara.Gateway.Endpoints;
 
+/// <summary>The fleet thread, delegated tasks, alerts and spend (FR-A2A-07, FR-OBS-02, FR-OBS-03, FR-OBS-05).</summary>
 public static class ObservabilityEndpoints
 {
-    public static IEndpointRouteBuilder MapObservabilityEndpoints(this IEndpointRouteBuilder app)
+    public const int MaxTasks = 200;
+
+    public static IEndpointRouteBuilder MapObservabilityEndpoints(this IEndpointRouteBuilder api)
     {
-        app.MapGet("/api/ledger", (CostLedger ledger, AgentRegistry registry) => TypedResults.Ok(new
+        api.MapGet("/thread", (FleetThread thread) => TypedResults.Ok(thread.Entries.Select(e => e.ToDto()).ToList())).WithTags("Observability");
+
+        api.MapGet("/tasks", async (ITaskStore tasks, CancellationToken cancellationToken) =>
+        {
+            var all = new List<Contracts.Tasks.FleetTask>();
+            await foreach (var task in tasks.ListAsync(cancellationToken))
+            {
+                all.Add(task);
+            }
+
+            return TypedResults.Ok(all
+                .OrderByDescending(t => t.UpdatedAt)
+                .Take(MaxTasks)
+                .Select(t => new TaskDto(t.Id, t.Owner.Value, t.Objective, t.State.ToString()))
+                .ToList());
+        }).WithTags("Observability");
+
+        api.MapGet("/alerts", (FileAlertSink alerts) => TypedResults.Ok(alerts.Recent.Select(a => a.ToDto()).ToList())).WithTags("Observability");
+
+        // Superseded by /budgets for the PWA; kept as raw JSON for older clients.
+        api.MapGet("/ledger", (CostLedger ledger, AgentRegistry registry) => TypedResults.Ok(new
         {
             Agents = registry.All.Select(a => ledger.GetStatus(a.Id)).ToList(),
             ByModel = ledger.ByModel(),
             ByRoutine = ledger.ByRoutine(),
         })).WithTags("Observability");
 
-        app.MapGet("/api/alerts", (FileAlertSink alerts) => TypedResults.Ok(alerts.Recent)).WithTags("Observability");
+        api.MapGet("/budgets", (CostLedger ledger, AgentRegistry registry, QuotaMonitor quota) =>
+        {
+            var agents = registry.All
+                .OrderBy(a => a.Id.Value, StringComparer.Ordinal)
+                .Select(a => ledger.GetStatus(a.Id))
+                .ToList();
+            var latest = quota.Latest;
+            return TypedResults.Ok(new BudgetsDto(
+                [.. agents.Select(s => new AgentBudgetDto(s.Agent, s.SpentToday, s.DailyLimit, s.SpentThisMonth, s.MonthlyLimit, s.IsExhausted))],
+                new BudgetTotalDto(agents.Sum(s => s.SpentToday), agents.Sum(s => s.DailyLimit)),
+                new BudgetTotalDto(agents.Sum(s => s.SpentThisMonth), ledger.FleetMonthlyLimit),
+                Lines(ledger.ByModel()),
+                Lines(ledger.ByRoutine()),
+                latest is null ? null : new QuotaDto(latest.Used, latest.Limit, latest.ResetsAt)));
+        }).WithTags("Observability");
 
-        app.MapGet("/api/thread", (FleetThread thread) => TypedResults.Ok(thread.Entries)).WithTags("Observability");
-
-        var memory = app.MapGroup("/api/memory/pending").WithTags("Memory");
-
-        memory.MapGet("/", async (MemoryAdmin admin) => TypedResults.Ok(await admin.ListPendingAsync(MemoryAdminPrincipal.Human)));
-
-        memory.MapPost("/{id}", async Task<Results<NoContent, NotFound, Conflict>> (string id, PendingChangeDecisionRequest request, MemoryAdmin admin, CancellationToken cancellationToken) =>
-            await admin.ResolveChangeAsync(MemoryAdminPrincipal.Human, id, request.Apply, cancellationToken) switch
-            {
-                PendingChangeResult.NotFound => TypedResults.NotFound(),
-                PendingChangeResult.Stale => TypedResults.Conflict(),
-                _ => TypedResults.NoContent(),
-            });
-
-        return app;
+        return api;
     }
+
+    private static List<BudgetLineDto> Lines(IReadOnlyDictionary<string, decimal> totals) =>
+        [.. totals.OrderByDescending(kv => kv.Value).Select(kv => new BudgetLineDto(kv.Key, kv.Value))];
 }

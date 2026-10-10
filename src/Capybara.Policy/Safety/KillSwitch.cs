@@ -108,4 +108,10 @@ public enum ControlSurface
     Phone,
     Desktop,
     Tui,
+
+    /// <summary>
+    /// A webhook relay, not a person: it may only post events (<c>POST /api/events/…</c>) and is refused everywhere else,
+    /// including every human action (FR-RTN-07).
+    /// </summary>
+    EventRelay,
 }

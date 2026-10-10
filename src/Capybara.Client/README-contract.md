@@ -5,7 +5,8 @@ server side to match exactly. Rules that apply to every route:
 
 - Base address is the gateway (`127.0.0.1`, published through Tailscale Serve). All `/api/*` routes and the hub require an
   authenticated device (`CapybaraAuthenticationHandler` bearer token + tailnet login); "desktop only" means the device's
-  `ControlSurface` is `Desktop`, otherwise **403**.
+  `ControlSurface` is `Desktop`, otherwise **403**. A device whose surface is `EventRelay` (the public webhook relay) gets
+  **403** everywhere (every `/api` route, the hub, the shell) except `POST /api/events/{source}/{type}`; see "Event ingress".
 - JSON is camelCase (`JsonSerializerDefaults.Web`). Enums are written as **strings** (`JsonStringEnumConverter`, already
   registered for REST) and read case-insensitively. **The SignalR hub JSON protocol must register the same converter**
   (`AddSignalR().AddJsonProtocol(o => o.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter()))`), and must
@@ -45,7 +46,8 @@ Auth column: `any` = any authenticated device; `desktop` = desktop-surface devic
 | POST | `/api/agents/{id}/read` | – | 204 | any | **NEW**; clears the agent's unread count (called when the chat page opens). |
 | POST | `/api/agents/{id}/turn` | `TurnRequestDto{prompt, incognito, conversationId}` | `TurnResultDto` | any | existing; **changed** (see "Turn response"). |
 | PUT | `/api/agents/{id}/model` | `SetModelDto{model}` | 204 | any | **NEW**; `pool.Get(agent).SetModelAsync(model)` |
-| GET | `/api/agents/{id}/history?limit=100` | – | `ChatEntryDto[]` (oldest first) | any | **NEW**; user DMs and replies of the main session; user entries carry `messageId`, assistant entries `inReplyTo` (see "Turn response"); incognito turns are not persisted. |
+| GET | `/api/agents/{id}/history?limit=100` | – | `ChatEntryDto[]` (oldest first) | any | **NEW**; user DMs and replies of the main session; user entries carry `messageId`, assistant entries `inReplyTo` (and `alsoInReplyTo`, see "Turn response"); incognito turns are not persisted. |
+| DELETE | `/api/agents/{id}/incognito/{conversationId}` | – | 204 / 400 / 404 | any | **NEW** (review round 1); ends an incognito conversation: its CLI session (the transcript) is deleted once a turn in flight on it finishes. |
 | GET | `/api/runtimes` | – | `RuntimeStatusDto[]` | any | existing |
 | POST | `/api/runtimes/{id}/unquarantine` | – | 204 | any | existing |
 
@@ -66,6 +68,9 @@ correlated by id, never by text:**
   proactive note, a routine's output) has **no** `inReplyTo`; a reply to another message has that message's id.
 - A reply may have several parts: several assistant entries with the same `inReplyTo`, in order, **appended together** (one
   history write) so a client that sees the first sees them all.
+- When user messages sent while a turn ran were joined into it, that turn's reply is stored **once**: `inReplyTo` is the first
+  message's id and `alsoInReplyTo` (string array, absent otherwise) lists the others. An entry answers id X when `inReplyTo`
+  is X or `alsoInReplyTo` contains X (`ChatEntryDto.Answers`, used by `ChatReplies.To`).
 - The server may store a normalized/joined prompt as the user entry's content; ids make that irrelevant.
 
 Clients poll `GET /api/agents/{id}/history` every ~2 s for up to ~3 minutes and show exactly the assistant entries whose
@@ -223,3 +228,20 @@ cached) and never calls `/api/*` (acting on an approval needs the device token, 
 should keep `url` as a same-origin path (e.g. `/approvals`, `/questions/{id}`); anything else is replaced by `/`. If a payload
 carries `actions` (`[{action, title}]`, max 2) a click on one just opens the approval in the PWA. The nonce-bound
 `/api/approvals/{id}/act` route is for ntfy action buttons, not for the browser.
+
+## Incognito conversations (FR-MEM-12)
+
+`TurnRequestDto{incognito: true, conversationId}` runs in the session `agent_{id}_incognito_{conversationId}`, which reads and
+writes no memory and is never in the persisted history. With no `conversationId` the turn is **one-shot**: the server picks an
+id it never returns and deletes the session right after the turn. A named conversation's session is deleted when the client
+ends it (`DELETE /api/agents/{id}/incognito/{conversationId}`), after `Capybara:Incognito:IdleTimeout` (default 30 min) without
+use, or at the next capybarad start (conversations do not survive a restart).
+
+## Event ingress (FR-RTN-07)
+
+| Method | Path | Request | Response | Auth | Notes |
+|---|---|---|---|---|---|
+| POST | `/api/events/{source}/{type}` | raw body, at most 256 KiB, header `X-Hub-Signature-256: sha256={hex HMAC-SHA256 of the body}` | 202 / 403 / 404 / 413 / 503 | **EventRelay or desktop** | `source` must be configured (`Capybara:Events:Sources:{source}`) with a secret, else 404; a bad signature is 403; a phone or TUI device is 403. The payload is always tainted and routed to event routines after the 202 (503 when the queue is full: retry). |
+
+The relay that forwards public webhooks onto the tailnet holds a device token with `Surface: EventRelay`, which opens this
+route and nothing else.

@@ -31,6 +31,12 @@ internal sealed record StateLayout(string Root)
 
     public string WebPushSubscriptions => Path.Combine(Root, "channels", "web-push-subscriptions.json");
 
+    /// <summary>The user's notification toggles and quiet hours as saved from the PWA.</summary>
+    public string NotificationSettings => Path.Combine(Root, "channels", "notification-settings.json");
+
+    /// <summary>Per-agent chat logs; under the state root, so no agent can write a line the clients show as the user's.</summary>
+    public string Chat => Path.Combine(Root, "chat");
+
     /// <summary>Private scratch space where config changes are validated before they touch the live tree.</summary>
     public string ConfigScratch => Path.Combine(Root, "tmp", "config-validation");
 

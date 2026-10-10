@@ -1,5 +1,6 @@
 using Capybara.Contracts.Agents;
 using Capybara.Memory.Access;
+using Capybara.Memory.Pages;
 using Capybara.Memory.Paths;
 using Capybara.Memory.Safety;
 using Capybara.Memory.Store;
@@ -35,14 +36,61 @@ public sealed class MemoryAdmin
         await _versioning.CommitAsync($"human edit {path}", cancellationToken);
     }
 
-    public async Task DeletePageAsync(MemoryAdminPrincipal principal, string rawPath, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Saves <paramref name="body"/> as the page's content, keeping its description (a new page is described by its
+    /// file name). Frontmatter is never taken from the caller, so a human edit cannot forge provenance.
+    /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="rawPath"/> is not a valid memory path.</exception>
+    public async Task SavePageAsync(MemoryAdminPrincipal principal, string rawPath, string body, CancellationToken cancellationToken = default)
     {
         EnsureHuman(principal);
         var path = ParsePath(rawPath);
-        if (await _store.DeleteHumanPageAsync(path, cancellationToken))
+        var file = _store.ResolveFile(path);
+        var description = File.Exists(file) && FrontmatterSerializer.TryParse(await File.ReadAllTextAsync(file, cancellationToken), out var current) && current.Metadata.Description.Length > 0
+            ? current.Metadata.Description
+            : Path.GetFileNameWithoutExtension(path.Value);
+        await EditPageAsync(principal, path.Value, body, description, cancellationToken);
+    }
+
+    /// <summary>Returns whether the page existed.</summary>
+    public async Task<bool> DeletePageAsync(MemoryAdminPrincipal principal, string rawPath, CancellationToken cancellationToken = default)
+    {
+        EnsureHuman(principal);
+        var path = ParsePath(rawPath);
+        if (!await _store.DeleteHumanPageAsync(path, cancellationToken))
         {
-            await _versioning.CommitAsync($"human delete {path}", cancellationToken);
+            return false;
         }
+
+        await _versioning.CommitAsync($"human delete {path}", cancellationToken);
+        return true;
+    }
+
+    /// <summary>
+    /// Every page whose path starts with <paramref name="prefix"/>, in every scope and including quarantined pages:
+    /// those are exactly what a human has to review (FR-MEM-12).
+    /// </summary>
+    public IReadOnlyList<MemoryPageInfo> ListPages(MemoryAdminPrincipal principal, string? prefix = null)
+    {
+        EnsureHuman(principal);
+        return [.. _store.AllPaths()
+            .Where(p => string.IsNullOrEmpty(prefix) || p.Value.StartsWith(prefix, StringComparison.Ordinal))
+            .Select(p => (Path: p, File: new FileInfo(_store.ResolveFile(p))))
+            .Where(p => p.File.Exists)
+            .OrderBy(p => p.Path.Value, StringComparer.Ordinal)
+            .Select(p => new MemoryPageInfo(p.Path.Value, p.File.Length, new DateTimeOffset(p.File.LastWriteTimeUtc, TimeSpan.Zero)))];
+    }
+
+    /// <summary>
+    /// The page's body for a human to read or edit (the raw file when its frontmatter does not parse, so a quarantined
+    /// page can still be reviewed), or <see langword="null"/> when there is no such page.
+    /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="rawPath"/> is not a valid memory path.</exception>
+    public async Task<string?> ReadPageAsync(MemoryAdminPrincipal principal, string rawPath, CancellationToken cancellationToken = default)
+    {
+        EnsureHuman(principal);
+        var file = _store.ResolveFile(ParsePath(rawPath));
+        return File.Exists(file) ? FrontmatterSerializer.BodyOrRaw(await File.ReadAllTextAsync(file, cancellationToken)) : null;
     }
 
     public async Task<bool> ReleaseQuarantineAsync(MemoryAdminPrincipal principal, string rawPath, CancellationToken cancellationToken = default)

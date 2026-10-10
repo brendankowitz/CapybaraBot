@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Json;
 using Capybara.Channels;
+using Capybara.Client;
 using Capybara.Connections.Broker;
 using Capybara.Connections.Health;
 using Capybara.Connections.Model;
@@ -22,6 +23,12 @@ public sealed class FakeBrokerHandler : HttpMessageHandler
 
     public IReadOnlyList<string> Requests => [.. _requests];
 
+    /// <summary>What <c>GET /broker/connections</c> answers.</summary>
+    public IReadOnlyList<ConnectionStatus> Connections { get; set; } = [];
+
+    /// <summary>What <c>GET /broker/credentials/health</c> answers.</summary>
+    public IReadOnlyList<CredentialHealth> Health { get; set; } = [];
+
     public bool Received(string request) => _requests.Contains(request, StringComparer.Ordinal);
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -39,7 +46,8 @@ public sealed class FakeBrokerHandler : HttpMessageHandler
             ("POST", "/broker/freeze") => new HttpResponseMessage(FreezeStatus),
             ("POST", "/broker/unfreeze") => new HttpResponseMessage(HttpStatusCode.NoContent),
             ("POST", _) when path.StartsWith("/broker/agents/", StringComparison.Ordinal) && path.EndsWith("/revoke", StringComparison.Ordinal) => new HttpResponseMessage(HttpStatusCode.NoContent),
-            ("GET", "/broker/credentials/health") => Json(Array.Empty<CredentialHealth>()),
+            ("GET", "/broker/credentials/health") => Json(Health),
+            ("GET", "/broker/connections") => Json(Connections),
             ("GET", _) when path.StartsWith("/broker/tools/", StringComparison.Ordinal) => Json(Array.Empty<BrokerToolDescriptor>()),
             _ => new HttpResponseMessage(HttpStatusCode.NotFound),
         };
@@ -67,17 +75,19 @@ public sealed class RecordingEvents : ICapybaraEvents
         return Record("AgentStatusChanged", new AgentActivitySnapshot(agentId, state, unread));
     }
 
-    public Task PublishThreadEntryAsync(object entry, CancellationToken cancellationToken = default) => Record("ThreadEntry", entry);
+    public Task PublishThreadEntryAsync(ThreadEntryDto entry, CancellationToken cancellationToken = default) => Record("ThreadEntry", entry);
 
-    public Task PublishApprovalRequestedAsync(object approval, CancellationToken cancellationToken = default) => Record("ApprovalRequested", approval);
+    public Task PublishApprovalRequestedAsync(ApprovalDto approval, CancellationToken cancellationToken = default) => Record("ApprovalRequested", approval);
 
     public Task PublishApprovalResolvedAsync(string id, CancellationToken cancellationToken = default) => Record("ApprovalResolved", id);
 
-    public Task PublishAlertAsync(object alert, CancellationToken cancellationToken = default) => Record("Alert", alert);
+    public Task PublishQuestionRequestedAsync(QuestionDto question, CancellationToken cancellationToken = default) => Record("QuestionRequested", question);
+
+    public Task PublishAlertAsync(AlertDto alert, CancellationToken cancellationToken = default) => Record("Alert", alert);
 
     public Task PublishKillSwitchChangedAsync(bool engaged, CancellationToken cancellationToken = default) => Record("KillSwitchChanged", engaged);
 
-    public Task PublishProposalAsync(object proposal, CancellationToken cancellationToken = default) => Record("ProposalCreated", proposal);
+    public Task PublishProposalAsync(ProposalDto proposal, CancellationToken cancellationToken = default) => Record("ProposalCreated", proposal);
 
     private Task Record(string name, object? payload)
     {
@@ -168,6 +178,9 @@ public sealed class FakeSupervisedRuntime(Contracts.Agents.AgentId agent) : Runt
     public Task SetModelAsync(string model, CancellationToken cancellationToken) => Task.CompletedTask;
 
     public Task EndSessionAsync(Runtime.Copilot.Hosting.TurnTarget target, CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public Task<IReadOnlyList<Runtime.Copilot.Hosting.IncognitoSessionInfo>> ListIncognitoSessionsAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<Runtime.Copilot.Hosting.IncognitoSessionInfo>>([]);
 
     public Task<Orchestration.Coordination.ConsultReply> ConsultAsync(string sessionId, string question, Contracts.Messaging.Envelope envelope, CancellationToken cancellationToken) =>
         throw new NotSupportedException("The fake runtime does not answer consults.");

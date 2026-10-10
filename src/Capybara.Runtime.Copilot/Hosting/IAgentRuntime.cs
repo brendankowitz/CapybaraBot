@@ -37,6 +37,13 @@ public interface IAgentRuntime : IAsyncDisposable
     /// <summary>Deletes a finished task, isolated or incognito session and forgets its taint. Never the main session.</summary>
     Task EndSessionAsync(TurnTarget target, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// The agent's incognito conversations the CLI still holds (FR-MEM-12), with when each last changed, so the host can
+    /// end those nobody uses any more.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The runtime is not running; nothing can be listed now.</exception>
+    Task<IReadOnlyList<IncognitoSessionInfo>> ListIncognitoSessionsAsync(CancellationToken cancellationToken);
+
     /// <summary>Answers one <c>ask_agent</c> question in a fresh, read-only, ephemeral session (FR-A2A-02).</summary>
     Task<ConsultReply> ConsultAsync(string sessionId, string question, Envelope envelope, CancellationToken cancellationToken);
 }

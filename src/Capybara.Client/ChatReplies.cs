@@ -4,8 +4,9 @@ namespace Capybara.Client;
 public static class ChatReplies
 {
     /// <summary>
-    /// The reply to the turn the server accepted: with <paramref name="messageId"/>, exactly the assistant entries whose
-    /// <see cref="ChatEntryDto.InReplyTo"/> equals it, in order (a reply can have several parts). Nothing else is ever
+    /// The reply to the turn the server accepted: with <paramref name="messageId"/>, exactly the assistant entries that
+    /// answer it (<see cref="ChatEntryDto.InReplyTo"/> or <see cref="ChatEntryDto.AlsoInReplyTo"/>), in order (a reply can
+    /// have several parts). Nothing else is ever
     /// returned, so a repeated prompt, an agent-initiated message or a normalized prompt cannot attach the wrong reply.
     /// Without an id (a server that does not supply ids), see <see cref="AfterSnapshot"/>.
     /// </summary>
@@ -13,7 +14,7 @@ public static class ChatReplies
     {
         ArgumentNullException.ThrowIfNull(history);
         ArgumentException.ThrowIfNullOrEmpty(messageId);
-        return [.. history.Where(e => e.Role == "assistant" && string.Equals(e.InReplyTo, messageId, StringComparison.Ordinal))];
+        return [.. history.Where(e => e.Answers(messageId))];
     }
 
     /// <summary>
@@ -33,7 +34,8 @@ public static class ChatReplies
             var index = -1;
             for (var i = history.Count - 1; i >= 0 && index < 0; i--)
             {
-                index = history[i] == last ? i : -1;
+                // Field-wise, but AlsoInReplyTo is a list, which record equality compares by reference.
+                index = history[i] with { AlsoInReplyTo = null } == last with { AlsoInReplyTo = null } ? i : -1;
             }
 
             if (index < 0)

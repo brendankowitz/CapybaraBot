@@ -88,6 +88,9 @@ internal sealed class FakeAgentRuntime(AgentId agent) : IAgentRuntime
         return Task.CompletedTask;
     }
 
+    public Task<IReadOnlyList<IncognitoSessionInfo>> ListIncognitoSessionsAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<IncognitoSessionInfo>>([]);
+
     public Task<ConsultReply> ConsultAsync(string sessionId, string question, Envelope envelope, CancellationToken cancellationToken) =>
         Task.FromResult(new ConsultReply("42", Taint.Clean, []));
 

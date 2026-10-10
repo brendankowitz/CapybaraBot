@@ -20,6 +20,17 @@ public sealed partial class NotificationRouter(
     private readonly ConcurrentQueue<Notification> _batchedLowRiskApprovals = new();
     private readonly object _batchGate = new();
     private ITimer? _batchTimer;
+    private ChannelOptions _options = options;
+
+    /// <summary>The settings routing uses now; replaced as a whole by <see cref="UpdateOptions"/> (FR-CLI-07).</summary>
+    public ChannelOptions Options => Volatile.Read(ref _options);
+
+    /// <summary>Applies new per-agent toggles and quiet hours to every notification routed from now on (FR-CLI-07).</summary>
+    public void UpdateOptions(ChannelOptions value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        Volatile.Write(ref _options, value);
+    }
 
     public async ValueTask RouteAsync(Notification notification, CancellationToken cancellationToken = default)
     {
@@ -73,7 +84,7 @@ public sealed partial class NotificationRouter(
 
     private bool IsDisabled(Notification notification) =>
         notification.Agent is { } agent
-        && options.AgentNotificationToggles.TryGetValue(agent, out var enabled)
+        && Options.AgentNotificationToggles.TryGetValue(agent, out var enabled)
         && !enabled;
 
     private bool IsSuppressedByFocus(Notification notification) =>
@@ -83,24 +94,25 @@ public sealed partial class NotificationRouter(
 
     private bool IsSuppressedByQuietHours(Notification notification)
     {
-        if (!options.QuietHours.Enabled)
+        var current = Options;
+        if (!current.QuietHours.Enabled)
         {
             return false;
         }
 
-        if (options.CriticalBypassesQuietHours && notification.Priority == NotificationPriority.Critical)
+        if (current.CriticalBypassesQuietHours && notification.Priority == NotificationPriority.Critical)
         {
             return false;
         }
 
-        if (options.ApprovalBypassesQuietHours && notification.Kind == NotificationKind.Approval)
+        if (current.ApprovalBypassesQuietHours && notification.Kind == NotificationKind.Approval)
         {
             return false;
         }
 
         var now = TimeOnly.FromDateTime(timeProvider.GetLocalNow().DateTime);
-        var starts = options.QuietHours.StartsAt;
-        var ends = options.QuietHours.EndsAt;
+        var starts = current.QuietHours.StartsAt;
+        var ends = current.QuietHours.EndsAt;
         return starts <= ends ? now >= starts && now < ends : now >= starts || now < ends;
     }
 
@@ -115,7 +127,7 @@ public sealed partial class NotificationRouter(
             _batchTimer ??= timeProvider.CreateTimer(
                 static state => _ = ((NotificationRouter)state!).FlushFromTimerAsync(),
                 this,
-                options.LowRiskBatchWindow,
+                Options.LowRiskBatchWindow,
                 Timeout.InfiniteTimeSpan);
         }
     }

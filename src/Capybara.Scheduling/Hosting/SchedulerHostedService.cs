@@ -10,6 +10,8 @@ namespace Capybara.Scheduling.Hosting;
 /// </summary>
 public sealed class SchedulerHostedService(IScheduler scheduler, ScheduleSynchronizer synchronizer) : IHostedService
 {
+    private TaskCompletionSource? _stopped;
+
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         await synchronizer.SynchronizeAsync(cancellationToken);
@@ -19,7 +21,27 @@ public sealed class SchedulerHostedService(IScheduler scheduler, ScheduleSynchro
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        synchronizer.Detach();
-        await scheduler.Shutdown(waitForJobsToComplete: true, cancellationToken);
+        // The host can stop twice at once (a test host's StopAsync and the app's own RunAsync both react to
+        // ApplicationStopping). Quartz runs its shutdown for the first caller only and returns to any other at once,
+        // so a second caller that went on to dispose the container would tear it down under a scheduler still
+        // shutting down. Every caller therefore waits for the one shutdown; a caller's token bounds only its wait.
+        var mine = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (Interlocked.CompareExchange(ref _stopped, mine, null) is { } running)
+        {
+            await running.Task.WaitAsync(cancellationToken);
+            return;
+        }
+
+        try
+        {
+            synchronizer.Detach();
+            await scheduler.Shutdown(waitForJobsToComplete: true, cancellationToken);
+            mine.SetResult();
+        }
+        catch (Exception ex)
+        {
+            mine.SetException(ex);
+            throw;
+        }
     }
 }

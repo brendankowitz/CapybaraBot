@@ -10,12 +10,19 @@ public sealed class CapybaraRealtimeClient : IAsyncDisposable
 {
     private readonly HubConnection _connection;
 
-    public CapybaraRealtimeClient(Uri baseAddress, Func<Task<string?>> accessTokenProvider)
+    /// <param name="baseAddress">The gateway's base address.</param>
+    /// <param name="accessTokenProvider">The device token; browsers send it as the <c>access_token</c> query parameter.</param>
+    /// <param name="configureConnection">Transport settings, e.g. a test server's message handler; browsers and the TUI leave it unset.</param>
+    public CapybaraRealtimeClient(Uri baseAddress, Func<Task<string?>> accessTokenProvider, Action<Microsoft.AspNetCore.Http.Connections.Client.HttpConnectionOptions>? configureConnection = null)
     {
         ArgumentNullException.ThrowIfNull(baseAddress);
         ArgumentNullException.ThrowIfNull(accessTokenProvider);
         _connection = new HubConnectionBuilder()
-            .WithUrl(new Uri(baseAddress, "/hubs/capybara"), options => options.AccessTokenProvider = accessTokenProvider)
+            .WithUrl(new Uri(baseAddress, "/hubs/capybara"), options =>
+            {
+                options.AccessTokenProvider = accessTokenProvider;
+                configureConnection?.Invoke(options);
+            })
             .WithAutomaticReconnect()
             .Build();
     }
