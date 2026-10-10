@@ -72,6 +72,20 @@ public sealed class PolicyGateTests
     }
 
     [Fact]
+    public async Task An_approval_carries_the_full_canonical_arguments_even_when_the_preview_is_cut()
+    {
+        // Canonical JSON sorts keys, so a long body pushes the recipient past the preview cap.
+        using var f = new PolicyFixture();
+        var body = new string('x', 3_000);
+        var verdict = await f.Gate.EvaluateAsync(PolicyFixture.Call(Ea, "email_send", $$"""{"to":"bob@example.com","body":"{{body}}"}"""), TestContext.Current.CancellationToken);
+
+        var approval = Assert.IsType<ApprovalRequest>(verdict.Approval);
+        Assert.DoesNotContain("bob@example.com", approval.Preview, StringComparison.Ordinal);
+        Assert.Equal($$"""{"body":"{{body}}","to":"bob@example.com"}""", approval.ArgsJson);
+        Assert.Equal(approval.ArgsHash, Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(approval.ArgsJson!))));
+    }
+
+    [Fact]
     public async Task Approval_is_bound_to_the_exact_arguments()
     {
         using var f = new PolicyFixture();

@@ -23,6 +23,12 @@ public sealed class FakeBrokerHandler : HttpMessageHandler
 
     public IReadOnlyList<string> Requests => [.. _requests];
 
+    /// <summary>What <c>GET /broker/connections</c> answers.</summary>
+    public IReadOnlyList<ConnectionStatus> Connections { get; set; } = [];
+
+    /// <summary>What <c>GET /broker/credentials/health</c> answers.</summary>
+    public IReadOnlyList<CredentialHealth> Health { get; set; } = [];
+
     public bool Received(string request) => _requests.Contains(request, StringComparer.Ordinal);
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -40,7 +46,8 @@ public sealed class FakeBrokerHandler : HttpMessageHandler
             ("POST", "/broker/freeze") => new HttpResponseMessage(FreezeStatus),
             ("POST", "/broker/unfreeze") => new HttpResponseMessage(HttpStatusCode.NoContent),
             ("POST", _) when path.StartsWith("/broker/agents/", StringComparison.Ordinal) && path.EndsWith("/revoke", StringComparison.Ordinal) => new HttpResponseMessage(HttpStatusCode.NoContent),
-            ("GET", "/broker/credentials/health") => Json(Array.Empty<CredentialHealth>()),
+            ("GET", "/broker/credentials/health") => Json(Health),
+            ("GET", "/broker/connections") => Json(Connections),
             ("GET", _) when path.StartsWith("/broker/tools/", StringComparison.Ordinal) => Json(Array.Empty<BrokerToolDescriptor>()),
             _ => new HttpResponseMessage(HttpStatusCode.NotFound),
         };
