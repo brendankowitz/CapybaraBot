@@ -28,6 +28,9 @@ public sealed record AgentTurnRequest
     /// <summary>Routine dry run: approval-required tools are auto-denied and nobody is prompted (FR-RTN-08).</summary>
     public bool DryRun { get; init; }
 
+    /// <summary>The routine's approval boundary: tool patterns that need approval for this turn only (FR-RTN-02).</summary>
+    public IReadOnlyList<string> ApprovalBoundary { get; init; } = [];
+
     /// <summary>Model for this turn only, e.g. a routine's model (FR-AGT-08). <see langword="null"/> keeps the agent's.</summary>
     public string? Model { get; init; }
 

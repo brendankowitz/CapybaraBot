@@ -67,6 +67,7 @@ public sealed partial class CopilotRoutineExecutor(AgentRuntimePool runtimes, Co
             Taint = payload is null ? Taint.Clean : Taint.Tainted,
             RoutineId = routine.Id,
             DryRun = invocation.DryRun,
+            ApprovalBoundary = routine.ApprovalBoundary,
             Model = invocation.ModelTier,
             Budget = new Budget(routine.BudgetCreditsPerRun, RoutineToolCalls, options.TurnTimeout),
         };

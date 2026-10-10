@@ -97,7 +97,7 @@ public sealed partial class SessionHandlers(
             return new PreToolUseHookOutput { PermissionDecision = "allow", PermissionDecisionReason = "task protocol" };
         }
 
-        var call = new ToolCallContext(session.Agent, session.SessionId, input.ToolName, input.ToolArgs, session.TurnOrigin, session.Envelope.TraceId, session.DryRun);
+        var call = new ToolCallContext(session.Agent, session.SessionId, input.ToolName, input.ToolArgs, session.TurnOrigin, session.Envelope.TraceId, session.DryRun, session.ApprovalBoundary);
         GateVerdict verdict;
         try
         {

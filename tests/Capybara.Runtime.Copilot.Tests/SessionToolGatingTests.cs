@@ -143,6 +143,21 @@ public sealed class SessionToolGatingTests
     }
 
     [Fact]
+    public async Task A_routine_approval_boundary_reaches_the_gate_from_the_session()
+    {
+        using var f = new RuntimeFixture([new PolicyRule { Effect = RuleEffect.Allow, Tool = "email_read" }]);
+        var session = f.Session(Ea);
+
+        Assert.Equal("allow", (await f.Handlers.OnPreToolUseAsync(session, Input("email_read"))).PermissionDecision);
+
+        session.ApprovalBoundary = ["email_read"];
+        var bounded = await f.Handlers.OnPreToolUseAsync(session, Input("email_read"));
+
+        Assert.Equal("deny", bounded.PermissionDecision);
+        Assert.Single(f.Approvals.Pending(), a => a.Tool == "email_read");
+    }
+
+    [Fact]
     public void Incognito_sessions_get_no_memory_tools()
     {
         using var f = new RuntimeFixture();

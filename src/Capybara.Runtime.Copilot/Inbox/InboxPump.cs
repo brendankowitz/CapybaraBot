@@ -411,6 +411,7 @@ public sealed partial class InboxPump
                 Taint = message.Taint,
                 Envelope = envelope,
                 RoutineId = continuation?.Routine.Id,
+                ApprovalBoundary = continuation?.Routine.ApprovalBoundary ?? [],
                 Model = continuation?.Model,
                 Budget = continuation is { } c ? new Budget(c.RemainingCredits, 100, TimeSpan.FromMinutes(20)) : null,
             },

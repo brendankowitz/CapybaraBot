@@ -446,6 +446,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
             context.TurnFrom = request.From;
             context.RoutineId = request.RoutineId;
             context.DryRun = request.DryRun;
+            context.ApprovalBoundary = request.ApprovalBoundary;
             var turn = context.BeginTurn(creditLimit);
             await MatchToolsToDepthAsync(session, context, cancellationToken);
             _taint.Apply(context.SessionId, request.Taint);
@@ -510,6 +511,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
             {
                 context.DryRun = false;
                 context.RoutineId = null;
+                context.ApprovalBoundary = [];
                 await RestoreModelAsync(session, context);
             }
 
@@ -606,6 +608,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
                 TurnFrom = request.From,
                 RoutineId = request.RoutineId,
                 DryRun = request.DryRun,
+                ApprovalBoundary = request.ApprovalBoundary,
                 Model = request.Model ?? _model,
             };
             var turn = context.BeginTurn(creditLimit);

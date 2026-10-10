@@ -54,6 +54,26 @@ public sealed class PolicyGateTests
     }
 
     [Fact]
+    public async Task A_routine_approval_boundary_makes_a_tool_ask_first_for_that_run_only()
+    {
+        using var f = new PolicyFixture([new PolicyRule { Effect = RuleEffect.Allow, Tool = "web_fetch" }]);
+        var ct = TestContext.Current.CancellationToken;
+        var ordinary = PolicyFixture.Call(Ea, "web_fetch");
+        var bounded = ordinary with { ApprovalBoundary = ["web_*"] };
+
+        Assert.Equal(GateOutcome.Allow, (await f.Gate.EvaluateAsync(ordinary, ct)).Outcome);
+
+        var verdict = await f.Gate.EvaluateAsync(bounded, ct);
+        Assert.Equal(GateOutcome.PendingApproval, verdict.Outcome);
+        Assert.Equal("the routine's approval boundary", verdict.Reason);
+        Assert.Equal(RiskLevel.High, verdict.Approval!.Risk);
+
+        // The boundary never widens the allowlist, and a dry run is denied rather than prompting anyone.
+        Assert.Equal("static", (await f.Gate.EvaluateAsync(PolicyFixture.Call(Ea, "shell") with { ApprovalBoundary = ["shell"] }, ct)).Layer);
+        Assert.Equal(PolicyGate.DryRunLayer, (await f.Gate.EvaluateAsync(bounded with { DryRun = true }, ct)).Layer);
+    }
+
+    [Fact]
     public async Task Approval_required_tool_asks_even_with_allow_rule_and_approval_is_single_use()
     {
         using var f = new PolicyFixture([new PolicyRule { Effect = RuleEffect.Allow, Tool = "email_send" }]);

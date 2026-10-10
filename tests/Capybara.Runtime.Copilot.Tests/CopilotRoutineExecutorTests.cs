@@ -151,6 +151,17 @@ public sealed class CopilotRoutineExecutorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task The_routines_approval_boundary_travels_with_its_turn()
+    {
+        var invocation = Invocation(TriggerKind.Cron);
+        invocation = invocation with { Routine = invocation.Routine with { ApprovalBoundary = ["email_send"] } };
+
+        await _executor.ExecuteAsync(invocation, Ct);
+
+        Assert.Equal(["email_send"], Assert.Single(_runtime.Requests).ApprovalBoundary);
+    }
+
+    [Fact]
     public async Task An_isolated_run_waiting_for_an_approval_keeps_its_session_for_the_retry()
     {
         _runtime.Turn = (_, _) => Task.FromResult(Reply("Waiting for approval.", new TurnEvidence(0m, null, [], [], [], ["approval-1"])));

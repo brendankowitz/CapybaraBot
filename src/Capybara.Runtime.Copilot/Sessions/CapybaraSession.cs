@@ -83,6 +83,12 @@ public sealed class CapybaraSession
     /// </summary>
     public bool DryRun { get; set; }
 
+    /// <summary>
+    /// Tool patterns the routine running the current turn declared as its approval boundary (FR-RTN-02); the gate treats
+    /// them as approval-required for this turn only. Empty outside a routine run.
+    /// </summary>
+    public IReadOnlyList<string> ApprovalBoundary { get; set; } = [];
+
     /// <summary>The model the session runs on (FR-AGT-08). Starts as the agent's model.</summary>
     public string Model { get; set; }
 

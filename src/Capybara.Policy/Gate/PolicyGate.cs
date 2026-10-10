@@ -91,11 +91,16 @@ public sealed class PolicyGate(
             return GateVerdict.Allow("approval", "consumed matching approval");
         }
 
-        // Layer 2: deterministic rules. Approval-required tools are always ask-first.
+        // Layer 2: deterministic rules. Approval-required tools, and the triggering routine's approval boundary, are
+        // always ask-first.
         var approvalRequired = agent.ApprovalRequiredTools.Any(pattern => ToolPattern.IsMatch(pattern, call.Tool));
-        if (approvalRequired || match?.Rule.Effect == RuleEffect.Ask)
+        var boundary = !approvalRequired && call.ApprovalBoundary is { } patterns && patterns.Any(pattern => ToolPattern.IsMatch(pattern, call.Tool));
+        if (approvalRequired || boundary || match?.Rule.Effect == RuleEffect.Ask)
         {
-            return Ask(call, argsHash, RiskLevel.High, approvalRequired ? "approval-required tool" : match!.Rule.Reason ?? "ask-first rule");
+            var reason = approvalRequired ? "approval-required tool"
+                : boundary ? "the routine's approval boundary"
+                : match!.Rule.Reason ?? "ask-first rule";
+            return Ask(call, argsHash, RiskLevel.High, reason);
         }
 
         // Layer 3: taint and provenance.
