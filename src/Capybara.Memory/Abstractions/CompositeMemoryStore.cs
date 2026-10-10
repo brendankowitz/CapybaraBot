@@ -73,6 +73,9 @@ public sealed class CompositeMemoryStore(WikiStore wiki, IEnumerable<IMemoryProv
     public Task<MemoryOperation> ForgetAsync(MemoryAccessContext context, string rawPath, CancellationToken cancellationToken = default) =>
         context.Incognito ? Task.FromResult(MemoryOperation.NoOp) : wiki.ForgetAsync(context, rawPath, cancellationToken);
 
+    public Task<MemoryOperation> MarkValidatedAsync(MemoryAccessContext context, string rawPath, CancellationToken cancellationToken = default) =>
+        context.Incognito ? Task.FromResult(MemoryOperation.NoOp) : wiki.MarkValidatedAsync(context, rawPath, cancellationToken);
+
     public Task<bool> ResolveUserChangeAsync(string changeId, bool apply, CancellationToken cancellationToken = default) =>
         wiki.ResolveUserChangeAsync(changeId, apply, cancellationToken);
 

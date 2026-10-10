@@ -23,5 +23,8 @@ public interface IMemoryStore
 
     Task<MemoryOperation> ForgetAsync(MemoryAccessContext context, string rawPath, CancellationToken cancellationToken = default);
 
+    /// <summary>Records that the agent re-verified the page against its source system, setting <c>lastValidated</c> (FR-MEM-04, FR-MEM-07).</summary>
+    Task<MemoryOperation> MarkValidatedAsync(MemoryAccessContext context, string rawPath, CancellationToken cancellationToken = default);
+
     Task<bool> ResolveUserChangeAsync(string changeId, bool apply, CancellationToken cancellationToken = default);
 }

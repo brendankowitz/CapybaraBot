@@ -16,8 +16,14 @@ public sealed record MemoryAccessContext
     /// <summary>Consult sessions are read-only.</summary>
     public bool ReadOnly { get; init; }
 
-    /// <summary>Incognito sessions read no memory and write none.</summary>
+    /// <summary>
+    /// Incognito sessions read no memory and write none (FR-MEM-12). Every store in this assembly honours the flag; the
+    /// runtime should set it via <see cref="AsIncognito"/> and may additionally use <c>NullMemoryStore.Instance</c>.
+    /// </summary>
     public bool Incognito { get; init; }
+
+    /// <summary>This context with <see cref="Incognito"/> set.</summary>
+    public MemoryAccessContext AsIncognito() => this with { Incognito = true };
 
     /// <summary>Whether this agent may read <c>/user/</c>. The research agent may not.</summary>
     public bool CanReadUser { get; init; } = true;

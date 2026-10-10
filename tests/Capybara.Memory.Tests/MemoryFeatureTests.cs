@@ -89,22 +89,83 @@ public sealed class MemoryFeatureTests : IDisposable
     }
 
     [Fact]
-    public async Task Consolidation_promotes_dedupes_archives_and_stages_digest()
+    public async Task Consolidation_proposes_promotions_duplicates_and_archives_without_touching_files()
     {
         var options = new MemoryOptions { Root = _dir.Path, ArchiveAfterDays = 28 };
         var store = NewStore(options);
         await WriteAsync("agents/ea/daily/2026-01-01.md", "- Prefers brie\n", Ct);
         await WriteAsync("agents/ea/dup1.md", "---\ndescription: old\nupdated: 2025-01-01T00:00:00.0000000+00:00\ntaint: clean\n---\nSame body\n", Ct);
         await WriteAsync("agents/ea/dup2.md", "---\ndescription: old\nupdated: 2025-01-01T00:00:00.0000000+00:00\ntaint: clean\n---\nSame body\n", Ct);
+        var before = Snapshot();
 
-        var job = new ConsolidationJob(store, options, new NoMemoryVersioning(), _time);
+        var job = new ConsolidationJob(store, options, _time);
+        var report = await job.RunAsync(Ct);
+
+        Assert.Equal(before, Snapshot());
+        Assert.Null(await store.ReadAsync(Context(), "/agents/ea/notes", Ct));
+        Assert.Equal(1, report.PromotionsProposed);
+        Assert.Equal(1, report.DuplicatesProposed);
+        Assert.Contains(store.PendingUserChanges, c => c is { Kind: PendingChangeKind.Write, Path: "/agents/ea/notes.md" } && c.After.Contains("Prefers brie", StringComparison.Ordinal));
+        Assert.Contains(store.PendingUserChanges, c => c is { Kind: PendingChangeKind.Delete, Path: "/agents/ea/dup2.md" } && c.Before!.Contains("Same body", StringComparison.Ordinal));
+        Assert.Contains(store.PendingUserChanges, c => c.Path.StartsWith("/user/digests/consolidation-", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Approving_consolidation_proposals_applies_them_and_rerunning_does_not_duplicate_pending()
+    {
+        var options = new MemoryOptions { Root = _dir.Path, ArchiveAfterDays = 28 };
+        var store = NewStore(options);
+        await WriteAsync("agents/ea/daily/2026-01-01.md", "- Prefers brie\n", Ct);
+        await WriteAsync("agents/ea/dup1.md", "---\ndescription: old\nupdated: 2026-01-01T00:00:00.0000000+00:00\ntaint: clean\n---\nSame body\n", Ct);
+        await WriteAsync("agents/ea/dup2.md", "---\ndescription: old\nupdated: 2026-01-01T00:00:00.0000000+00:00\ntaint: clean\n---\nSame body\n", Ct);
+        var job = new ConsolidationJob(store, options, _time);
         await job.RunAsync(Ct);
+        var pendingCount = store.PendingUserChanges.Count;
+
+        await job.RunAsync(Ct);
+        Assert.Equal(pendingCount, store.PendingUserChanges.Count);
+
+        foreach (var change in store.PendingUserChanges.Where(c => c.Path.StartsWith("/agents/", StringComparison.Ordinal)).ToList())
+        {
+            Assert.True(await store.ResolveUserChangeAsync(change.Id, apply: true, Ct));
+        }
 
         var notes = await store.ReadAsync(Context(), "/agents/ea/notes", Ct);
         Assert.Contains("Prefers brie", notes!.Body, StringComparison.Ordinal);
-        Assert.DoesNotContain(Directory.EnumerateFiles(_dir.Path, "dup*.md", SearchOption.AllDirectories), p => !p.Contains("archive", StringComparison.Ordinal));
-        Assert.NotEmpty(Directory.EnumerateFiles(Path.Combine(_dir.Path, "archive"), "*.md", SearchOption.AllDirectories));
-        Assert.Contains(store.PendingUserChanges, c => c.Path.StartsWith("/user/digests/consolidation-", StringComparison.Ordinal));
+        Assert.False(File.Exists(Path.Combine(_dir.Path, "agents", "ea", "dup2.md")));
+        Assert.True(File.Exists(Path.Combine(_dir.Path, "agents", "ea", "dup1.md")));
+    }
+
+    [Fact]
+    public async Task Stale_pages_are_proposed_for_archive_and_moved_only_on_approval()
+    {
+        var options = new MemoryOptions { Root = _dir.Path, ArchiveAfterDays = 28 };
+        var store = NewStore(options);
+        await WriteAsync("agents/ea/old.md", "---\ndescription: old\nupdated: 2025-01-01T00:00:00.0000000+00:00\ntaint: clean\n---\nOld news\n", Ct);
+
+        await new ConsolidationJob(store, options, _time).RunAsync(Ct);
+
+        Assert.True(File.Exists(Path.Combine(_dir.Path, "agents", "ea", "old.md")));
+        var change = Assert.Single(store.PendingUserChanges, c => c.Kind == PendingChangeKind.Archive);
+        Assert.True(await store.ResolveUserChangeAsync(change.Id, apply: true, Ct));
+        Assert.False(File.Exists(Path.Combine(_dir.Path, "agents", "ea", "old.md")));
+        Assert.True(File.Exists(Path.Combine(_dir.Path, "archive", "agents", "ea", "old.md")));
+    }
+
+    [Fact]
+    public async Task Proposal_is_discarded_as_stale_when_the_page_changed_after_it_was_proposed()
+    {
+        var options = new MemoryOptions { Root = _dir.Path };
+        var store = NewStore(options);
+        await WriteAsync("agents/ea/dup1.md", "---\ndescription: a\ntaint: clean\n---\nSame body\n", Ct);
+        await WriteAsync("agents/ea/dup2.md", "---\ndescription: a\ntaint: clean\n---\nSame body\n", Ct);
+        await new ConsolidationJob(store, options, _time).RunAsync(Ct);
+        var change = Assert.Single(store.PendingUserChanges, c => c.Kind == PendingChangeKind.Delete);
+        await WriteAsync("agents/ea/dup2.md", "---\ndescription: a\ntaint: clean\n---\nEdited since\n", Ct);
+
+        Assert.False(await store.ResolveUserChangeAsync(change.Id, apply: true, Ct));
+        Assert.True(File.Exists(Path.Combine(_dir.Path, "agents", "ea", "dup2.md")));
+        Assert.DoesNotContain(store.PendingUserChanges, c => c.Id == change.Id);
     }
 
     [Fact]
@@ -153,7 +214,7 @@ public sealed class MemoryFeatureTests : IDisposable
     public async Task Admin_rejects_agent_principal_and_can_release_clean_quarantine()
     {
         var store = NewStore();
-        var admin = new MemoryAdmin(store, _time);
+        var admin = new MemoryAdmin(store);
         await Assert.ThrowsAsync<MemoryAccessDeniedException>(() => admin.EditPageAsync(MemoryAdminPrincipal.Agent, "/user/profile", "x", "x", Ct));
         await WriteAsync("agents/ea/clean.md", "---\ndescription: clean\ntaint: clean\n---\nClean body\n", Ct);
         Assert.NotNull(await store.ReadAsync(Context(), "/agents/ea/clean", Ct));
@@ -171,6 +232,11 @@ public sealed class MemoryFeatureTests : IDisposable
     }
 
     public void Dispose() => _dir.Dispose();
+
+    /// <summary>Path → content of every file under the root, ignoring the pending-change area.</summary>
+    private Dictionary<string, string> Snapshot() => Directory.EnumerateFiles(_dir.Path, "*", SearchOption.AllDirectories)
+        .Where(f => !f.Contains(".pending", StringComparison.Ordinal))
+        .ToDictionary(f => f, File.ReadAllText, StringComparer.Ordinal);
 
     private WikiStore NewStore(MemoryOptions? options = null) =>
         new(options ?? new MemoryOptions { Root = _dir.Path }, new NoMemoryVersioning(), _time);

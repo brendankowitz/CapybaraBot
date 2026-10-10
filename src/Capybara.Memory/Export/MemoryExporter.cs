@@ -19,8 +19,11 @@ public sealed class MemoryExporter(MemoryOptions options)
         foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
         {
             var relative = Path.GetRelativePath(root, file).Replace(Path.DirectorySeparatorChar, '/');
-            if (relative.Equals(".git", StringComparison.Ordinal) || relative.StartsWith(".git/", StringComparison.Ordinal))
+            if (relative.Equals(".git", StringComparison.Ordinal)
+                || relative.StartsWith(".git/", StringComparison.Ordinal)
+                || relative.StartsWith(".memory-index.sqlite", StringComparison.Ordinal))
             {
+                // Git internals and the derived search index are not part of the user's data.
                 continue;
             }
 

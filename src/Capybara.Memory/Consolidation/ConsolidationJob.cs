@@ -6,145 +6,185 @@ using Capybara.Memory.Access;
 using Capybara.Memory.Pages;
 using Capybara.Memory.Paths;
 using Capybara.Memory.Store;
-using Capybara.Memory.Versioning;
 
 namespace Capybara.Memory.Consolidation;
 
-/// <summary>Nightly low-privilege memory steward: promote logs, dedupe, archive stale pages and stage a digest (FR-MEM-08).</summary>
-public sealed partial class ConsolidationJob(WikiStore store, MemoryOptions options, IMemoryVersioning versioning, TimeProvider time, IConsolidationSummarizer? summarizer = null)
+/// <summary>
+/// Nightly low-privilege memory steward (FR-MEM-08): proposes promoting daily logs into durable notes, deleting duplicate
+/// pages and archiving stale ones, then stages a review digest. It never mutates a page: every change is a
+/// <see cref="PendingUserChange"/> a human approves through <see cref="WikiStore.ResolveUserChangeAsync"/>. Re-running
+/// while proposals are still pending does not stage them again.
+/// </summary>
+public sealed partial class ConsolidationJob(WikiStore store, MemoryOptions options, TimeProvider time, IConsolidationSummarizer? summarizer = null)
 {
+    private const string StewardName = "steward";
+
     private static readonly MemoryAccessContext StewardContext = new()
     {
-        Agent = AgentId.Parse("steward"),
+        Agent = AgentId.Parse(StewardName),
         SessionId = "steward:consolidation",
         CanReadUser = true,
     };
 
-    public async Task RunAsync(CancellationToken cancellationToken = default)
+    public async Task<ConsolidationReport> RunAsync(CancellationToken cancellationToken = default)
     {
         var digest = new StringBuilder();
         digest.AppendLine($"Consolidation run {time.GetUtcNow():yyyy-MM-dd}");
         digest.AppendLine();
-        digest.AppendLine("Facts promoted:");
-        var promoted = await PromoteDailyLogsAsync(digest, cancellationToken);
-        var deduped = await DedupeAsync(cancellationToken);
-        var archived = await ArchiveStaleAsync(cancellationToken);
-        digest.AppendLine($"- promoted: {promoted}");
-        digest.AppendLine($"- deduped: {deduped}");
-        digest.AppendLine($"- archived: {archived}");
+        digest.AppendLine("Facts proposed for promotion:");
+        var promotions = await ProposePromotionsAsync(digest, cancellationToken);
+        var (duplicates, deleted) = await ProposeDuplicateDeletionsAsync(cancellationToken);
+        var archives = await ProposeArchivesAsync(deleted, cancellationToken);
+        var report = new ConsolidationReport(promotions, duplicates, archives);
+
+        digest.AppendLine($"- promotions proposed: {report.PromotionsProposed}");
+        digest.AppendLine($"- duplicates proposed for deletion: {report.DuplicatesProposed}");
+        digest.AppendLine($"- stale pages proposed for archive: {report.ArchivesProposed}");
         if (summarizer is not null)
         {
             digest.AppendLine(await summarizer.SummarizeAsync(digest.ToString(), cancellationToken));
         }
 
         var digestPath = $"/user/digests/consolidation-{time.GetUtcNow():yyyy-MM-dd}.md";
-        await store.RememberAsync(StewardContext, digestPath, digest.ToString(), "Consolidation review digest", cancellationToken);
-        await versioning.CommitAsync("memory consolidation", cancellationToken);
+        if (store.PendingUserChanges.All(c => c.Path != digestPath))
+        {
+            await store.RememberAsync(StewardContext, digestPath, digest.ToString(), "Consolidation review digest", cancellationToken);
+        }
+
+        return report;
     }
 
-    private async Task<int> PromoteDailyLogsAsync(StringBuilder digest, CancellationToken cancellationToken)
+    private async Task<int> ProposePromotionsAsync(StringBuilder digest, CancellationToken cancellationToken)
     {
-        var count = 0;
-        var root = store.Root;
-        foreach (var daily in Directory.EnumerateFiles(root, "*.md", SearchOption.AllDirectories)
-            .Where(f => f.Replace(Path.DirectorySeparatorChar, '/').Contains("/daily/", StringComparison.Ordinal)))
+        var additionsByNotes = new SortedDictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var daily in Directory.EnumerateFiles(store.Root, "*.md", SearchOption.AllDirectories).Order(StringComparer.Ordinal))
         {
-            var relative = "/" + Path.GetRelativePath(root, daily).Replace(Path.DirectorySeparatorChar, '/');
+            var relative = RelativePath(daily);
             if (!DailyPathPattern().IsMatch(relative) || !MemoryPath.TryParse(relative, out var dailyPath, out _))
             {
                 continue;
             }
 
-            var notesPath = MemoryPath.Parse($"/agents/{dailyPath.Owner}/notes.md");
+            var notesPath = $"/agents/{dailyPath.Owner}/notes.md";
             var bullets = ExtractBullets(await File.ReadAllTextAsync(daily, cancellationToken));
             if (bullets.Count == 0)
             {
                 continue;
             }
 
-            var notesFile = Path.Combine(root, notesPath.RelativeFileSystemPath);
-            var notes = File.Exists(notesFile) ? await File.ReadAllTextAsync(notesFile, cancellationToken) : string.Empty;
-            var (_, body) = FrontmatterSerializer.Parse(notes);
-            var existing = new HashSet<string>(ExtractBullets(body), StringComparer.OrdinalIgnoreCase);
-            var additions = bullets.Where(b => existing.Add(b)).Select(b => $"- {b} _(from {relative})_").ToList();
+            if (!additionsByNotes.TryGetValue(notesPath, out var list))
+            {
+                additionsByNotes[notesPath] = list = [];
+            }
+
+            list.AddRange(bullets.Select(b => $"- {b} _(from {relative})_"));
+        }
+
+        var proposed = 0;
+        foreach (var (notesRelative, candidates) in additionsByNotes)
+        {
+            var notesPath = MemoryPath.Parse(notesRelative);
+            var notesFile = Path.Combine(store.Root, notesPath.RelativeFileSystemPath);
+            var before = File.Exists(notesFile) ? await File.ReadAllTextAsync(notesFile, cancellationToken) : null;
+            var (existingMetadata, body) = FrontmatterSerializer.Parse(before ?? string.Empty);
+            var known = new HashSet<string>(ExtractBullets(body).Select(StripSource), StringComparer.OrdinalIgnoreCase);
+            var additions = candidates.Where(c => known.Add(StripSource(c[2..]))).ToList();
             if (additions.Count == 0)
             {
                 continue;
             }
 
             var now = time.GetUtcNow();
-            var metadata = new PageMetadata { Description = "Durable agent notes", Source = "steward:consolidation", Created = now, Updated = now, ValidFrom = now };
-            if (File.Exists(notesFile))
+            var metadata = before is null
+                ? new PageMetadata { Description = "Durable agent notes", Source = "steward:consolidation", Created = now, Updated = now, ValidFrom = now }
+                : existingMetadata with { Updated = now, Source = "steward:consolidation" };
+            var after = FrontmatterSerializer.Write(metadata, body.TrimEnd() + "\n" + string.Join('\n', additions) + "\n");
+            if (store.TryStage(PendingChangeKind.Write, notesPath, StewardName, before, after, "promote daily-log facts into durable notes"))
             {
-                metadata = FrontmatterSerializer.Parse(notes).Metadata with { Updated = now, Source = "steward:consolidation" };
-            }
-
-            Directory.CreateDirectory(Path.GetDirectoryName(notesFile)!);
-            await File.WriteAllTextAsync(notesFile, FrontmatterSerializer.Write(metadata, body.TrimEnd() + "\n" + string.Join('\n', additions) + "\n"), cancellationToken);
-            count += additions.Count;
-            foreach (var addition in additions)
-            {
-                digest.AppendLine(addition);
+                proposed++;
+                foreach (var addition in additions)
+                {
+                    digest.AppendLine(addition);
+                }
             }
         }
 
-        return count;
+        return proposed;
     }
 
-    private async Task<int> DedupeAsync(CancellationToken cancellationToken)
+    private async Task<(int Proposed, HashSet<string> Paths)> ProposeDuplicateDeletionsAsync(CancellationToken cancellationToken)
     {
-        var seen = new Dictionary<string, string>(StringComparer.Ordinal);
-        var removed = 0;
-        foreach (var file in MemoryFiles().Order(StringComparer.Ordinal))
+        var firstSeen = new Dictionary<string, string>(StringComparer.Ordinal);
+        var proposedPaths = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (path, file) in LivePages())
         {
             var content = await File.ReadAllTextAsync(file, cancellationToken);
-            var (_, body) = FrontmatterSerializer.Parse(content);
-            var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Normalize(body))));
-            if (!seen.TryAdd(hash, file))
-            {
-                File.Delete(file);
-                removed++;
-            }
-        }
-
-        return removed;
-    }
-
-    private async Task<int> ArchiveStaleAsync(CancellationToken cancellationToken)
-    {
-        var cutoff = time.GetUtcNow().AddDays(-options.ArchiveAfterDays);
-        var archived = 0;
-        foreach (var file in MemoryFiles().ToList())
-        {
-            var relative = "/" + Path.GetRelativePath(store.Root, file).Replace(Path.DirectorySeparatorChar, '/');
-            if (relative.StartsWith("/archive/", StringComparison.Ordinal) || !MemoryPath.TryParse(relative, out _, out _))
+            var normalized = Normalize(FrontmatterSerializer.Parse(content).Body);
+            if (normalized.Length == 0)
             {
                 continue;
             }
 
-            var (metadata, _) = FrontmatterSerializer.Parse(await File.ReadAllTextAsync(file, cancellationToken));
+            // Duplicates are only compared inside one scope owner so one agent's page never deletes another's.
+            var key = $"{path.Scope}:{path.Owner}:{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)))}";
+            if (!firstSeen.TryAdd(key, path.Value))
+            {
+                if (store.TryStage(PendingChangeKind.Delete, path, StewardName, content, string.Empty, $"duplicate of {firstSeen[key]}"))
+                {
+                    proposedPaths.Add(path.Value);
+                }
+            }
+        }
+
+        return (proposedPaths.Count, proposedPaths);
+    }
+
+    private async Task<int> ProposeArchivesAsync(HashSet<string> alreadyProposedForDeletion, CancellationToken cancellationToken)
+    {
+        var cutoff = time.GetUtcNow().AddDays(-options.ArchiveAfterDays);
+        var proposed = 0;
+        foreach (var (path, file) in LivePages())
+        {
+            if (alreadyProposedForDeletion.Contains(path.Value))
+            {
+                continue;
+            }
+
+            var content = await File.ReadAllTextAsync(file, cancellationToken);
+            var (metadata, _) = FrontmatterSerializer.Parse(content);
             var lastUsed = metadata.LastAccessed ?? metadata.Updated;
             if (lastUsed == DateTimeOffset.MinValue || lastUsed >= cutoff)
             {
                 continue;
             }
 
-            var target = Path.Combine(store.Root, "archive", relative.TrimStart('/').Replace('/', Path.DirectorySeparatorChar));
-            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-            File.Move(file, target, overwrite: true);
-            archived++;
+            if (store.TryStage(PendingChangeKind.Archive, path, StewardName, content, string.Empty, $"unused since {lastUsed:yyyy-MM-dd}"))
+            {
+                proposed++;
+            }
         }
 
-        return archived;
+        return proposed;
     }
 
-    private IEnumerable<string> MemoryFiles() => Directory.Exists(store.Root)
-        ? Directory.EnumerateFiles(store.Root, "*.md", SearchOption.AllDirectories)
-            .Where(f => !Path.GetRelativePath(store.Root, f).Replace(Path.DirectorySeparatorChar, '/').StartsWith(".history/", StringComparison.Ordinal))
-        : [];
+    /// <summary>Pages in the live wiki, in a stable order. History and archive are not live.</summary>
+    private IEnumerable<(MemoryPath Path, string File)> LivePages()
+    {
+        foreach (var file in Directory.EnumerateFiles(store.Root, "*.md", SearchOption.AllDirectories).Order(StringComparer.Ordinal))
+        {
+            if (MemoryPath.TryParse(RelativePath(file), out var path, out _))
+            {
+                yield return (path, file);
+            }
+        }
+    }
+
+    private string RelativePath(string file) => "/" + Path.GetRelativePath(store.Root, file).Replace(Path.DirectorySeparatorChar, '/');
 
     private static List<string> ExtractBullets(string text) =>
         [.. text.ReplaceLineEndings("\n").Split('\n').Select(line => line.Trim()).Where(line => line.StartsWith("- ", StringComparison.Ordinal)).Select(line => line[2..].Trim())];
+
+    private static string StripSource(string bullet) => SourceSuffixPattern().Replace(bullet, string.Empty).Trim();
 
     private static string Normalize(string text) => WhitespacePattern().Replace(text.ToLowerInvariant(), " ").Trim();
 
@@ -153,4 +193,7 @@ public sealed partial class ConsolidationJob(WikiStore store, MemoryOptions opti
 
     [GeneratedRegex(@"\s+", RegexOptions.CultureInvariant)]
     private static partial Regex WhitespacePattern();
+
+    [GeneratedRegex(@"\s*_\(from [^)]*\)_\s*$", RegexOptions.CultureInvariant)]
+    private static partial Regex SourceSuffixPattern();
 }
