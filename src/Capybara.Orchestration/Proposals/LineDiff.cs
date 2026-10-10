@@ -1,8 +1,12 @@
 using System.Text;
+using Capybara.Orchestration.Configuration;
 
 namespace Capybara.Orchestration.Proposals;
 
-/// <summary>Minimal unified diff (LCS over lines) for rendering proposals in the approval inbox.</summary>
+/// <summary>
+/// Minimal unified diff (LCS over lines) for rendering proposals in the approval inbox. Lines split on LF (CRLF is
+/// normalized); any other control or invisible character is rendered as a visible <c>&lt;U+XXXX&gt;</c> marker.
+/// </summary>
 public static class LineDiff
 {
     /// <summary>Inputs above this many lines per side are rejected rather than diffed.</summary>
@@ -52,7 +56,8 @@ public static class LineDiff
                 .Append(" +").Append(newStart + 1).Append(',').Append(hunk.Count(o => o.Kind != '-')).Append(" @@\n");
             foreach (var op in hunk)
             {
-                output.Append(op.Kind).Append(op.Text).Append('\n');
+                // Anything a terminal or parser would act on but a reviewer cannot see is shown as <U+XXXX>.
+                output.Append(op.Kind).Append(ReviewableText.Escape(op.Text)).Append('\n');
             }
 
             i = end;

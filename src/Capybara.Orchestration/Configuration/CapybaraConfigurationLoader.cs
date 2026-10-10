@@ -25,6 +25,7 @@ public static class CapybaraConfigurationLoader
 {
     private static readonly IDeserializer Yaml = new DeserializerBuilder()
         .WithNamingConvention(CamelCaseNamingConvention.Instance)
+        .WithDuplicateKeyChecking()
         .Build();
 
     public static CapybaraConfiguration Load(string root)
@@ -102,7 +103,9 @@ public static class CapybaraConfigurationLoader
             AgentYaml? yaml;
             try
             {
-                yaml = Yaml.Deserialize<AgentYaml?>(File.ReadAllText(file));
+                var text = File.ReadAllText(file);
+                YamlEditor.ThrowIfTooDeep(text);
+                yaml = Yaml.Deserialize<AgentYaml?>(text);
             }
             catch (YamlException ex)
             {
@@ -113,6 +116,12 @@ public static class CapybaraConfigurationLoader
             if (yaml is null)
             {
                 errors.Add($"{folder}/agent.yaml is empty.");
+                continue;
+            }
+
+            if (NullErrors($"{folder}/agent.yaml", yaml) is { Count: > 0 } nulls)
+            {
+                errors.AddRange(nulls);
                 continue;
             }
 
@@ -164,7 +173,7 @@ public static class CapybaraConfigurationLoader
                     Operations = g.Operations,
                     Constraints = g.Constraints.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<string>)kv.Value, StringComparer.Ordinal),
                 })],
-                EgressDomains = yaml.Egress,
+                EgressDomains = EgressDomain.Normalize(id.Value, yaml.Egress, errors),
                 Hidden = yaml.Hidden,
                 Host = string.IsNullOrWhiteSpace(yaml.Host) ? "systemd" : yaml.Host,
                 Provider = ToProvider(id, yaml.Provider, errors),
@@ -193,7 +202,16 @@ public static class CapybaraConfigurationLoader
 
         try
         {
-            return Yaml.Deserialize<List<T>?>(File.ReadAllText(file)) ?? [];
+            var text = File.ReadAllText(file);
+            YamlEditor.ThrowIfTooDeep(text);
+            var items = Yaml.Deserialize<List<T>?>(text) ?? [];
+            if (NullErrors(Path.GetFileName(file), items) is { Count: > 0 } nulls)
+            {
+                errors.AddRange(nulls);
+                return [];
+            }
+
+            return items;
         }
         catch (YamlException ex)
         {
@@ -201,6 +219,10 @@ public static class CapybaraConfigurationLoader
             return [];
         }
     }
+
+    /// <summary>An explicit YAML null where the model needs a value; see <see cref="YamlNulls"/>.</summary>
+    private static List<string> NullErrors(string file, object model) =>
+        [.. YamlNulls.Find(model).Select(path => $"{file}: '{path}' is null (~ or an empty value); omit the key or give it a value.")];
 
     private static PolicyRule? ToRule(RuleYaml yaml, List<string> errors)
     {
@@ -409,18 +431,27 @@ public static class CapybaraConfigurationLoader
     internal static bool TryParseDuration(string value, out TimeSpan duration)
     {
         duration = default;
-        if (value.Length < 2 || !double.TryParse(value[..^1], NumberStyles.Float, CultureInfo.InvariantCulture, out var amount) || amount <= 0)
+        if (value.Length < 2 || !double.TryParse(value[..^1], NumberStyles.Float, CultureInfo.InvariantCulture, out var amount)
+            || !double.IsFinite(amount) || amount <= 0)
         {
             return false;
         }
 
-        TimeSpan? parsed = value[^1] switch
+        TimeSpan? parsed;
+        try
         {
-            'm' => TimeSpan.FromMinutes(amount),
-            'h' => TimeSpan.FromHours(amount),
-            'd' => TimeSpan.FromDays(amount),
-            _ => null,
-        };
+            parsed = value[^1] switch
+            {
+                'm' => TimeSpan.FromMinutes(amount),
+                'h' => TimeSpan.FromHours(amount),
+                'd' => TimeSpan.FromDays(amount),
+                _ => null,
+            };
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
 
         duration = parsed ?? default;
         return parsed is not null;
