@@ -55,7 +55,7 @@ public sealed class MemoryEventConnectionTests(ApiFactory factory) : IClassFixtu
     [Fact]
     public async Task A_signed_webhook_is_accepted_and_routed_in_the_background_as_tainted_input()
     {
-        var client = factory.CreateDeviceClient(factory.PhoneToken);
+        var client = factory.CreateDeviceClient(factory.RelayToken);
         var alerts = factory.Services.GetRequiredService<FileAlertSink>();
 
         // Not JSON, so the router rejects it with an alert: proof that it was routed after the 202.
@@ -68,12 +68,16 @@ public sealed class MemoryEventConnectionTests(ApiFactory factory) : IClassFixtu
     [Fact]
     public async Task Webhooks_need_a_known_source_a_valid_signature_a_device_and_a_bounded_body()
     {
-        var client = factory.CreateDeviceClient(factory.PhoneToken);
+        var client = factory.CreateDeviceClient(factory.RelayToken);
 
         Assert.Equal(HttpStatusCode.Forbidden, (await client.SendAsync(Signed("github", "push", "{}", "wrong-secret"), Ct)).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await client.SendAsync(new HttpRequestMessage(HttpMethod.Post, new Uri("/api/events/github/push", UriKind.Relative)) { Content = new StringContent("{}") }, Ct)).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await client.SendAsync(Signed("gitlab", "push", "{}", ApiFactory.EventSecret), Ct)).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await factory.CreateDeviceClient(token: null).SendAsync(Signed("github", "push", "{}", ApiFactory.EventSecret), Ct)).StatusCode);
+
+        // People's phones do not post events; the desktop may.
+        Assert.Equal(HttpStatusCode.Forbidden, (await factory.CreateDeviceClient(factory.PhoneToken).SendAsync(Signed("github", "push", "{}", ApiFactory.EventSecret), Ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, (await factory.CreateDeviceClient(factory.DesktopToken).SendAsync(Signed("github", "push", "{}", ApiFactory.EventSecret), Ct)).StatusCode);
 
         var huge = new string('x', WebhookEventSource.MaxPayloadBytes + 1);
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, (await client.SendAsync(Signed("github", "push", huge, ApiFactory.EventSecret), Ct)).StatusCode);

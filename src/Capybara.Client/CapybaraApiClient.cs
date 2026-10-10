@@ -37,6 +37,10 @@ public sealed class CapybaraApiClient(HttpClient http)
 
     public Task SetModelAsync(string id, string model, CancellationToken cancellationToken = default) => SendAsync(HttpMethod.Put, $"/api/agents/{Id(id)}/model", new SetModelDto(model), cancellationToken);
 
+    /// <summary>Ends an incognito conversation: its transcript is deleted once a turn in flight on it finishes (FR-MEM-12).</summary>
+    public Task EndIncognitoConversationAsync(string id, string conversationId, CancellationToken cancellationToken = default) =>
+        SendAsync(HttpMethod.Delete, $"/api/agents/{Id(id)}/incognito/{Id(conversationId)}", null, cancellationToken);
+
     public Task<IReadOnlyList<ChatEntryDto>> GetChatHistoryAsync(string id, int limit = 100, CancellationToken cancellationToken = default) => GetAsync<IReadOnlyList<ChatEntryDto>>($"/api/agents/{Id(id)}/history?limit={limit}", cancellationToken);
 
     /// <summary>

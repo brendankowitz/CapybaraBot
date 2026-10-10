@@ -43,7 +43,7 @@ public sealed class ChatHistory(string directory)
 
     /// <summary>
     /// Records the reply to <paramref name="answered"/> and to every message <paramref name="joined"/> into the same turn,
-    /// so each sender finds a reply under its own id. Messages that reached the inbox some other way (a phone channel)
+    /// once, so each sender finds it under its own id. Messages that reached the inbox some other way (a phone channel)
     /// get their user line first.
     /// </summary>
     public void RecordReply(AgentId agent, FleetMessage answered, IReadOnlyList<FleetMessage> joined, string content, bool incognito, DateTimeOffset at)
@@ -59,10 +59,9 @@ public sealed class ChatHistory(string directory)
                 AddUserLocked(agent, log, message.Id, message.Body, incognito, message.CreatedAt);
             }
 
-            foreach (var message in messages)
-            {
-                AddLocked(agent, log, new ChatLine(at, AssistantRole, content, null, message.Id, incognito));
-            }
+            // One line answers them all: the first by InReplyTo, the joined ones by AlsoInReplyTo.
+            IReadOnlyList<string>? also = joined.Count == 0 ? null : [.. joined.Select(m => m.Id)];
+            AddLocked(agent, log, new ChatLine(at, AssistantRole, content, null, answered.Id, incognito, also));
         }
     }
 
@@ -72,7 +71,7 @@ public sealed class ChatHistory(string directory)
         var log = Load(agent);
         lock (log.Gate)
         {
-            return [.. log.Recent.Skip(Math.Max(0, log.Recent.Count - limit)).Select(l => new ChatEntryDto(l.At, l.Role, l.Content, l.Incognito, l.MessageId, l.InReplyTo))];
+            return [.. log.Recent.Skip(Math.Max(0, log.Recent.Count - limit)).Select(l => new ChatEntryDto(l.At, l.Role, l.Content, l.Incognito, l.MessageId, l.InReplyTo, l.AlsoInReplyTo))];
         }
     }
 
@@ -123,7 +122,7 @@ public sealed class ChatHistory(string directory)
 
     private string PathOf(AgentId agent) => Path.Combine(directory, $"{agent.Value}.jsonl");
 
-    private sealed record ChatLine(DateTimeOffset At, string Role, string Content, string? MessageId, string? InReplyTo, bool Incognito = false);
+    private sealed record ChatLine(DateTimeOffset At, string Role, string Content, string? MessageId, string? InReplyTo, bool Incognito = false, IReadOnlyList<string>? AlsoInReplyTo = null);
 
     private sealed class AgentLog
     {

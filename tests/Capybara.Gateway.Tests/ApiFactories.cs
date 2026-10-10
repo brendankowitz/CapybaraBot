@@ -70,10 +70,21 @@ public sealed class RealtimeFactory : ApiFactory
     }
 }
 
-/// <summary>Runtimes auto-start as fakes that answer every turn, so the inbox pumps run real turns end to end.</summary>
+/// <summary>
+/// Runtimes auto-start as fakes that answer every turn, so the inbox pumps run real turns end to end. The fakes keep
+/// incognito sessions like the CLI does (created by a turn, last active at the turn, gone when ended).
+/// </summary>
 public sealed class ReplyingFactory : ApiFactory
 {
     public ConcurrentQueue<AgentTurnRequest> Turns { get; } = new();
+
+    /// <summary>Incognito session id → when it was last active, across every agent's fake CLI.</summary>
+    public ConcurrentDictionary<string, DateTimeOffset> IncognitoSessions { get; } = new(StringComparer.Ordinal);
+
+    public ConcurrentQueue<string> Ended { get; } = new();
+
+    /// <summary>When set, every turn waits for it.</summary>
+    public TaskCompletionSource? TurnGate { get; set; }
 
     protected override IEnumerable<KeyValuePair<string, string?>> Settings() =>
         [.. base.Settings(), new("Capybara:Runtime:AutoStart", "true")];
@@ -82,24 +93,45 @@ public sealed class ReplyingFactory : ApiFactory
     {
         base.ConfigureServices(services);
         services.RemoveAll<AgentRuntimePool>();
-        services.AddSingleton(sp => new AgentRuntimePool(sp.GetRequiredService<AgentRegistry>(), agent => new ReplyingRuntime(agent.Id, Turns)));
+        services.AddSingleton(sp => new AgentRuntimePool(sp.GetRequiredService<AgentRegistry>(), agent => new ReplyingRuntime(agent.Id, this)));
     }
 
-    private sealed class ReplyingRuntime(AgentId agent, ConcurrentQueue<AgentTurnRequest> turns) : IAgentRuntime, ISupervisedRuntime
+    private sealed class ReplyingRuntime(AgentId agent, ReplyingFactory factory) : IAgentRuntime, ISupervisedRuntime
     {
         public AgentId Agent { get; } = agent;
 
-        public Task<TurnResult> RunTurnAsync(AgentTurnRequest request, CancellationToken cancellationToken)
+        public async Task<TurnResult> RunTurnAsync(AgentTurnRequest request, CancellationToken cancellationToken)
         {
-            turns.Enqueue(request);
-            return Task.FromResult(TurnResult.Completed($"reply to: {request.Prompt}", TurnEvidence.Empty));
+            factory.Turns.Enqueue(request);
+            if (request.Target.Kind == SessionKind.Incognito)
+            {
+                factory.IncognitoSessions[request.Target.SessionIdFor(Agent)] = factory.Time.GetUtcNow();
+            }
+
+            if (factory.TurnGate is { } gate)
+            {
+                await gate.Task.WaitAsync(cancellationToken);
+            }
+
+            return TurnResult.Completed($"reply to: {request.Prompt}", TurnEvidence.Empty);
         }
 
         public Task<TurnResult?> SteerAsync(string prompt, MessageOrigin origin, CancellationToken cancellationToken) => Task.FromResult<TurnResult?>(null);
 
         public Task SetModelAsync(string model, CancellationToken cancellationToken) => Task.CompletedTask;
 
-        public Task EndSessionAsync(TurnTarget target, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task EndSessionAsync(TurnTarget target, CancellationToken cancellationToken)
+        {
+            var id = target.SessionIdFor(Agent);
+            factory.IncognitoSessions.TryRemove(id, out _);
+            factory.Ended.Enqueue(id);
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyList<IncognitoSessionInfo>> ListIncognitoSessionsAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<IncognitoSessionInfo>>([.. factory.IncognitoSessions
+                .Where(s => SessionIds.TryParseIncognito(s.Key, out var owner, out _) && owner == Agent)
+                .Select(s => new IncognitoSessionInfo(SessionIds.TryParseIncognito(s.Key, out _, out var conversation) ? conversation : s.Key, s.Value))]);
 
         public Task<ConsultReply> ConsultAsync(string sessionId, string question, Envelope envelope, CancellationToken cancellationToken) =>
             throw new NotSupportedException();
@@ -117,7 +149,6 @@ public sealed class ReplyingFactory : ApiFactory
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }
-
 /// <summary>Records every request the client sends and what came back.</summary>
 public sealed class RecordingHandler : DelegatingHandler
 {

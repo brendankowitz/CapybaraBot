@@ -1,8 +1,10 @@
 using System.Security.Cryptography;
 using System.Text;
 using Capybara.Gateway.Configuration;
+using Capybara.Gateway.Endpoints;
 using Capybara.Gateway.Pwa;
 using Capybara.Gateway.Realtime;
+using Capybara.Policy.Safety;
 using Microsoft.Extensions.Options;
 
 namespace Capybara.Gateway.Security;
@@ -15,7 +17,8 @@ namespace Capybara.Gateway.Security;
 /// Two narrow exceptions, both decided here and nowhere else: the PWA shell is served to the tailnet identity without a
 /// token (<see cref="PwaStaticAssetPolicy"/>; it holds no data), and the broker posts consent requests to
 /// <see cref="BrokerConsentPath"/> with the shared broker key instead of a device token (FR-CON-08). The broker key
-/// authenticates that one route only, and a device token never authenticates it.
+/// authenticates that one route only, and a device token never authenticates it. A device configured as
+/// <see cref="ControlSurface.EventRelay"/> (the public webhook relay) reaches only the event ingress (FR-RTN-07).
 /// </remarks>
 public sealed partial class TailnetAuthenticationMiddleware(RequestDelegate next, IOptions<GatewayOptions> options, BrokerCallerKey brokerKey, ILogger<TailnetAuthenticationMiddleware> logger)
 {
@@ -59,6 +62,14 @@ public sealed partial class TailnetAuthenticationMiddleware(RequestDelegate next
 
         if (device is not null)
         {
+            // An event relay is not a person: it may reach the event ingress and nothing else (hub, shell, any API).
+            if (device.Surface == ControlSurface.EventRelay && !EventRelayEndpoint.Allows(context))
+            {
+                LogRejected(logger, context.Request.Path, "event relay token outside the event ingress");
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return;
+            }
+
             context.SetDevice(device);
         }
 

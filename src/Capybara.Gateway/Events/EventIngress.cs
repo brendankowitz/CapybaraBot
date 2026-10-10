@@ -34,63 +34,111 @@ public sealed class EventIngressSecrets(IReadOnlyDictionary<string, byte[]> secr
 /// 202 as soon as the event is queued, and a long routine run never holds a webhook connection open.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Events are routed one at a time, in arrival order. The queue is bounded (<see cref="Capacity"/>); when it is full the
-/// endpoint answers 503 so the sender retries, rather than the gateway buffering without limit. Events still queued
-/// at shutdown are not routed (the senders' retries cover them); a routing failure raises an alert.
+/// endpoint answers 503 so the sender retries, rather than the gateway buffering without limit. A routing failure raises
+/// an alert.
+/// </para>
+/// <para>
+/// A 202 tells the sender the event was taken, so it will not resend it. On shutdown the queue is closed and drained for
+/// up to <see cref="DrainTimeout"/> (wall-clock time); events still queued after that, and one cut off mid-route, are lost,
+/// and their number is logged and raised as an alert so they can be replayed from the source.
+/// </para>
 /// </remarks>
 public sealed partial class EventIngressWorker(EventRouter router, IAlertSink alerts, TimeProvider time, ILogger<EventIngressWorker> logger) : BackgroundService
 {
     public const int Capacity = 64;
     public const string FailedAlertKind = "routine.event-failed";
+    public const string DroppedAlertKind = "routine.events-dropped";
+
+    public static readonly TimeSpan DrainTimeout = TimeSpan.FromSeconds(5);
 
     private readonly Channel<RoutineEventPayload> _queue = Channel.CreateBounded<RoutineEventPayload>(
         new BoundedChannelOptions(Capacity) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
 
-    /// <summary>Queues a verified, tainted event; <see langword="false"/> when the queue is full.</summary>
+    // Cancelled DrainTimeout after shutdown begins; until then queued events are still routed. Not the host's stopping
+    // token, which is cancelled the moment shutdown begins.
+    private readonly CancellationTokenSource _drain = new();
+
+    /// <summary>Queues a verified, tainted event; <see langword="false"/> when the queue is full or shutting down.</summary>
     public bool TryEnqueue(RoutineEventPayload payload) => _queue.Writer.TryWrite(payload);
+
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        _queue.Writer.TryComplete();
+        _drain.CancelAfter(DrainTimeout);
+        await base.StopAsync(cancellationToken);
+    }
+
+    public override void Dispose()
+    {
+        _drain.Dispose();
+        base.Dispose();
+    }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        var drain = _drain.Token;
+        var cutOff = 0;
         try
         {
-            await foreach (var payload in _queue.Reader.ReadAllAsync(stoppingToken))
+            await foreach (var payload in _queue.Reader.ReadAllAsync(drain))
             {
                 try
                 {
-                    await router.RouteAsync(payload, stoppingToken);
+                    await router.RouteAsync(payload, drain);
                 }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                catch (OperationCanceledException) when (drain.IsCancellationRequested)
                 {
-                    return;
+                    cutOff = 1;
+                    break;
                 }
 #pragma warning disable CA1031 // One event that fails to route must not stop the ones behind it.
                 catch (Exception ex)
 #pragma warning restore CA1031
                 {
                     LogRouteFailed(logger, ex, payload.Source, payload.EventType);
-                    await AlertAsync(payload, ex);
+                    await AlertAsync(new Alert(FailedAlertKind, AlertSeverity.Warning, $"Routing the {payload.Source}:{payload.EventType} event failed ({ex.GetType().Name}).", time.GetUtcNow()));
                 }
             }
         }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (drain.IsCancellationRequested)
         {
+        }
+
+        var dropped = cutOff;
+        while (_queue.Reader.TryRead(out _))
+        {
+            dropped++;
+        }
+
+        if (dropped > 0)
+        {
+            LogDropped(logger, dropped);
+            await AlertAsync(new Alert(DroppedAlertKind, AlertSeverity.Warning, $"{dropped} accepted webhook event(s) were not routed before capybarad stopped; replay them from the source.", time.GetUtcNow()));
         }
     }
 
-    private async Task AlertAsync(RoutineEventPayload payload, Exception failure)
+    private async Task AlertAsync(Alert alert)
     {
         try
         {
-            await alerts.PublishAsync(new Alert(FailedAlertKind, AlertSeverity.Warning, $"Routing the {payload.Source}:{payload.EventType} event failed ({failure.GetType().Name}).", time.GetUtcNow()), CancellationToken.None);
+            await alerts.PublishAsync(alert, CancellationToken.None);
         }
 #pragma warning disable CA1031 // Already logged; the queue keeps going.
         catch (Exception ex)
 #pragma warning restore CA1031
         {
-            LogRouteFailed(logger, ex, payload.Source, payload.EventType);
+            LogAlertFailed(logger, ex, alert.Kind);
         }
     }
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Routing the {Source}:{EventType} event failed")]
     private static partial void LogRouteFailed(ILogger logger, Exception exception, string source, string eventType);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "{Count} accepted webhook events were not routed before shutdown")]
+    private static partial void LogDropped(ILogger logger, int count);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Could not publish alert {Kind}")]
+    private static partial void LogAlertFailed(ILogger logger, Exception exception, string kind);
 }

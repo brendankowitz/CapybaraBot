@@ -50,6 +50,8 @@ public sealed class ContractTests
         Called(nameof(api.MarkAgentReadAsync));
         await api.SetModelAsync("ea", "gpt-5-mini", Ct);
         Called(nameof(api.SetModelAsync));
+        await api.EndIncognitoConversationAsync("ea", "conv-contract", Ct);
+        Called(nameof(api.EndIncognitoConversationAsync));
         var history = await api.GetChatHistoryAsync("ea", 100, Ct);
         Called(nameof(api.GetChatHistoryAsync));
         Assert.Contains(history, e => e is { Role: "user", Content: "hello" } && e.MessageId == turn.MessageId);

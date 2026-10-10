@@ -29,9 +29,17 @@ public static class MemoryEndpoints
                 return Results.BadRequest(error);
             }
 
-            return await admin.ReadPageAsync(MemoryAdminPrincipal.Human, parsed.Value, cancellationToken) is { } content
-                ? Results.Ok(new MemoryPageDto(parsed.Value, content))
-                : Results.NotFound();
+            try
+            {
+                return await admin.ReadPageAsync(MemoryAdminPrincipal.Human, parsed.Value, cancellationToken) is { } content
+                    ? Results.Ok(new MemoryPageDto(parsed.Value, content))
+                    : Results.NotFound();
+            }
+            catch (MemoryAccessDeniedException ex)
+            {
+                // A path the store refuses (symlinks, escapes).
+                return Results.BadRequest(ex.Message);
+            }
         });
 
         memory.MapPut("/page", async (SaveMemoryPageDto request, MemoryAdmin admin, CancellationToken cancellationToken) =>
@@ -65,7 +73,14 @@ public static class MemoryEndpoints
                 return Results.BadRequest(error);
             }
 
-            return await admin.DeletePageAsync(MemoryAdminPrincipal.Human, parsed.Value, cancellationToken) ? Results.NoContent() : Results.NotFound();
+            try
+            {
+                return await admin.DeletePageAsync(MemoryAdminPrincipal.Human, parsed.Value, cancellationToken) ? Results.NoContent() : Results.NotFound();
+            }
+            catch (MemoryAccessDeniedException ex)
+            {
+                return Results.BadRequest(ex.Message);
+            }
         });
 
         memory.MapGet("/pending", async (MemoryAdmin admin) =>

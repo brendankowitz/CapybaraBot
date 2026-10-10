@@ -37,8 +37,15 @@ public sealed record SetModelDto(string Model);
 /// <summary>One line of an agent's per-agent chat history. <see cref="Role"/> is <c>user</c> or <c>assistant</c>.</summary>
 // MessageId: on user entries, the inbox message id (the same value the turn response returns as MessageId). InReplyTo: on assistant
 // entries, the MessageId of the user entry they answer; an agent-initiated message has none. A multi-part reply is several
-// assistant entries with the same InReplyTo, appended together, in order.
-public sealed record ChatEntryDto(DateTimeOffset At, string Role, string Content, bool Incognito = false, string? MessageId = null, string? InReplyTo = null);
+// assistant entries with the same InReplyTo, appended together, in order. AlsoInReplyTo: when one turn answered several user
+// messages (sent while it ran), the ids of the others; the entry is the reply to each of them, stored once.
+public sealed record ChatEntryDto(DateTimeOffset At, string Role, string Content, bool Incognito = false, string? MessageId = null, string? InReplyTo = null, IReadOnlyList<string>? AlsoInReplyTo = null)
+{
+    /// <summary>Whether this is an assistant entry answering <paramref name="messageId"/>.</summary>
+    public bool Answers(string messageId) =>
+        Role == "assistant"
+        && (string.Equals(InReplyTo, messageId, StringComparison.Ordinal) || (AlsoInReplyTo?.Contains(messageId, StringComparer.Ordinal) ?? false));
+}
 
 public sealed record RuntimeStatusDto(string Id, string State, string? Reason = null);
 

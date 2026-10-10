@@ -78,6 +78,7 @@ public static class AgentEndpoints
             AgentRegistry registry,
             IInboxStore inbox,
             ChatHistory chat,
+            IncognitoSessionReaper incognito,
             RoutineAutoPauser autoPauser,
             TimeProvider time,
             CancellationToken cancellationToken) =>
@@ -93,15 +94,25 @@ public static class AgentEndpoints
             }
 
             string? session = null;
+            string? oneShot = null;
             if (request.Incognito)
             {
-                var conversation = request.ConversationId ?? Guid.NewGuid().ToString("N");
-                if (!IsConversationId(conversation))
+                if (request.ConversationId is { } conversation)
                 {
-                    return Results.BadRequest("conversationId is 1-80 letters, digits, '-' or '_'");
-                }
+                    if (!IsConversationId(conversation))
+                    {
+                        return Results.BadRequest("conversationId is 1-80 letters, digits, '-' or '_'");
+                    }
 
-                session = SessionIds.Incognito(agent, conversation);
+                    session = SessionIds.Incognito(agent, conversation);
+                }
+                else
+                {
+                    // No client can continue a conversation whose id it never saw: its session ends with this turn.
+                    oneShot = Guid.NewGuid().ToString("N");
+                    session = SessionIds.Incognito(agent, oneShot);
+                    incognito.EndAfterTurn(agent, oneShot);
+                }
             }
 
             var message = new FleetMessage
@@ -113,7 +124,16 @@ public static class AgentEndpoints
                 Taint = Taint.Clean,
                 CreatedAt = time.GetUtcNow(),
             };
-            await inbox.EnqueueAsync(message, cancellationToken);
+            try
+            {
+                await inbox.EnqueueAsync(message, cancellationToken);
+            }
+            catch when (oneShot is not null)
+            {
+                incognito.Cancel(agent, oneShot);
+                throw;
+            }
+
             chat.RecordUser(agent, message.Id, message.Body, request.Incognito, message.CreatedAt);
 
             // Talking to an agent keeps its routines from auto-pausing (FR-RTN-06); only a user request may say so.
@@ -134,6 +154,23 @@ public static class AgentEndpoints
             }
 
             await runtime.SetModelAsync(request.Model, cancellationToken);
+            return Results.NoContent();
+        });
+
+        // Ends an incognito conversation: its CLI session (the transcript) is deleted once a turn in flight finishes (FR-MEM-12).
+        group.MapDelete("/{id}/incognito/{conversationId}", (string id, string conversationId, AgentRegistry registry, IncognitoSessionReaper incognito) =>
+        {
+            if (Resolve(registry, id) is not { } agent)
+            {
+                return Results.NotFound();
+            }
+
+            if (!IsConversationId(conversationId))
+            {
+                return Results.BadRequest("conversationId is 1-80 letters, digits, '-' or '_'");
+            }
+
+            incognito.End(agent, conversationId);
             return Results.NoContent();
         });
 

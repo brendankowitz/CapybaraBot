@@ -28,8 +28,12 @@ public sealed class NotificationSettings(string path, NotificationRouter router,
             return options;
         }
 
-        var saved = JsonSerializer.Deserialize<Saved>(File.ReadAllBytes(path), Json)
-            ?? throw new InvalidDataException($"Notification settings file '{path}' is empty.");
+        var saved = JsonSerializer.Deserialize<Saved>(File.ReadAllBytes(path), Json);
+        if (saved?.Agents is null || saved.QuietHours is null)
+        {
+            throw new InvalidDataException($"Notification settings file '{path}' is missing its agents or quiet hours.");
+        }
+
         var toggles = new Dictionary<AgentId, bool>(options.AgentNotificationToggles);
         foreach (var (agent, enabled) in saved.Agents)
         {

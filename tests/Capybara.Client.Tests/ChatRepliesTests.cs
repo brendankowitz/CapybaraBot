@@ -13,6 +13,25 @@ public sealed class ChatRepliesTests
     private static ChatEntryDto Assistant(string content, string? inReplyTo = null) => new(T, "assistant", content, InReplyTo: inReplyTo);
 
     [Fact]
+    public void One_reply_to_several_joined_messages_is_found_under_each_id_and_shown_once()
+    {
+        ChatEntryDto[] history =
+        [
+            User("first", "m1"), User("second", "m2"),
+            new(T, "assistant", "one answer", InReplyTo: "m1", AlsoInReplyTo: ["m2"]),
+        ];
+
+        Assert.Equal(["one answer"], ChatReplies.To(history, "m1").Select(e => e.Content));
+        Assert.Equal(["one answer"], ChatReplies.To(history, "m2").Select(e => e.Content));
+        Assert.Empty(ChatReplies.To(history, "m3"));
+
+        // The id-less fallback still finds its anchor, although the deserialized list is a new instance every poll.
+        var anchor = history[^1] with { AlsoInReplyTo = ["m2"] };
+        Assert.Empty(ChatReplies.AfterSnapshot(history, anchor));
+        Assert.Equal(["one answer"], ChatReplies.AfterSnapshot(history, history[0] with { }).Select(e => e.Content));
+    }
+
+    [Fact]
     public void A_repeated_prompt_gets_its_own_reply_not_the_previous_one()
     {
         ChatEntryDto[] history =

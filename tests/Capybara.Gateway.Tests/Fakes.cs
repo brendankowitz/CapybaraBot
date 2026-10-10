@@ -179,6 +179,9 @@ public sealed class FakeSupervisedRuntime(Contracts.Agents.AgentId agent) : Runt
 
     public Task EndSessionAsync(Runtime.Copilot.Hosting.TurnTarget target, CancellationToken cancellationToken) => Task.CompletedTask;
 
+    public Task<IReadOnlyList<Runtime.Copilot.Hosting.IncognitoSessionInfo>> ListIncognitoSessionsAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<Runtime.Copilot.Hosting.IncognitoSessionInfo>>([]);
+
     public Task<Orchestration.Coordination.ConsultReply> ConsultAsync(string sessionId, string question, Contracts.Messaging.Envelope envelope, CancellationToken cancellationToken) =>
         throw new NotSupportedException("The fake runtime does not answer consults.");
 

@@ -5,8 +5,8 @@ namespace Capybara.Gateway.Endpoints;
 
 /// <summary>
 /// <c>POST /api/events/{source}/{type}</c>: webhook events for event routines (FR-RTN-01, FR-RTN-07). Reachable only
-/// with a device token over the tailnet (like every <c>/api</c> route, so a public sender needs a relay on the tailnet),
-/// and only with a valid HMAC-SHA256 of the body (<c>X-Hub-Signature-256: sha256=…</c>) under the source's own secret.
+/// over the tailnet with an event-relay (or desktop) device token, so a public sender needs a relay on the tailnet that
+/// holds an <see cref="Policy.Safety.ControlSurface.EventRelay"/> token and nothing else; and only with a valid HMAC-SHA256 of the body (<c>X-Hub-Signature-256: sha256=…</c>) under the source's own secret.
 /// The payload is capped and always tainted, and routing happens off the request (<see cref="EventIngressWorker"/>).
 /// </summary>
 public static class EventIngressEndpoints
@@ -50,7 +50,7 @@ public static class EventIngressEndpoints
             return queue.TryEnqueue(WebhookEventSource.CreatePayload(source, type, payload))
                 ? Results.Accepted()
                 : Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Too many events are waiting; retry later.");
-        }).WithTags("Events");
+        }).ForEventSenders().WithTags("Events");
 
         return api;
     }

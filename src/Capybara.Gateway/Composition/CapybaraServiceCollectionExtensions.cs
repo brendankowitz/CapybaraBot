@@ -170,6 +170,11 @@ public static class CapybaraServiceCollectionExtensions
             // The chat records replies from the inbox pumps, so it too must listen before they start (FR-CLI-02).
             services.AddSingleton(new ChatHistory(state.Chat));
             services.AddHostedService<ChatHistoryRecorder>();
+
+            // Incognito sessions end with their conversation (FR-MEM-12); also listens to the pumps.
+            services.AddSingleton(configuration.GetSection(IncognitoOptions.SectionName).Get<IncognitoOptions>() ?? new IncognitoOptions());
+            services.AddSingleton<IncognitoSessionReaper>();
+            services.AddHostedService(sp => sp.GetRequiredService<IncognitoSessionReaper>());
         }
 
         AddRuntime(services, configuration, runtime, hosting, host, state);
@@ -433,7 +438,8 @@ public static class CapybaraServiceCollectionExtensions
             var vapid = new WebPushVapidOptions(settings.WebPush.Subject, publicKey, privateKey);
             services.AddSingleton(new WebPushPublicKey(publicKey));
             // Push endpoint URLs are capability paths: never log them.
-            services.AddHttpClient("capybara-webpush").RemoveAllLoggers();
+            // Never follow a redirect: the push service is the only host a subscription may reach.
+            services.AddHttpClient("capybara-webpush").RemoveAllLoggers().ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false });
             services.AddSingleton<INotificationChannel>(sp => new WebPushChannel(
                 sp.GetRequiredService<IHttpClientFactory>().CreateClient("capybara-webpush"),
                 sp.GetRequiredService<WebPushSubscriptionStore>(),

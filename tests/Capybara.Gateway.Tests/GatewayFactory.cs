@@ -37,6 +37,9 @@ public class GatewayFactory : WebApplicationFactory<Program>
 
     public string DesktopToken { get; } = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
 
+    /// <summary>The public webhook relay's token: it may only post events.</summary>
+    public string RelayToken { get; } = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
+
     public string ConfigRoot => Path.Combine(_root.Path, "config");
 
     public string StateRoot => Path.Combine(_root.Path, "state");
@@ -95,6 +98,9 @@ public class GatewayFactory : WebApplicationFactory<Program>
         builder.UseSetting("Capybara:Gateway:Devices:1:Name", "desktop");
         builder.UseSetting("Capybara:Gateway:Devices:1:Surface", "Desktop");
         builder.UseSetting("Capybara:Gateway:Devices:1:Sha256", TailnetAuthenticationMiddleware.HashToken(DesktopToken));
+        builder.UseSetting("Capybara:Gateway:Devices:2:Name", "webhook-relay");
+        builder.UseSetting("Capybara:Gateway:Devices:2:Surface", "EventRelay");
+        builder.UseSetting("Capybara:Gateway:Devices:2:Sha256", TailnetAuthenticationMiddleware.HashToken(RelayToken));
         foreach (var (key, value) in Settings())
         {
             builder.UseSetting(key, value);

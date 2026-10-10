@@ -305,6 +305,22 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         }
     }
 
+    public async Task<IReadOnlyList<IncognitoSessionInfo>> ListIncognitoSessionsAsync(CancellationToken cancellationToken)
+    {
+        var client = _client ?? throw new InvalidOperationException($"Runtime for {_agent.Id} is not running.");
+        var sessions = await client.ListSessionsAsync(null, cancellationToken);
+        var incognito = new List<IncognitoSessionInfo>();
+        foreach (var session in sessions)
+        {
+            if (SessionIds.TryParseIncognito(session.SessionId, out var owner, out var conversation) && owner == _agent.Id)
+            {
+                incognito.Add(new IncognitoSessionInfo(conversation, session.ModifiedTime));
+            }
+        }
+
+        return incognito;
+    }
+
     /// <summary>Answers one <c>ask_agent</c> question in a fresh, read-only, ephemeral session.</summary>
     public async Task<ConsultReply> ConsultAsync(string sessionId, string question, Envelope envelope, CancellationToken cancellationToken)
     {

@@ -34,6 +34,17 @@ public sealed class AgentChatTests : PwaTestContext
     }
 
     [Fact]
+    public void Leaving_incognito_ends_the_conversation_on_the_server()
+    {
+        var cut = RenderChat();
+        cut.Find("input[type=checkbox]").Change(true);
+        Assert.DoesNotContain(Gateway.Requests, r => r.Method == "DELETE");
+        cut.Find("input[type=checkbox]").Change(false);
+
+        cut.WaitForAssertion(() => Assert.Contains(Gateway.Requests, r => r.Method == "DELETE" && r.Path.StartsWith("/api/agents/ea/incognito/", StringComparison.Ordinal)));
+    }
+
+    [Fact]
     public void A_completed_turn_shows_the_reply()
     {
         var cut = RenderChat();

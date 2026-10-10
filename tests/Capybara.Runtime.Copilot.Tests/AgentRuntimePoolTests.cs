@@ -43,6 +43,8 @@ public sealed class AgentRuntimePoolTests
 
         public Task EndSessionAsync(TurnTarget target, CancellationToken cancellationToken) => _inner.EndSessionAsync(target, cancellationToken);
 
+        public Task<IReadOnlyList<IncognitoSessionInfo>> ListIncognitoSessionsAsync(CancellationToken cancellationToken) => _inner.ListIncognitoSessionsAsync(cancellationToken);
+
         public Task<Orchestration.Coordination.ConsultReply> ConsultAsync(string sessionId, string question, Contracts.Messaging.Envelope envelope, CancellationToken cancellationToken) =>
             _inner.ConsultAsync(sessionId, question, envelope, cancellationToken);
 
