@@ -21,7 +21,7 @@ public sealed class TelegramUpdateHandler(ConversationalChannelGuard guard, IInb
             return;
         }
 
-        if (!root.TryGetProperty("update_id", out var updateId) || !updateId.TryGetInt64(out var id))
+        if (!root.TryGetProperty("update_id", out var updateId) || updateId.ValueKind != JsonValueKind.Number || !updateId.TryGetInt64(out var id))
         {
             throw new InvalidDataException("Telegram update has no numeric update_id.");
         }

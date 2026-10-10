@@ -15,7 +15,8 @@ namespace Capybara.Channels.Telegram;
 /// The offset only advances past an update once the handler has accepted it (or it was dropped by the allowlist), so a
 /// failing inbox sink gets the same message again on the next poll: no inbox message is lost (NFR-02). An update is skipped
 /// as poison only after it has failed continuously for <see cref="TelegramOptions.PoisonMessageWindow"/> and at least
-/// <see cref="MaxDeliveryAttempts"/> times, and an alert is raised; so a brief inbox outage loses nothing, yet one bad
+/// <see cref="MaxDeliveryAttempts"/> times ("continuously" = consecutive handler failures; a getUpdates outage in between
+/// restarts the count), and an alert is raised; so a brief inbox outage loses nothing, yet one bad
 /// update cannot wedge the loop forever. Delivery is at-least-once; the sink dedupes on the message id.
 /// Only a real shutdown stops the loop: transport timeouts (also <see cref="OperationCanceledException"/>) back off and retry.
 /// </remarks>
@@ -35,6 +36,7 @@ public sealed partial class TelegramPollingService(
     private long _failingUpdateId = -1;
     private int _failedAttempts;
     private DateTimeOffset _failingSince;
+    private DateTimeOffset _lastFailureAt;
 
     /// <summary>The next <c>offset</c> to request: one past the last update fully handled.</summary>
     public long Offset => Interlocked.Read(ref _offset);
@@ -60,9 +62,18 @@ public sealed partial class TelegramPollingService(
         }
 
         var handled = 0;
+        var unidentifiable = 0;
         foreach (var update in result.EnumerateArray())
         {
-            var updateId = update.GetProperty("update_id").GetInt64();
+            // Without a numeric update_id an update cannot be acknowledged or tracked, so it can't follow the retry path.
+            // Skip it: a later update's offset confirms it, and if nothing follows it the batch fails below (with backoff).
+            if (!update.TryGetProperty("update_id", out var idElement) || idElement.ValueKind != JsonValueKind.Number || !idElement.TryGetInt64(out var updateId))
+            {
+                unidentifiable++;
+                LogUpdateUnidentifiable(_logger);
+                continue;
+            }
+
             try
             {
                 await handler.HandleAsync(update, cancellationToken);
@@ -70,17 +81,7 @@ public sealed partial class TelegramPollingService(
             catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
                 var now = timeProvider.GetUtcNow();
-                if (updateId == _failingUpdateId)
-                {
-                    _failedAttempts++;
-                }
-                else
-                {
-                    _failingUpdateId = updateId;
-                    _failedAttempts = 1;
-                    _failingSince = now;
-                }
-
+                RecordHandlerFailure(updateId, now);
                 if (_failedAttempts < MaxDeliveryAttempts || now - _failingSince < options.PoisonMessageWindow)
                 {
                     LogUpdateFailed(_logger, updateId, _failedAttempts, now - _failingSince, ex);
@@ -95,7 +96,35 @@ public sealed partial class TelegramPollingService(
             handled++;
         }
 
+        if (handled == 0 && unidentifiable > 0)
+        {
+            throw new InvalidDataException($"Telegram getUpdates returned {unidentifiable} update(s) without a numeric update_id.");
+        }
+
         return handled;
+    }
+
+    /// <summary>
+    /// Counts consecutive failures of one update. The poison window must measure continuous handler failure, so the count
+    /// restarts for a different update, and when the gap since the last failure shows the retry loop was interrupted
+    /// (a getUpdates/network outage makes no handler attempts): otherwise an old failure plus a few quick ones after
+    /// recovery would drop a message after seconds of real inbox outage.
+    /// </summary>
+    private void RecordHandlerFailure(long updateId, DateTimeOffset now)
+    {
+        var interrupted = now - _lastFailureAt > options.MaxRetryDelay * 2;
+        if (updateId == _failingUpdateId && !interrupted)
+        {
+            _failedAttempts++;
+        }
+        else
+        {
+            _failingUpdateId = updateId;
+            _failedAttempts = 1;
+            _failingSince = now;
+        }
+
+        _lastFailureAt = now;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -164,4 +193,7 @@ public sealed partial class TelegramPollingService(
 
     [LoggerMessage(4, LogLevel.Error, "Publishing the skipped-update alert for Telegram update {UpdateId} failed.")]
     private static partial void LogAlertFailed(ILogger logger, long updateId, Exception exception);
+
+    [LoggerMessage(5, LogLevel.Error, "Telegram returned an update without a numeric update_id; it cannot be tracked and is skipped.")]
+    private static partial void LogUpdateUnidentifiable(ILogger logger);
 }

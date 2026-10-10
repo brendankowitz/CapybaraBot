@@ -182,29 +182,75 @@ public sealed class ChannelAdapterTests
     {
         var update = """{"update_id":5,"message":{"from":{"id":123},"text":"boom"}}""";
         var body = $$"""{"ok":true,"result":[{{update}}]}""";
-        var attempts = TelegramPollingService.MaxDeliveryAttempts;
-        var handler = new QueueHandler(Enumerable.Repeat<object>(body, attempts + 1).Append("""{"ok":true,"result":[]}""").ToArray());
+        var handler = new QueueHandler(Enumerable.Repeat<object>(body, 11).Append("""{"ok":true,"result":[]}""").ToArray());
         var sink = new RecordingInboundSink { ThrowOn = "boom" };
         var alerts = new InMemoryAlertSink();
         var time = new FakeTimeProvider(Noon);
         var service = NewPoller(handler, sink, time, alerts);
 
-        // Many attempts inside a short outage never skip: the window has not elapsed.
-        for (var attempt = 1; attempt <= attempts; attempt++)
+        // Retries at the service's backoff cadence (<= MaxRetryDelay): ten attempts over nine minutes never skip.
+        for (var attempt = 1; attempt <= 10; attempt++)
         {
             await Assert.ThrowsAsync<InvalidOperationException>(() => service.PollOnceAsync(TestContext.Current.CancellationToken));
-            time.Advance(TimeSpan.FromSeconds(30));
+            time.Advance(TimeSpan.FromSeconds(60));
         }
 
         Assert.Equal(0, service.Offset);
         Assert.Empty(alerts.Recent);
 
-        time.Advance(TimeSpan.FromMinutes(10));
+        // The eleventh attempt lands ten minutes after the first failure: now it is poison.
         Assert.Equal(1, await service.PollOnceAsync(TestContext.Current.CancellationToken));
         Assert.Equal(6, service.Offset);
         var alert = Assert.Single(alerts.Recent);
         Assert.Equal("telegram.inbound_skipped", alert.Kind);
         Assert.DoesNotContain("boom", alert.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Polling_network_outage_between_failures_restarts_the_poison_window()
+    {
+        var failing = """{"ok":true,"result":[{"update_id":5,"message":{"from":{"id":123},"text":"boom"}}]}""";
+        var handler = new QueueHandler(failing, HttpStatusCode.BadGateway, failing, failing, failing, failing, failing);
+        var alerts = new InMemoryAlertSink();
+        var time = new FakeTimeProvider(Noon);
+        var service = NewPoller(handler, new RecordingInboundSink { ThrowOn = "boom" }, time, alerts);
+        var ct = TestContext.Current.CancellationToken;
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.PollOnceAsync(ct));
+        await Assert.ThrowsAsync<HttpRequestException>(() => service.PollOnceAsync(ct));
+        time.Advance(TimeSpan.FromMinutes(11));
+
+        // After recovery the inbox is down for only seconds: five quick failures must not drop the message.
+        for (var attempt = 1; attempt <= 5; attempt++)
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => service.PollOnceAsync(ct));
+            time.Advance(TimeSpan.FromSeconds(2));
+        }
+
+        Assert.Equal(0, service.Offset);
+        Assert.Empty(alerts.Recent);
+    }
+
+    [Fact]
+    public async Task Polling_skips_an_update_without_update_id_but_still_delivers_the_rest()
+    {
+        var handler = new QueueHandler("""{"ok":true,"result":[{"message":{"from":{"id":123},"text":"no id"}},{"update_id":8,"message":{"from":{"id":123},"text":"ok"}}]}""");
+        var sink = new RecordingInboundSink();
+        var service = NewPoller(handler, sink);
+
+        Assert.Equal(1, await service.PollOnceAsync(TestContext.Current.CancellationToken));
+
+        Assert.Equal(9, service.Offset);
+        Assert.Equal("ok", Assert.Single(sink.Messages).Text);
+    }
+
+    [Fact]
+    public async Task Polling_fails_loudly_instead_of_hot_looping_when_only_unidentifiable_updates_arrive()
+    {
+        var service = NewPoller(new QueueHandler("""{"ok":true,"result":[{"update_id":"x","message":{"text":"bad"}}]}"""), new RecordingInboundSink());
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => service.PollOnceAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(0, service.Offset);
     }
 
     [Fact]
