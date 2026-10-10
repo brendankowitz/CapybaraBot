@@ -260,7 +260,8 @@ public sealed class ChainContinuationTests
         using (var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct))
         {
             var run = pump.RunAsync(stop.Token);
-            await Eventually.TrueAsync(async () => !runtime.Requests.IsEmpty && (await f.Inbox.ListAsync(Ea.Id, Ct)).Count == 0, "notice handled");
+            // Counts files only: reading one the pump is deleting fails on Windows.
+            await Eventually.TrueAsync(async () => !runtime.Requests.IsEmpty && await f.Inbox.CountAsync(Ea.Id, Ct) == 0, "notice handled");
             await stop.CancelAsync();
             await run;
         }

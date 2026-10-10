@@ -56,14 +56,17 @@ public sealed class RetrySpendTests
         var taskId = (await f.Coordinator.DelegateTaskAsync(Ea.Id, SessionIds.Main(Ea.Id), root, Research.Id, "x", null, [], new Budget(4m, 10, TimeSpan.FromMinutes(5)), Ct)).Reference!;
         var runtime = new FakeAgentRuntime(Research.Id) { Turn = (_, _) => Task.FromResult(FailedSpending(1.5m)) };
 
+        // The message leaves the inbox only once the task failed. Only the file count is polled: reading the task file
+        // while the pump replaces it makes the replace fail on Windows.
         await RunUntilAsync(
             new InboxPump(runtime, f.Inbox, f.Coordinator, f.Alerts, Fast, TimeProvider.System, NullLogger<InboxPump>.Instance),
-            async () => (await f.Tasks.GetAsync(taskId, Ct))!.State == FleetTaskState.Failed && await f.Inbox.CountAsync(Research.Id, Ct) == 0,
+            async () => await f.Inbox.CountAsync(Research.Id, Ct) == 0,
             "task failed once its budget was spent");
 
         // 4 credits: attempts at 4, 2.5 and 1 remaining; then the task is out of budget and gets no more turns.
         Assert.Equal(3, runtime.Requests.Count);
-        Assert.Equal("its budget is exhausted", (await f.Tasks.GetAsync(taskId, Ct))!.FailureReason);
+        var task = (await f.Tasks.GetAsync(taskId, Ct))!;
+        Assert.Equal((FleetTaskState.Failed, "its budget is exhausted"), (task.State, task.FailureReason));
     }
 
     [Fact]
