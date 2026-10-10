@@ -539,7 +539,7 @@ public sealed class A2ACoordinator : IDisposable
 
     /// <summary>Replies go to the delegating session, unless it is an ephemeral consult; then to the main session.</summary>
     private static string? ReplySession(AgentId caller, string callerSessionId) =>
-        SessionIds.TryGetAgent(callerSessionId, out var agent) && agent == caller && !callerSessionId.Contains(":consult:", StringComparison.Ordinal)
+        SessionIds.TryGetAgent(callerSessionId, out var agent) && agent == caller && !SessionIds.IsConsult(callerSessionId)
             ? callerSessionId
             : null;
 

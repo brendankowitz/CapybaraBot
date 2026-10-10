@@ -96,9 +96,9 @@ public sealed class FleetLimitsRuntimeTests
     public async Task Per_session_locks_serialize_holders_and_are_removed_when_free()
     {
         var locks = new KeyedLocks();
-        var first = await locks.AcquireAsync("agent:ea:task:a", Ct);
-        var second = locks.AcquireAsync("agent:ea:task:a", Ct);
-        var other = await locks.AcquireAsync("agent:ea:task:b", Ct);
+        var first = await locks.AcquireAsync("agent_ea_task_a", Ct);
+        var second = locks.AcquireAsync("agent_ea_task_a", Ct);
+        var other = await locks.AcquireAsync("agent_ea_task_b", Ct);
 
         Assert.False(second.IsCompleted);
         first.Dispose();

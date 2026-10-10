@@ -402,9 +402,10 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     }
 
     /// <summary>
-    /// The envelope a turn runs under, and its credit limit. A turn handling another agent's message continues that
-    /// message's chain within its carved budget (FR-A2A-05), which also limits the turn's own spend; any other turn is a
-    /// new root, limited only by a routine's per-run budget when it has one.
+    /// The envelope a turn runs under, and its credit limit, which the host enforces by aborting the run (the SDK's own
+    /// session limit cannot go below 30 credits). Every turn is capped at the agent's <c>SessionMaxCredits</c>; a routine
+    /// run at its per-run budget; a turn handling another agent's message continues that message's chain within its
+    /// carved budget (FR-A2A-05).
     /// </summary>
     private (Envelope Envelope, decimal? CreditLimit) TurnEnvelope(AgentTurnRequest request)
     {
@@ -415,7 +416,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
             return (continued, continued.Budget.Credits);
         }
 
-        return (_envelopes.CreateRoot(request.Principal, _agent.Id, cap, _options.TurnTimeout), request.Budget?.Credits);
+        return (_envelopes.CreateRoot(request.Principal, _agent.Id, cap, _options.TurnTimeout), cap.Credits);
     }
 
     /// <summary>
@@ -478,7 +479,9 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
 
         using (await _sessionLocks.AcquireAsync(sessionId, cancellationToken))
         {
-            var (envelope, creditLimit) = target.Task is { } task ? (task.Envelope, task.Envelope.Budget.Credits) : TurnEnvelope(request);
+            var (envelope, creditLimit) = target.Task is { } task
+                ? (task.Envelope, Math.Min(task.Envelope.Budget.Credits, _agent.Budget.SessionMaxCredits))
+                : TurnEnvelope(request);
             var context = new CapybaraSession(_agent, sessionId, target.Kind, envelope, target.Task?.Id)
             {
                 TurnOrigin = request.Origin,

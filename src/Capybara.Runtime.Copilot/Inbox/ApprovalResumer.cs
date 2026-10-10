@@ -105,7 +105,7 @@ public sealed partial class ApprovalResumer : IHostedService, IDisposable
     /// so their outcome goes to the main session.
     /// </summary>
     private static string? ResumeSession(ApprovalRequest request) =>
-        SessionIds.TryGetAgent(request.SessionId, out var agent) && agent == request.Agent && !request.SessionId.Contains(":consult:", StringComparison.Ordinal)
+        SessionIds.TryGetAgent(request.SessionId, out var agent) && agent == request.Agent && !SessionIds.IsConsult(request.SessionId)
             ? request.SessionId
             : null;
 

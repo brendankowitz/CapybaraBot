@@ -26,7 +26,7 @@ public sealed class ReviewerTests
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     private static ToolCallContext Call(string tool = "calendar_read", string args = """{"day":"today"}""") =>
-        new(Ea, "agent:ea:main", tool, JsonDocument.Parse(args).RootElement.Clone(), MessageOrigin.User);
+        new(Ea, "agent_ea_main", tool, JsonDocument.Parse(args).RootElement.Clone(), MessageOrigin.User);
 
     private static CopilotToolCallReviewer Reviewer(IReviewerModel model, TimeSpan? timeout = null) =>
         new(model, new CopilotRuntimeOptions { ReviewerTimeout = timeout ?? TimeSpan.FromSeconds(5) }, TimeProvider.System, NullLogger<CopilotToolCallReviewer>.Instance);
@@ -95,7 +95,7 @@ public sealed class ReviewerTests
     {
         using var f = new RuntimeFixture();
 
-        var config = f.Configs.CreateReviewerConfig("reviewer:1", "gpt-5-mini", Ea.Id);
+        var config = f.Configs.CreateReviewerConfig("reviewer_1", "gpt-5-mini", Ea.Id);
 
         Assert.Equal("gpt-5-mini", config.Model);
         Assert.Empty(config.AvailableTools!);
@@ -106,7 +106,7 @@ public sealed class ReviewerTests
         Assert.Equal("deny", (await config.Hooks!.OnPreToolUse!(new PreToolUseHookInput { ToolName = "bash" }, null!))!.PermissionDecision);
         var decision = await config.OnPermissionRequest!(new PermissionRequest(), null!);
         Assert.NotNull(decision);
-        Assert.False(f.Allowances.TryConsume("reviewer:1"));
+        Assert.False(f.Allowances.TryConsume("reviewer_1"));
     }
 
     private sealed class FakeModel(string? text = null, Exception? failure = null, bool hang = false) : IReviewerModel

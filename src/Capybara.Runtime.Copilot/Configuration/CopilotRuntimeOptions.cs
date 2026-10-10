@@ -126,7 +126,10 @@ public sealed class CopilotRuntimeOptions
     /// <summary>Upper bound for one review; running out escalates the call to a human.</summary>
     public TimeSpan ReviewerTimeout { get; set; } = TimeSpan.FromSeconds(45);
 
-    /// <summary>Credit cap for one reviewer session.</summary>
+    /// <summary>
+    /// Credit cap for one reviewer session, sent to the SDK raised to its 30-credit minimum. In practice a review is
+    /// bounded by having no tools (one model reply) and by <see cref="ReviewerTimeout"/>.
+    /// </summary>
     public decimal ReviewerMaxCredits { get; set; } = 0.5m;
 
     /// <summary>The reviewer's own CLI state, outside every agent's directories.</summary>

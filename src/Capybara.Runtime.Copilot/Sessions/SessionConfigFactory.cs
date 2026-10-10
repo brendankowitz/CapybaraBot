@@ -44,10 +44,17 @@ public sealed partial class SessionConfigFactory(
     /// <remarks>The name matches the SDK's internal <c>CopilotSession.ToolSearchToolName</c>, which is not public.</remarks>
     public static readonly IReadOnlyList<string> InfrastructureTools = ["tool_search_tool"];
 
+    /// <summary>
+    /// The smallest <c>SessionLimits.MaxAiCredits</c> the Copilot CLI accepts: <c>session.create</c> fails with
+    /// "Minimum session limit is 30 AI credits" below it (verified against the bundled CLI).
+    /// </summary>
+    public const decimal SdkMinimumSessionCredits = 30m;
+
     /// <summary>Lifetime advertised for the session-scoped token; the SDK requires a positive value (eight hours is typical).</summary>
     private const long GitHubTokenLifetimeSeconds = 8 * 60 * 60;
 
     private readonly SkillResolver _skills = new(options.BuiltInSkillDirectory, options.ConfigRoot);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _limitsLogged = new(StringComparer.Ordinal);
 
     public async ValueTask<SessionConfig> CreateConfigAsync(CapybaraSession session, CancellationToken cancellationToken)
     {
@@ -120,7 +127,7 @@ public sealed partial class SessionConfigFactory(
                 OnPreToolUse = (_, _) => Task.FromResult<PreToolUseHookOutput?>(new PreToolUseHookOutput { PermissionDecision = "deny", PermissionDecisionReason = "the reviewer has no tools" }),
             },
             OnEvent = e => usage.OnReviewerEvent(reviewed, model, sessionId, e),
-            SessionLimits = new SessionLimitsConfig { MaxAiCredits = (double)options.ReviewerMaxCredits },
+            SessionLimits = new SessionLimitsConfig { MaxAiCredits = (double)SdkSessionLimit(options.ReviewerMaxCredits) },
         };
     }
 
@@ -158,6 +165,12 @@ public sealed partial class SessionConfigFactory(
 
         return [.. tools, .. protocol.Where(t => !tools.Contains(t, StringComparer.Ordinal))];
     }
+
+    /// <summary>
+    /// The SDK-side session limit for a configured budget: the budget itself, raised to the CLI's minimum. It is a soft
+    /// backstop only; the host's per-turn credit limit is what enforces budgets (FR-OBS-02).
+    /// </summary>
+    public static decimal SdkSessionLimit(decimal configured) => Math.Max(SdkMinimumSessionCredits, configured);
 
     /// <summary>
     /// The custom tools for <paramref name="session"/> as it is now (its depth may have changed since it was built), for
@@ -210,14 +223,10 @@ public sealed partial class SessionConfigFactory(
         };
         config.OnEvent = e => usage.OnEvent(session, e);
 
-        // The main session is long-lived and its limit is fixed when it is built, so it gets the agent's session cap rather
-        // than the envelope of whichever turn happened to build it; other sessions live for one envelope.
-        config.SessionLimits = new SessionLimitsConfig
-        {
-            MaxAiCredits = (double)(session.Kind == SessionKind.Main
-                ? agent.Budget.SessionMaxCredits
-                : Math.Min(agent.Budget.SessionMaxCredits, session.Envelope.Budget.Credits)),
-        };
+        // Budgets are enforced by the host, per turn (the turn's credit limit aborts the run). The SDK limit is only a
+        // soft backstop, and the CLI refuses any below its minimum, so it is never sent lower than that.
+        config.SessionLimits = new SessionLimitsConfig { MaxAiCredits = (double)SdkSessionLimit(agent.Budget.SessionMaxCredits) };
+        LogEffectiveLimits(agent);
         config.InfiniteSessions = new InfiniteSessionConfig { Enabled = session.Kind == SessionKind.Main };
 
         // The SDK's cross-session store would bypass memory scoping; the wiki is the only memory (FR-MEM-01).
@@ -430,6 +439,20 @@ public sealed partial class SessionConfigFactory(
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Skill {Skill} ({Tier} tier) disabled for {Agent}: {Reason}")]
     private static partial void LogSkillRejected(ILogger logger, string skill, SkillTier tier, string agent, string reason);
+
+    /// <summary>Once per agent: which limit actually applies, since the SDK value can differ from the configured one.</summary>
+    private void LogEffectiveLimits(AgentDefinition agent)
+    {
+        if (_limitsLogged.TryAdd(agent.Id.Value, 0))
+        {
+            var turnLimit = agent.Budget.SessionMaxCredits;
+            var sdkLimit = SdkSessionLimit(turnLimit);
+            LogLimits(logger, agent.Id.Value, turnLimit, sdkLimit);
+        }
+    }
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Credit limits for {Agent}: at most {TurnLimit} credits per turn, enforced by the host (abort); SDK session backstop {SdkLimit}")]
+    private static partial void LogLimits(ILogger logger, string agent, decimal turnLimit, decimal sdkLimit);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Broker unreachable while building session {SessionId} of {Agent}; its broker tools are missing until the session is rebuilt")]
     private static partial void LogBrokerUnavailable(ILogger logger, Exception exception, string agent, string sessionId);

@@ -31,11 +31,11 @@ public sealed class A2ATaskFlowTests
         using var f = Fleet();
         var root = RootWith(f, 3m); // the default consult budget is 2 credits
 
-        var first = await f.Coordinator.AskAgentAsync(Ea, "agent:ea:main", root, Research, "q1", Ct);
+        var first = await f.Coordinator.AskAgentAsync(Ea, "agent_ea_main", root, Research, "q1", Ct);
         Assert.True(first.Success, first.Error);
         Assert.Equal(1m, first.ParentRemainder!.Budget.Credits);
 
-        var second = await f.Coordinator.AskAgentAsync(Ea, "agent:ea:main", first.ParentRemainder, Code, "q2", Ct);
+        var second = await f.Coordinator.AskAgentAsync(Ea, "agent_ea_main", first.ParentRemainder, Code, "q2", Ct);
 
         Assert.False(second.Success);
         Assert.Contains("budget", second.Error, StringComparison.Ordinal);
@@ -49,7 +49,7 @@ public sealed class A2ATaskFlowTests
         using var f = Fleet();
         f.Executor.Failure = new InvalidOperationException("boom");
 
-        var result = await f.Coordinator.AskAgentAsync(Ea, "agent:ea:main", RootWith(f, 5m), Research, "q", Ct);
+        var result = await f.Coordinator.AskAgentAsync(Ea, "agent_ea_main", RootWith(f, 5m), Research, "q", Ct);
 
         Assert.False(result.Success);
         Assert.Equal(3m, result.ParentRemainder!.Budget.Credits);
@@ -60,7 +60,7 @@ public sealed class A2ATaskFlowTests
     {
         using var f = Fleet();
 
-        var result = await f.Coordinator.SendMessageAsync(Ea, "agent:ea:main", RootWith(f, 5m), Research, "fyi", Ct);
+        var result = await f.Coordinator.SendMessageAsync(Ea, "agent_ea_main", RootWith(f, 5m), Research, "fyi", Ct);
 
         Assert.True(result.Success, result.Error);
         Assert.Equal(3m, result.ParentRemainder!.Budget.Credits);
@@ -70,12 +70,12 @@ public sealed class A2ATaskFlowTests
     public async Task Delegated_task_runs_in_a_task_session_and_replies_to_the_delegating_session()
     {
         using var f = Fleet();
-        var result = await f.Coordinator.DelegateTaskAsync(Ea, "agent:ea:main", RootWith(f, 10m), Research, "find X", null, [], new Budget(4m, 10, TimeSpan.FromMinutes(5)), Ct);
+        var result = await f.Coordinator.DelegateTaskAsync(Ea, "agent_ea_main", RootWith(f, 10m), Research, "find X", null, [], new Budget(4m, 10, TimeSpan.FromMinutes(5)), Ct);
         Assert.True(result.Success, result.Error);
         Assert.Equal(6m, result.ParentRemainder!.Budget.Credits);
 
         var task = await f.Tasks.GetAsync(result.Reference!, Ct);
-        Assert.Equal("agent:ea:main", task!.RequesterSessionId);
+        Assert.Equal("agent_ea_main", task!.RequesterSessionId);
 
         var assignment = Assert.Single(await f.Inbox.ListAsync(Research, Ct));
         Assert.Equal(task.Id, assignment.TaskId);
@@ -86,7 +86,7 @@ public sealed class A2ATaskFlowTests
     public async Task Delegating_from_a_task_session_records_the_parent_task_and_persists_the_debit()
     {
         using var f = Fleet();
-        var outer = await f.Coordinator.DelegateTaskAsync(Ea, "agent:ea:main", RootWith(f, 10m), Research, "outer", null, [], new Budget(6m, 20, TimeSpan.FromMinutes(5)), Ct);
+        var outer = await f.Coordinator.DelegateTaskAsync(Ea, "agent_ea_main", RootWith(f, 10m), Research, "outer", null, [], new Budget(6m, 20, TimeSpan.FromMinutes(5)), Ct);
         var outerTask = (await f.Tasks.GetAsync(outer.Reference!, Ct))!;
         var researchSession = SessionIds.Task(Research, outerTask.Id);
 
@@ -103,7 +103,7 @@ public sealed class A2ATaskFlowTests
     public async Task Input_required_bubbles_to_the_requester_session_and_the_answer_returns_to_the_task_session()
     {
         using var f = Fleet();
-        var delegated = await f.Coordinator.DelegateTaskAsync(Ea, "agent:ea:main", RootWith(f, 10m), Research, "find X", null, [], new Budget(4m, 10, TimeSpan.FromMinutes(5)), Ct);
+        var delegated = await f.Coordinator.DelegateTaskAsync(Ea, "agent_ea_main", RootWith(f, 10m), Research, "find X", null, [], new Budget(4m, 10, TimeSpan.FromMinutes(5)), Ct);
         var taskId = delegated.Reference!;
         var researchSession = SessionIds.Task(Research, taskId);
         f.Taint.MarkTainted(researchSession);
@@ -113,26 +113,26 @@ public sealed class A2ATaskFlowTests
         Assert.True(asked.Success, asked.Error);
         Assert.Equal(FleetTaskState.InputRequired, (await f.Tasks.GetAsync(taskId, Ct))!.State);
         var question = Assert.Single(await f.Inbox.ListAsync(Ea, Ct));
-        Assert.Equal("agent:ea:main", question.SessionId);
+        Assert.Equal("agent_ea_main", question.SessionId);
         Assert.Equal(MessageOrigin.Agent, question.Origin);
         Assert.Equal(Taint.Tainted, question.Taint);
 
-        Assert.False((await f.Coordinator.ProvideInputAsync(Code, "agent:code:main", taskId, "the red one", Ct)).Success);
-        var answered = await f.Coordinator.ProvideInputAsync(Ea, "agent:ea:main", taskId, "the red one", Ct);
+        Assert.False((await f.Coordinator.ProvideInputAsync(Code, "agent_code_main", taskId, "the red one", Ct)).Success);
+        var answered = await f.Coordinator.ProvideInputAsync(Ea, "agent_ea_main", taskId, "the red one", Ct);
 
         Assert.True(answered.Success, answered.Error);
         Assert.Equal(FleetTaskState.Working, (await f.Tasks.GetAsync(taskId, Ct))!.State);
         var answer = (await f.Inbox.ListAsync(Research, Ct))[^1];
         Assert.Equal(researchSession, answer.SessionId);
         Assert.Contains("the red one", answer.Body, StringComparison.Ordinal);
-        Assert.False((await f.Coordinator.ProvideInputAsync(Ea, "agent:ea:main", taskId, "again", Ct)).Success);
+        Assert.False((await f.Coordinator.ProvideInputAsync(Ea, "agent_ea_main", taskId, "again", Ct)).Success);
     }
 
     [Fact]
     public async Task Completion_carries_the_owner_taint_back_to_the_requester_session()
     {
         using var f = Fleet();
-        var delegated = await f.Coordinator.DelegateTaskAsync(Ea, "agent:ea:main", RootWith(f, 10m), Research, "find X", null, [], new Budget(4m, 10, TimeSpan.FromMinutes(5)), Ct);
+        var delegated = await f.Coordinator.DelegateTaskAsync(Ea, "agent_ea_main", RootWith(f, 10m), Research, "find X", null, [], new Budget(4m, 10, TimeSpan.FromMinutes(5)), Ct);
         var taskId = delegated.Reference!;
 
         var done = await f.Coordinator.CompleteTaskAsync(Research, taskId, true, [new Artifact("result.md", "artifacts/x.md")], ["source date"], Taint.Tainted, Ct);
@@ -140,7 +140,7 @@ public sealed class A2ATaskFlowTests
         Assert.True(done.Success, done.Error);
         var message = Assert.Single(await f.Inbox.ListAsync(Ea, Ct));
         Assert.Equal(taskId, message.TaskId);
-        Assert.Equal("agent:ea:main", message.SessionId);
+        Assert.Equal("agent_ea_main", message.SessionId);
         Assert.Equal(Taint.Tainted, message.Taint);
         Assert.Single(message.Attachments);
         Assert.False((await f.Coordinator.CompleteTaskAsync(Research, taskId, true, [], [], Ct)).Success);
@@ -153,7 +153,7 @@ public sealed class A2ATaskFlowTests
     {
         using var f = Fleet();
 
-        Assert.False((await f.Coordinator.ProvideInputAsync(Ea, "agent:ea:main", taskId, "x", Ct)).Success);
+        Assert.False((await f.Coordinator.ProvideInputAsync(Ea, "agent_ea_main", taskId, "x", Ct)).Success);
         Assert.False((await f.Coordinator.RequestInputAsync(Ea, taskId, "x", Ct)).Success);
         Assert.Null(await f.Coordinator.GetOwnedTaskAsync(Ea, taskId, Ct));
     }
@@ -162,7 +162,7 @@ public sealed class A2ATaskFlowTests
     public async Task Dead_lettered_messages_leave_the_queue_but_stay_on_disk()
     {
         using var f = Fleet();
-        await f.Coordinator.SendMessageAsync(Ea, "agent:ea:main", RootWith(f, 10m), Research, "one", Ct);
+        await f.Coordinator.SendMessageAsync(Ea, "agent_ea_main", RootWith(f, 10m), Research, "one", Ct);
         var message = Assert.Single(await f.Inbox.ListAsync(Research, Ct));
 
         await f.Inbox.DeadLetterAsync(Research, message.Id, Ct);

@@ -120,9 +120,9 @@ public sealed class TurnPreparationTests
     [Fact]
     public void Targets_map_to_the_deterministic_session_ids()
     {
-        Assert.Equal("agent:ea:main", TurnTarget.Main.SessionIdFor(Ea.Id));
-        Assert.Equal("agent:ea:task:routine-1", TurnTarget.Isolated("routine-1").SessionIdFor(Ea.Id));
-        Assert.Equal("agent:ea:incognito:chat-1", TurnTarget.Incognito("chat-1").SessionIdFor(Ea.Id));
+        Assert.Equal("agent_ea_main", TurnTarget.Main.SessionIdFor(Ea.Id));
+        Assert.Equal("agent_ea_task_routine-1", TurnTarget.Isolated("routine-1").SessionIdFor(Ea.Id));
+        Assert.Equal("agent_ea_incognito_chat-1", TurnTarget.Incognito("chat-1").SessionIdFor(Ea.Id));
     }
 
     private sealed class NeverReadyRuntime : ISupervisedRuntime

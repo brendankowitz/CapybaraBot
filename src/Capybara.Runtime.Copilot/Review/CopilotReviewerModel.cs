@@ -28,7 +28,7 @@ public sealed partial class CopilotReviewerModel(
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
         var client = await ClientAsync(cancellationToken);
-        var sessionId = $"reviewer:{Guid.NewGuid():N}";
+        var sessionId = $"reviewer_{Guid.NewGuid():N}";
         var session = await client.CreateSessionAsync(configs.Value.CreateReviewerConfig(sessionId, options.ReviewerModel, reviewed), cancellationToken);
         try
         {

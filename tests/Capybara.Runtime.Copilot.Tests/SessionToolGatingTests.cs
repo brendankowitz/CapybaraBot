@@ -214,7 +214,7 @@ public sealed class SessionToolGatingTests
     }
 
     [Fact]
-    public void The_main_session_credit_limit_is_the_agent_cap_not_the_envelope_of_the_turn_that_built_it()
+    public void The_sdk_session_limit_is_never_below_the_cli_minimum()
     {
         using var f = new RuntimeFixture();
         var main = f.Session(Ea);
@@ -222,8 +222,10 @@ public sealed class SessionToolGatingTests
         var task = f.Session(Ea, SessionKind.Task);
         task.Envelope = main.Envelope;
 
-        Assert.Equal((double)Ea.Budget.SessionMaxCredits, f.Configs.CreateConfig(main).SessionLimits!.MaxAiCredits);
-        Assert.Equal(0.01, f.Configs.CreateConfig(task).SessionLimits!.MaxAiCredits);
+        Assert.Equal(30d, f.Configs.CreateConfig(main).SessionLimits!.MaxAiCredits);
+        Assert.Equal(30d, f.Configs.CreateConfig(task).SessionLimits!.MaxAiCredits);
+        Assert.Equal(30d, f.Configs.CreateReviewerConfig("reviewer_1", "gpt-5-mini", Ea.Id).SessionLimits!.MaxAiCredits);
+        Assert.Equal(45m, SessionConfigFactory.SdkSessionLimit(45m));
     }
 
     private sealed class FakeBroker(params string[] names) : IBrokerToolSource

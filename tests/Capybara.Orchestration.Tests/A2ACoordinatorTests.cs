@@ -23,7 +23,7 @@ public sealed class A2ACoordinatorTests
     {
         using var f = Fleet();
 
-        var result = await f.Coordinator.AskAgentAsync(Ea, "agent:ea:main", f.Root("ea"), Research, "weather?", Ct);
+        var result = await f.Coordinator.AskAgentAsync(Ea, "agent_ea_main", f.Root("ea"), Research, "weather?", Ct);
 
         Assert.True(result.Success, result.Error);
         Assert.Equal("42", result.Content);
@@ -39,7 +39,7 @@ public sealed class A2ACoordinatorTests
     {
         using var f = Fleet();
 
-        var result = await f.Coordinator.AskAgentAsync(Research, "agent:research:main", f.Root("research"), Ea, "hi", Ct);
+        var result = await f.Coordinator.AskAgentAsync(Research, "agent_research_main", f.Root("research"), Ea, "hi", Ct);
 
         Assert.False(result.Success);
         Assert.Empty(f.Executor.Calls);
@@ -52,10 +52,10 @@ public sealed class A2ACoordinatorTests
         using var f = Fleet();
         f.Executor.ReplyTaint = Taint.Tainted;
 
-        var result = await f.Coordinator.AskAgentAsync(Ea, "agent:ea:main", f.Root("ea"), Research, "news?", Ct);
+        var result = await f.Coordinator.AskAgentAsync(Ea, "agent_ea_main", f.Root("ea"), Research, "news?", Ct);
 
         Assert.Equal(Taint.Tainted, result.Taint);
-        Assert.True(f.Taint.IsTainted("agent:ea:main"));
+        Assert.True(f.Taint.IsTainted("agent_ea_main"));
     }
 
     [Fact]
@@ -79,7 +79,7 @@ public sealed class A2ACoordinatorTests
         var results = new List<bool>();
         for (var i = 0; i < 6; i++)
         {
-            results.Add((await f.Coordinator.SendMessageAsync(Ea, "agent:ea:main", root, Code, $"msg {i}", Ct)).Success);
+            results.Add((await f.Coordinator.SendMessageAsync(Ea, "agent_ea_main", root, Code, $"msg {i}", Ct)).Success);
         }
 
         Assert.Equal(4, results.Count(r => r));
@@ -91,14 +91,14 @@ public sealed class A2ACoordinatorTests
         using var f = Fleet();
         f.KillSwitch.Pause(Research);
 
-        Assert.False((await f.Coordinator.AskAgentAsync(Ea, "agent:ea:main", f.Root("ea"), Research, "hi", Ct)).Success);
+        Assert.False((await f.Coordinator.AskAgentAsync(Ea, "agent_ea_main", f.Root("ea"), Research, "hi", Ct)).Success);
     }
 
     [Fact]
     public async Task Delegated_tasks_bubble_input_requests_and_only_the_owner_completes()
     {
         using var f = Fleet();
-        var delegated = await f.Coordinator.DelegateTaskAsync(Ea, "agent:ea:main", f.Root("ea"), Code, "fix the bug", null, [], new Budget(2m, 20, TimeSpan.FromMinutes(5)), Ct);
+        var delegated = await f.Coordinator.DelegateTaskAsync(Ea, "agent_ea_main", f.Root("ea"), Code, "fix the bug", null, [], new Budget(2m, 20, TimeSpan.FromMinutes(5)), Ct);
         Assert.True(delegated.Success, delegated.Error);
         var taskId = delegated.Reference!;
 

@@ -88,7 +88,7 @@ public sealed class CopilotRoutineExecutorTests : IAsyncDisposable
         var target = Assert.Single(_runtime.Requests).Target;
         Assert.Equal(SessionKind.Task, target.Kind);
         Assert.Null(target.Task);
-        Assert.Equal("agent:ea:task:routine-run-1", target.SessionIdFor(Ea.Id));
+        Assert.Equal("agent_ea_task_routine-run-1", target.SessionIdFor(Ea.Id));
         Assert.Equal(target, Assert.Single(_runtime.Ended));
         Assert.Equal("Brief ready.\nUNVERIFIED: meeting room\n", Assert.Single(_outputs).Content);
     }

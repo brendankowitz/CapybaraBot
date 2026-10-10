@@ -90,7 +90,7 @@ public sealed class InboxResilienceTests
     public async Task A_message_that_cannot_be_planned_is_retried_dead_lettered_and_the_inbox_moves_on()
     {
         using var f = new RuntimeFixture(fleet: [Ea, Research]);
-        await f.Inbox.EnqueueAsync(Message("bad target", MessageOrigin.System, sessionId: "agent:ea:task:not a valid key!"), Ct);
+        await f.Inbox.EnqueueAsync(Message("bad target", MessageOrigin.System, sessionId: "agent_ea_task_not a valid key!"), Ct);
         await f.Inbox.EnqueueAsync(Message("fine"), Ct);
         var runtime = new FakeAgentRuntime(Ea.Id);
 
