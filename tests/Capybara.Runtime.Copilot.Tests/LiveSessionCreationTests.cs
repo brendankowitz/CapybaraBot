@@ -10,8 +10,9 @@ namespace Capybara.Runtime.Copilot.Tests;
 
 /// <summary>
 /// Live check against the Copilot CLI bundled with the SDK: every session kind the host builds is accepted by
-/// <c>session.create</c> with budgets far below the CLI's 30-credit session-limit minimum (review round 2, N1).
-/// Opt-in with <c>CAPYBARA_LIVE_CLI=1</c>. No token is needed: creation is validated locally.
+/// <c>session.create</c> with budgets far below the CLI's 30-credit session-limit minimum (review round 2, N1), and the
+/// main session's resume clears a limit stored at its creation (review round 4, N2).
+/// Opt-in with <c>CAPYBARA_LIVE_CLI=1</c>. No token is needed: creation and resume are validated locally.
 /// </summary>
 public sealed class LiveSessionCreationTests
 {
@@ -55,7 +56,8 @@ public sealed class LiveSessionCreationTests
                 if (session.Kind == SessionKind.Main)
                 {
                     // The SDK window is cumulative over a live session: the long-lived main session must carry none.
-                    Assert.Null(config.SessionLimits);
+                    Assert.NotNull(config.SessionLimits);
+                    Assert.Null(config.SessionLimits.MaxAiCredits);
 
                     // The real self-test comparison (FR-AGT-09) must pass on what the CLI reports, and every host tool
                     // (list_agents included) must be ours, not the CLI built-in of the same name.
@@ -87,5 +89,61 @@ public sealed class LiveSessionCreationTests
         await using var review = await reviewer.CreateSessionAsync(reviewerConfig, ct);
         TestContext.Current.TestOutputHelper?.WriteLine($"Reviewer: created with MaxAiCredits={reviewerConfig.SessionLimits?.MaxAiCredits}");
         await reviewer.DeleteSessionAsync("reviewer_live", ct);
+    }
+
+    [Fact]
+    public async Task Resuming_the_main_session_clears_a_limit_stored_by_an_earlier_build()
+    {
+        // Review round 4, N2: a main session created by an earlier build carries {"maxAiCredits":30}; resuming without a
+        // limit keeps it (and the cumulative window eventually disables the session), resuming with ours removes it.
+        Assert.SkipUnless(Environment.GetEnvironmentVariable("CAPYBARA_LIVE_CLI") == "1", "Set CAPYBARA_LIVE_CLI=1 to run against the bundled Copilot CLI.");
+        var ct = TestContext.Current.CancellationToken;
+        using var f = new RuntimeFixture(fleet: [Ea]);
+        Directory.CreateDirectory(f.Options.AgentBaseDirectory(Ea.Id));
+        Directory.CreateDirectory(f.Options.AgentWorkingDirectory(Ea.Id));
+        var main = f.Session(Ea);
+
+        await using var client = new CopilotClient(CopilotClientOptionsFactory.Create(Ea, f.Options));
+        await client.StartAsync(ct);
+        try
+        {
+            var legacy = await f.Configs.CreateConfigAsync(main, ct);
+            legacy.SessionLimits = new SessionLimitsConfig { MaxAiCredits = 30 };
+            await using (var created = await client.CreateSessionAsync(legacy, ct))
+            {
+                // A session is only persisted once it has a user.message. Unauthenticated (no token, no logged-in user), the
+                // send records one and then fails, so nothing is spent.
+                try
+                {
+                    await created.SendAndWaitAsync(new MessageOptions { Prompt = "hello" }, TimeSpan.FromSeconds(30), ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    TestContext.Current.TestOutputHelper?.WriteLine($"unauthenticated send failed as expected: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+
+            // The premise: a resume that sends no limit keeps the stored one.
+            var withoutLimit = await f.Configs.ResumeConfigAsync(main, ct);
+            withoutLimit.SessionLimits = null;
+            Assert.Equal(30, await ResumedLimitAsync(client, main.SessionId, withoutLimit, ct));
+
+            // The fix: the main session's own resume config clears it.
+            Assert.Null(await ResumedLimitAsync(client, main.SessionId, await f.Configs.ResumeConfigAsync(main, ct), ct));
+        }
+        finally
+        {
+            await client.DeleteSessionAsync(main.SessionId, CancellationToken.None);
+        }
+    }
+
+    /// <summary>The <c>maxAiCredits</c> the CLI records in the <c>session.resume</c> event for <paramref name="config"/>.</summary>
+    private static async Task<double?> ResumedLimitAsync(CopilotClient client, string sessionId, ResumeSessionConfig config, CancellationToken ct)
+    {
+        await using var resumed = await client.ResumeSessionAsync(sessionId, config, ct);
+        var resume = (await resumed.GetEventsAsync(ct)).OfType<SessionResumeEvent>().Last();
+        TestContext.Current.TestOutputHelper?.WriteLine(
+            $"session.resume with {(config.SessionLimits is null ? "no limit" : "an empty limit")}: sessionLimits {(resume.Data?.SessionLimits is { } limits ? $"maxAiCredits={limits.MaxAiCredits?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "unset"}" : "absent")}");
+        return resume.Data?.SessionLimits?.MaxAiCredits;
     }
 }

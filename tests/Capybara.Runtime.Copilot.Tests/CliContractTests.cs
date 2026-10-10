@@ -63,14 +63,22 @@ public sealed class CliContractTests
     }
 
     [Fact]
-    public async Task The_main_session_sends_no_sdk_limit_on_create_or_resume()
+    public async Task The_main_session_sends_an_empty_sdk_limit_on_create_or_resume()
     {
-        // The SDK window is cumulative over a live session, so a limit would brick the long-lived main session.
+        // The SDK window is cumulative over a live session, so a limit would brick the long-lived main session. An empty
+        // limit, not none: resuming with none keeps a limit stored at creation by an earlier build (verified live).
         using var f = new RuntimeFixture();
         var main = f.Session(Ea);
 
-        Assert.Null((await f.Configs.CreateConfigAsync(main, TestContext.Current.CancellationToken)).SessionLimits);
-        Assert.Null(f.Configs.ResumeConfig(main).SessionLimits);
+        var created = (await f.Configs.CreateConfigAsync(main, TestContext.Current.CancellationToken)).SessionLimits;
+        var resumed = (await f.Configs.ResumeConfigAsync(main, TestContext.Current.CancellationToken)).SessionLimits;
+        var resumedSync = f.Configs.ResumeConfig(main).SessionLimits;
+
+        Assert.All([created, resumed, resumedSync], limits =>
+        {
+            Assert.NotNull(limits);
+            Assert.Null(limits.MaxAiCredits);
+        });
     }
 
     [Fact]

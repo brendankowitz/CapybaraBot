@@ -282,6 +282,92 @@ public sealed class TurnRunTests
     }
 
     [Fact]
+    public async Task A_late_run_is_still_found_and_stopped_when_the_turn_was_stopped_before_it_finished()
+    {
+        // Review round 4, N1: the turn is already over its credit limit (or the kill switch tripped) when it finishes; the
+        // steer's user.message comes ~20 ms after the turn's idle. The grace must still find that run, then abort it.
+        var finish = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var session = new ModelSession { SendAsyncResult = _ => finish.Task };
+        using var run = new TurnRun(session, steerable: true, Timings(timeout: TimeSpan.FromSeconds(30)));
+        using var stop = new CancellationTokenSource();
+
+        var send = run.SendAsync(Prompt, Ct);
+        Assert.True(await run.SteerAsync(Dm, Ct));
+        session.Emit(TurnEventKind.Idle);
+        finish.SetResult("turn reply");
+        await send;
+        await stop.CancelAsync();
+        session.EmitUserMessageLater(session.SteerIds[0], TimeSpan.FromMilliseconds(20));
+
+        var started = DateTime.UtcNow;
+        await run.FinishAsync(stop.Token);
+        await Task.Delay(50, Ct);
+
+        Assert.Contains("abort", session.Calls);
+        Assert.False(session.Running, "the late run was left running");
+        Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task A_stop_during_the_grace_still_finds_the_late_run_and_aborts_it()
+    {
+        var finish = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var session = new ModelSession { SendAsyncResult = _ => finish.Task };
+        using var run = new TurnRun(session, steerable: true, Timings(timeout: TimeSpan.FromSeconds(30)));
+        using var stop = new CancellationTokenSource();
+
+        var send = run.SendAsync(Prompt, Ct);
+        Assert.True(await run.SteerAsync(Dm, Ct));
+        session.Emit(TurnEventKind.Idle);
+        finish.SetResult("turn reply");
+        await send;
+        session.EmitUserMessageLater(session.SteerIds[0], TimeSpan.FromMilliseconds(40));
+
+        var started = DateTime.UtcNow;
+        var finishing = run.FinishAsync(stop.Token);
+        await Task.Delay(10, Ct);
+        await stop.CancelAsync();
+        await finishing;
+        await Task.Delay(50, Ct);
+
+        Assert.Contains("abort", session.Calls);
+        Assert.False(session.Running, "the late run was left running");
+        Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task A_steer_whose_caller_gave_up_mid_send_still_has_its_late_run_awaited()
+    {
+        // Cancelling the caller must not abandon a send that may already have reached the CLI: the run it starts is only
+        // found through the id the send returns.
+        var finish = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var delivery = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var session = new ModelSession { SendAsyncResult = _ => finish.Task, SteerDelivery = delivery.Task };
+        using var run = new TurnRun(session, steerable: true, Timings());
+        using var caller = new CancellationTokenSource();
+
+        var send = run.SendAsync(Prompt, Ct);
+        var steer = run.SteerAsync(Dm, caller.Token);
+        await caller.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => steer);
+        session.Emit(TurnEventKind.Idle);
+        finish.SetResult("turn reply");
+        await send;
+
+        var finishing = run.FinishAsync(Ct);
+        delivery.SetResult();                           // the steer had reached the CLI after all
+        session.EmitUserMessage(session.SteerIds[0]);  // and started a run of its own
+        session.Emit(TurnEventKind.RunActivity);
+        session.Emit(TurnEventKind.Assistant, "reply to the DM");
+        await Task.Delay(50, Ct);
+        Assert.False(finishing.IsCompleted);
+        session.Emit(TurnEventKind.Idle);
+
+        Assert.Equal("reply to the DM", await finishing);
+        Assert.Equal(1, run.Joined);
+    }
+
+    [Fact]
     public async Task Steering_that_never_completes_means_the_session_must_be_discarded()
     {
         var finish = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -435,6 +521,9 @@ public sealed class TurnRunTests
 
         public void EmitLater(TurnEventKind kind, TimeSpan delay) =>
             _ = Task.Delay(delay).ContinueWith(_ => Emit(kind), TaskScheduler.Default);
+
+        public void EmitUserMessageLater(string id, TimeSpan delay) =>
+            _ = Task.Delay(delay).ContinueWith(_ => EmitUserMessage(id), TaskScheduler.Default);
 
         private void Record(string call)
         {

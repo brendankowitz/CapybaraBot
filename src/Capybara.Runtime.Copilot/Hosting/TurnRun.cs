@@ -141,6 +141,10 @@ internal sealed class TurnRun : IDisposable
     /// Interjects <paramref name="message"/> into the active run. <see langword="false"/> when steering is closed (the run
     /// ended or failed) or the send failed; the caller then handles the message as a turn of its own.
     /// </summary>
+    /// <remarks>
+    /// Cancellation only stops the caller waiting: the send itself goes on, because one abandoned after it reached the CLI
+    /// would still start a run, and only the id it returns lets <see cref="FinishAsync"/> find and stop that run.
+    /// </remarks>
     public async Task<bool> SteerAsync(MessageOptions message, CancellationToken cancellationToken)
     {
         lock (_gate)
@@ -153,14 +157,20 @@ internal sealed class TurnRun : IDisposable
             _pendingSteers++;
         }
 
+        return await DeliverAsync(message).WaitAsync(cancellationToken);
+    }
+
+    private async Task<bool> DeliverAsync(MessageOptions message)
+    {
         string? id = null;
         try
         {
-            id = await _session.SendAsync(message, cancellationToken);
+            id = await _session.SendAsync(message, CancellationToken.None);
         }
-        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+#pragma warning disable CA1031 // Any failure means not delivered (the session failed or is going away): not joined.
+        catch (Exception)
+#pragma warning restore CA1031
         {
-            // Not delivered (the session failed or is going away): not joined.
         }
         finally
         {
@@ -185,7 +195,8 @@ internal sealed class TurnRun : IDisposable
     /// <summary>
     /// Ends the turn: closes steering, waits for steering in flight, then for each steering message's <c>user.message</c>;
     /// a message that started a run of its own after the turn's run ended has that run awaited too — aborted past the
-    /// timeout, or as soon as <paramref name="stop"/> fires (the kill switch, the turn's credit limit). Returns that run's
+    /// timeout, or as soon as <paramref name="stop"/> fires (the kill switch, the turn's credit limit). <paramref name="stop"/>
+    /// never shortens the waits that find such a run, only how long a run found may go on. Returns that run's
     /// final assistant text, if there was one.
     /// </summary>
     /// <exception cref="TurnAbortFailedException">Steering did not complete, or a late run could not be stopped.</exception>
@@ -206,8 +217,9 @@ internal sealed class TurnRun : IDisposable
         }
 
         // Each steering message's user.message says which run it is in. One never seen within the grace was not taken
-        // into a run (the CLI still holds it); then only a run already visible after the last idle is stopped.
-        await WaitUntilAsync(() => _steers.All(_userMessages.ContainsKey), _timings.LateRunGrace, stop);
+        // into a run (the CLI still holds it); then only a run already visible after the last idle is stopped. The grace
+        // is not cut short by stop: it is how a late run is found at all, and one found is then aborted at once.
+        await WaitUntilAsync(() => _steers.All(_userMessages.ContainsKey), _timings.LateRunGrace, CancellationToken.None);
         int after;
         lock (_gate)
         {

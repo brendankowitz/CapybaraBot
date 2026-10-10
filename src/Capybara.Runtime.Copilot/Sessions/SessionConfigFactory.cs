@@ -236,9 +236,11 @@ public sealed partial class SessionConfigFactory(
         // Budgets are enforced by the host, per turn (the turn's credit limit aborts the run). The SDK limit is a soft
         // backstop for sessions that live for one piece of work; the CLI refuses any below its minimum. Never for the main
         // session: the SDK window is cumulative over a live session (verified live), so the long-lived main session would
-        // exhaust it within hours, lose its tools and fail every turn until a restart.
+        // exhaust it within hours, lose its tools and fail every turn until a restart. It gets an explicitly empty limit, not
+        // none: resuming without one keeps whatever limit the session was created with (a main session from an earlier
+        // build carries one), while an empty one clears it (both verified live).
         config.SessionLimits = session.Kind == SessionKind.Main
-            ? null
+            ? new SessionLimitsConfig()
             : new SessionLimitsConfig { MaxAiCredits = (double)SdkSessionLimit(agent.Budget.SessionMaxCredits) };
         LogEffectiveLimits(agent);
         config.InfiniteSessions = new InfiniteSessionConfig { Enabled = session.Kind == SessionKind.Main };
