@@ -1,3 +1,4 @@
+using System.Runtime.Versioning;
 using Capybara.Connections.Broker;
 using Capybara.Connections.Connectors;
 using Capybara.Connections.Grants;
@@ -17,6 +18,29 @@ public sealed class ConfigGrantProviderTests
         ConnectorRegistry.Create(ConnectionDefinition.Create("calendar", ConnectorKind.GoogleCalendar), new HttpClient()),
         ConnectorRegistry.Create(ConnectionDefinition.Create("github", ConnectorKind.GitHub), new HttpClient()),
     ]);
+
+    [Fact]
+    [UnsupportedOSPlatform("windows")]
+    public void An_agent_folder_the_broker_cannot_read_fails_startup_with_a_clear_message()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Unix file modes are not supported on Windows.");
+        Assert.SkipWhen(Environment.UserName == "root", "root reads everything regardless of mode.");
+        using var dir = new TempDirectory();
+        var agent = Directory.CreateDirectory(Path.Combine(dir.Path, "agents", "ea")).FullName;
+        File.WriteAllText(Path.Combine(agent, "agent.yaml"), "id: ea\n");
+        File.SetUnixFileMode(Path.Combine(agent, "agent.yaml"), UnixFileMode.None);
+        try
+        {
+            var ex = Assert.Throws<GrantConfigurationException>(() => ConfigGrantProvider.Load(dir.Path));
+
+            Assert.Contains("ea/agent.yaml cannot be read", ex.Message, StringComparison.Ordinal);
+            Assert.Contains("group 'capybara'", ex.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.SetUnixFileMode(Path.Combine(agent, "agent.yaml"), UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+    }
 
     [Fact]
     public void Maps_sample_agent_yaml_grants()

@@ -13,13 +13,28 @@ namespace Capybara.Orchestration.Configuration;
 /// Every write to the config tree goes through <see cref="ApplyAsync"/>, which serializes writers, so a validated
 /// change cannot interleave with another one.
 /// </remarks>
+/// <param name="root">The live config tree.</param>
+/// <param name="initial">The configuration already loaded from <paramref name="root"/>.</param>
+/// <param name="registry">Swapped to the new agents on every reload.</param>
+/// <param name="rules">Its configured rules are swapped on every reload; learned rules are kept.</param>
+/// <param name="versioning">Commits every applied change.</param>
+/// <param name="scratchRoot">
+/// Where validation copies are made (default: the system temp directory). Set it to a private directory under the state
+/// root: the copy holds the whole config, so it must not land in a shared <c>/tmp</c>. Credentials are never copied.
+/// </param>
 public sealed class CapybaraConfigurationHost(
     string root,
     CapybaraConfiguration initial,
     AgentRegistry registry,
     RulesEngine rules,
-    IConfigVersioning versioning) : IDisposable
+    IConfigVersioning versioning,
+    string? scratchRoot = null) : IDisposable
 {
+    /// <summary>Encrypted systemd credentials live here; they are never copied, validated or rewritten.</summary>
+    public const string CredentialsFolder = "credentials";
+
+    private const UnixFileMode PrivateDirectory = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+
     private readonly Lock _gate = new();
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private CapybaraConfiguration _current = initial;
@@ -75,8 +90,9 @@ public sealed class CapybaraConfigurationHost(
     /// The single write path for human config changes (FR-AGT-06, FR-AGT-07, FR-SAF-11): validates
     /// <paramref name="edit"/> on a scratch copy, then runs the same edit on the live tree, reloads, and commits it
     /// through <see cref="IConfigVersioning"/>. The edit must be deterministic, because it runs twice. An exception
-    /// other than <see cref="CapybaraConfigurationException"/> from the scratch run propagates with nothing written;
-    /// one from the live run (I/O failure) propagates too and may leave that edit partially applied on disk.
+    /// other than <see cref="CapybaraConfigurationException"/> or <see cref="UnauthorizedAccessException"/> from the
+    /// scratch run propagates with nothing written. A permission failure is returned as an error; on the live run it may
+    /// leave that edit partially applied on disk, as may any other I/O failure there (which propagates).
     /// </summary>
     public async ValueTask<ConfigChangeResult> ApplyAsync(Action<string> edit, string commitMessage, CancellationToken cancellationToken = default)
     {
@@ -92,7 +108,15 @@ public sealed class CapybaraConfigurationHost(
             }
 
             // Past this point the change is applied even if the caller cancels: a half-applied tree is worse.
-            edit(Root);
+            try
+            {
+                edit(Root);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                return new ConfigChangeResult([$"The config tree is not writable ({ex.Message}); the change may be partially applied."]);
+            }
+
             Reload();
             try
             {
@@ -132,10 +156,12 @@ public sealed class CapybaraConfigurationHost(
 
     private IReadOnlyList<string> ValidateCore(Action<string> edit)
     {
-        var scratch = Path.Combine(Path.GetTempPath(), "capybara-config-" + Guid.NewGuid().ToString("N"));
+        // A private (0700) directory, never a world-listable temp path; credentials are left out of the copy.
+        var scratch = Path.Combine(scratchRoot ?? Path.GetTempPath(), "capybara-config-" + Guid.NewGuid().ToString("N"));
         try
         {
-            CopyDirectory(Root, scratch);
+            ConfigTree.CreateDirectory(scratch, PrivateDirectory);
+            CopyDirectory(Root, scratch, path => !IsCredential(path));
             edit(scratch);
             CapybaraConfigurationLoader.Load(scratch);
             return [];
@@ -143,6 +169,10 @@ public sealed class CapybaraConfigurationHost(
         catch (CapybaraConfigurationException ex)
         {
             return ex.Errors.Count > 0 ? ex.Errors : [ex.Message];
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return [$"The config tree could not be read or written ({ex.Message})."];
         }
         finally
         {
@@ -153,14 +183,21 @@ public sealed class CapybaraConfigurationHost(
         }
     }
 
+    private bool IsCredential(string path) =>
+        path.EndsWith(".cred", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(Path.GetFullPath(path), Path.Combine(Root, CredentialsFolder), StringComparison.Ordinal);
+
+    /// <summary>Copies a tree, giving new directories and files the config tree's modes (see <see cref="ConfigTree.DirectoryMode"/>).</summary>
     internal static void CopyDirectory(string source, string destination, Func<string, bool>? include = null)
     {
-        Directory.CreateDirectory(destination);
+        ConfigTree.CreateDirectory(destination);
         foreach (var file in Directory.EnumerateFiles(source))
         {
             if (include?.Invoke(file) ?? true)
             {
-                File.Copy(file, Path.Combine(destination, Path.GetFileName(file)), overwrite: true);
+                var target = Path.Combine(destination, Path.GetFileName(file));
+                File.Copy(file, target, overwrite: true);
+                ConfigTree.SetFileMode(target);
             }
         }
 

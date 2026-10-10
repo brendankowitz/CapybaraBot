@@ -87,7 +87,7 @@ name a systemd credential read from `$CREDENTIALS_DIRECTORY`.
 | `Capybara:Channels` | `Ntfy` (`BaseUrl`, `Topic`, `AccessTokenCredential`, `SupportsSensitiveContent` default `true` for a tailnet-only server, `GatewayBaseUrl`), `WebPush` (`Subject`, `PublicKey`, `PrivateKeyCredential`), `Telegram` (`BotTokenCredential`, `ChatId`, `AllowedUserId` enables DM polling), `QuietHours`. Channels without settings are off; preference is ntfy, Web Push, Telegram. |
 | `Capybara:Scheduling` | `TimeZone`, `ConcurrencyCap`, `AutoPauseDays`, `CatchUpPolicy` (`Skip` or `FireOnceNow`). |
 | `Capybara:Approvals` / `Capybara:A2A` / `Capybara:Quota` | Approval TTLs; A2A limits; quota `PollInterval`. |
-| `Capybara:Telemetry` | `OtlpEndpoint` (an OTLP/HTTP collector such as the Aspire dashboard or Grafana LGTM; unset = no export) and `OtlpProtocol`. The same endpoint is passed to every agent CLI. Content capture is always off. |
+| `Capybara:Telemetry` | `OtlpEndpoint` (an OTLP/HTTP collector such as the Aspire dashboard or Grafana LGTM; unset = no export) and `OtlpProtocol`. With `http/protobuf` the same endpoint is passed to every agent CLI; the CLI cannot export over gRPC, so with `grpc` set `Capybara:Runtime:OtlpEndpoint` to an OTLP/HTTP endpoint separately (a startup warning says so). Content capture is always off. |
 
 Command-line modes: `capybarad backup`, `capybarad restore <archive> <destination>` (both exit before any host is built) and
 `capybarad agent <id>` (Phase 2, see below).
@@ -141,4 +141,6 @@ Assumptions marked in code that the tests cannot prove:
 - Whether `McpStdioServerConfig.Env` merges with or replaces the inherited environment (`env -i` isolation assumes merge); a shell
   tool turn under the allowlisted CLI environment.
 - Built-in tool names the sample config assumes (`shell`, `read_file`, `edit_file`, `web_fetch`, `web_search`) in Empty mode.
-- On the host: srt/bubblewrap under the relaxed `capybarad.service` settings, `Type=notify` readiness, `LoadCredentialEncrypted`.
+- On the host: srt/bubblewrap under the relaxed `capybarad.service` settings, `Type=notify` readiness, `LoadCredentialEncrypted`,
+  and that the broker can read the config tree through the shared group: `sudo -u capybara-broker cat /etc/capybara/agents/*/agent.yaml`
+  (also after capybarad has created or duplicated an agent).

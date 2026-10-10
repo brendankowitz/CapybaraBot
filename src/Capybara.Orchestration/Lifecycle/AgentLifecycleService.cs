@@ -151,7 +151,7 @@ public sealed partial class AgentLifecycleService(
             root =>
             {
                 var archive = Path.Combine(ConfigTree.AgentsDirectory(root), ArchiveFolder, archiveName);
-                Directory.CreateDirectory(Path.GetDirectoryName(archive)!);
+                ConfigTree.CreateDirectory(Path.GetDirectoryName(archive)!);
                 Directory.Move(RequireFolder(root, agent), archive);
                 var pending = Path.Combine(archive, "skills", ConfigTree.PendingSkillsFolder);
                 if (Directory.Exists(pending))

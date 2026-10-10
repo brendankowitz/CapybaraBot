@@ -25,12 +25,50 @@ internal static class ConfigTree
 
     public static string? ReadOptional(string path) => File.Exists(path) ? File.ReadAllText(path) : null;
 
+    /// <summary>
+    /// Config directories are <c>0750</c> and files <c>0640</c>, set explicitly so they never depend on capybarad's
+    /// umask: capybara-broker runs as another user in the <c>capybara</c> group and must read every <c>agent.yaml</c>
+    /// for its grants (FR-CON-02). Nothing in the tree is world-readable. No-ops on Windows.
+    /// </summary>
+    public const UnixFileMode DirectoryMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute;
+
+    /// <inheritdoc cref="DirectoryMode"/>
+    public const UnixFileMode FileMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead;
+
+    /// <summary>Creates <paramref name="path"/> and any missing parents, giving each new directory <see cref="DirectoryMode"/>.</summary>
+    public static void CreateDirectory(string path, UnixFileMode mode = DirectoryMode)
+    {
+        var missing = new Stack<string>();
+        for (var dir = Path.GetFullPath(path); !Directory.Exists(dir); dir = Path.GetDirectoryName(dir)!)
+        {
+            missing.Push(dir);
+        }
+
+        Directory.CreateDirectory(path);
+        if (!OperatingSystem.IsWindows())
+        {
+            while (missing.TryPop(out var created))
+            {
+                File.SetUnixFileMode(created, mode);
+            }
+        }
+    }
+
+    /// <summary>Gives a file copied or moved into the tree <see cref="FileMode"/>.</summary>
+    public static void SetFileMode(string path)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(path, FileMode);
+        }
+    }
+
     /// <summary>Writes through a flushed temp file and a rename, so readers never see a partial file, even after a crash.</summary>
     public static void WriteAtomic(string path, string content)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        CreateDirectory(Path.GetDirectoryName(path)!);
         var temp = path + ".tmp";
-        using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+        using (var stream = new FileStream(temp, System.IO.FileMode.Create, FileAccess.Write, FileShare.None))
         {
             using var writer = new StreamWriter(stream, leaveOpen: true);
             writer.Write(content);
@@ -38,6 +76,7 @@ internal static class ConfigTree
             stream.Flush(flushToDisk: true);
         }
 
+        SetFileMode(temp);
         File.Move(temp, path, overwrite: true);
     }
 

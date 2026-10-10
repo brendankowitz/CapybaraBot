@@ -31,6 +31,9 @@ internal sealed record StateLayout(string Root)
 
     public string WebPushSubscriptions => Path.Combine(Root, "channels", "web-push-subscriptions.json");
 
+    /// <summary>Private scratch space where config changes are validated before they touch the live tree.</summary>
+    public string ConfigScratch => Path.Combine(Root, "tmp", "config-validation");
+
     /// <summary>Per-agent srt settings; outside every agent directory so no agent can rewrite its own policy.</summary>
     public string SandboxSettings => Path.Combine(Root, "srt");
 }

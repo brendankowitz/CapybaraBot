@@ -38,10 +38,18 @@ LoadCredentialEncrypted=broker-api-key:/etc/capybara/credentials/broker-api-key.
 # Optional channels; add only the ones configured under Capybara:Channels (a missing file fails the unit).
 #LoadCredentialEncrypted=telegram-bot-token:/etc/capybara/credentials/telegram-bot-token.cred
 #LoadCredentialEncrypted=webpush-vapid-private-key:/etc/capybara/credentials/webpush-vapid-private-key.cred
+# ntfy access token: the name is whatever Capybara:Channels:Ntfy:AccessTokenCredential says.
+#LoadCredentialEncrypted=ntfy-access-token:/etc/capybara/credentials/ntfy-access-token.cred
+# Per-agent secrets the sessions resolve by name (FR-AGT-10): one line per name used in agent.yaml, credential name = that name.
+#   BYOK provider key  -> provider.apiKeySecret        e.g. LoadCredentialEncrypted=openai-key:/etc/capybara/credentials/openai-key.cred
+#   http MCP bearer    -> mcpServers[].tokenSecret      e.g. LoadCredentialEncrypted=mcp-docs-token:/etc/capybara/credentials/mcp-docs-token.cred
+# Names must match [a-z0-9_.-]+. A session whose secret is missing fails to build and the agent's self-test pauses it.
 
 StateDirectory=capybara
 StateDirectoryMode=0700
 ConfigurationDirectory=capybara
+# Group-readable so capybara-broker (SupplementaryGroups=capybara) can read agents/*/agent.yaml for its grants.
+ConfigurationDirectoryMode=0750
 # capybarad is the single writer of the config tree: approved proposals and lifecycle operations (create, archive, delete) are
 # validated, written and git-committed by CapybaraConfigurationHost (FR-AGT-06/07). The encrypted credentials stay read-only.
 # Agents never see /etc/capybara: srt denies it to every sandbox.
@@ -68,7 +76,9 @@ RemoveIPC=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 SystemCallArchitectures=native
-UMask=0077
+# 0027, not 0077: files capybarad writes into /etc/capybara must stay group-readable for capybara-broker (the config host also
+# sets 0750/0640 explicitly). State stays private because StateDirectoryMode=0700 keeps the group out of /var/lib/capybara.
+UMask=0027
 
 # capybarad launches each agent's Copilot CLI under srt, which sandboxes with bubblewrap (FR-HST-03). bwrap builds its sandbox from
 # unprivileged user/mount/pid/net/ipc/uts namespaces, mounts a fresh /proc, and calls mount, pivot_root, capset and friends. So, unlike

@@ -76,6 +76,11 @@ public class GatewayFactory : WebApplicationFactory<Program>
     /// <summary>Extra settings for a test-specific host; applied after the defaults.</summary>
     protected virtual IEnumerable<KeyValuePair<string, string?>> Settings() => [];
 
+    /// <summary>Extra service replacements for a test-specific host; applied after the standard fakes.</summary>
+    protected virtual void ConfigureServices(IServiceCollection services)
+    {
+    }
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
@@ -110,6 +115,7 @@ public class GatewayFactory : WebApplicationFactory<Program>
             services.AddSingleton<ICapybaraEvents>(Events);
             services.AddSingleton<INotificationChannel>(Channel);
             services.AddHttpClient(BrokerClientServiceCollectionExtensions.HttpClientName).ConfigurePrimaryHttpMessageHandler(() => Broker);
+            ConfigureServices(services);
         });
     }
 

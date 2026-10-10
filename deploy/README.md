@@ -21,11 +21,18 @@
 ## Install steps
 
 1. Create the service users (`capybara`, `capybara-broker`) and `install -d -o capybara -g capybara -m 0700 /var/backups/capybara`.
-2. Put the config tree in `/etc/capybara` (`agents/`, `rules.yaml`, `routines.yaml`) owned by `capybara`; capybarad commits every
-   change to it with git, so `git` must be installed.
+2. Put the config tree in `/etc/capybara` (`agents/`, `rules.yaml`, `routines.yaml`) owned by `capybara:capybara`, directories
+   `0750` and files `0640`: `chown -R capybara:capybara /etc/capybara && find /etc/capybara -type d -exec chmod 0750 {} + && find
+   /etc/capybara -type f -exec chmod 0640 {} +`. capybara-broker reads every `agents/*/agent.yaml` for its grants through the
+   `capybara` group (`capybara-broker.service` has `SupplementaryGroups=capybara`; add the user too: `usermod -aG capybara
+   capybara-broker`). capybarad writes the tree with the same modes (and `UMask=0027`), so later changes stay readable. Check with
+   `sudo -u capybara-broker cat /etc/capybara/agents/*/agent.yaml`; an unreadable file stops the broker with a message naming it.
+   capybarad commits every change with git, so `git` must be installed.
 3. Encrypt the credentials into `/etc/capybara/credentials` with `systemd-creds encrypt --name=<name> <file> <name>.cred`:
    - capybarad: `github-token` (Copilot PAT), `broker-api-key` (random, shared with the broker), optionally `telegram-bot-token` and
-     `webpush-vapid-private-key` (then uncomment their lines in `capybarad.service`);
+     `webpush-vapid-private-key` or the ntfy access token (then uncomment their lines in `capybarad.service`), and one credential per
+     secret name agents use: `provider.apiKeySecret` (BYOK key) and `mcpServers[].tokenSecret` (http MCP bearer), named exactly as in
+     `agent.yaml`;
    - capybara-broker: `broker-api-key` (same value), `broker-vault-key` (`head -c32 /dev/urandom | base64`), `connection-github`,
      `oauth-google-client-secret`, plus one line per further connection.
 4. Copy `systemd/capybarad.egress.sample.conf` to `/etc/systemd/system/capybarad.service.d/egress.conf` and list the public
@@ -34,6 +41,7 @@
    port.
 6. Backups: either keep `Capybara:Backup:InProcess=true` (default) with sources in capybarad's config, or enable
    `capybara-backup.timer` and set `Capybara__Backup__InProcess=false` in a capybarad drop-in. Never both.
+
 ## systemd units
 
 - `capybarad.service` is `Type=notify`, has `MemoryMax`/`CPUQuota`, and filters egress with `IPAddressDeny=any` + loopback and tailnet

@@ -47,7 +47,17 @@ public sealed class ConfigGrantProvider : IGrantProvider
             throw new GrantConfigurationException([$"missing agents directory '{agentsDir}'."]);
         }
 
-        foreach (var dir in Directory.EnumerateDirectories(agentsDir).Order(StringComparer.Ordinal))
+        string[] agentDirs;
+        try
+        {
+            agentDirs = [.. Directory.EnumerateDirectories(agentsDir).Order(StringComparer.Ordinal)];
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            throw new GrantConfigurationException([Unreadable("agents/", ex)]);
+        }
+
+        foreach (var dir in agentDirs)
         {
             var folder = Path.GetFileName(dir);
             if (folder.StartsWith('.') || folder.StartsWith('_'))
@@ -58,7 +68,8 @@ public sealed class ConfigGrantProvider : IGrantProvider
             var file = Path.Combine(dir, "agent.yaml");
             if (!File.Exists(file))
             {
-                errors.Add($"{folder}: missing agent.yaml.");
+                // File.Exists is false for a file in a directory the broker cannot search, too; say which it is.
+                errors.Add(CanList(dir, out var denied) ? $"{folder}: missing agent.yaml." : Unreadable($"{folder}/", denied!));
                 continue;
             }
 
@@ -70,6 +81,11 @@ public sealed class ConfigGrantProvider : IGrantProvider
             catch (YamlException ex)
             {
                 errors.Add($"{folder}/agent.yaml: {ex.Message}");
+                continue;
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+            {
+                errors.Add(Unreadable($"{folder}/agent.yaml", ex));
                 continue;
             }
 
@@ -100,6 +116,25 @@ public sealed class ConfigGrantProvider : IGrantProvider
         }
 
         return errors.Count > 0 ? throw new GrantConfigurationException(errors) : new ConfigGrantProvider(grants);
+    }
+
+    /// <summary>capybara-broker runs as its own user and reads capybarad's config tree through the shared group.</summary>
+    private static string Unreadable(string what, Exception ex) =>
+        $"{what} cannot be read ({ex.GetType().Name}: {ex.Message}). capybara-broker must be in group 'capybara' and the config tree group-readable (0750 directories, 0640 files); see deploy/README.md.";
+
+    private static bool CanList(string directory, out Exception? denied)
+    {
+        try
+        {
+            _ = Directory.EnumerateFileSystemEntries(directory).Any();
+            denied = null;
+            return true;
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            denied = ex;
+            return false;
+        }
     }
 
     private sealed class AgentGrantsYaml

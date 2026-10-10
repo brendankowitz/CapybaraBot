@@ -17,15 +17,23 @@ public sealed class FakeBrokerHandler : HttpMessageHandler
     /// <summary>Status for <c>POST /broker/freeze</c>; 500 is the broker's "frozen, but not durably".</summary>
     public HttpStatusCode FreezeStatus { get; set; } = HttpStatusCode.OK;
 
+    /// <summary>When set, <c>POST /broker/freeze</c> never answers (until the caller gives up).</summary>
+    public bool HangFreeze { get; set; }
+
     public IReadOnlyList<string> Requests => [.. _requests];
 
     public bool Received(string request) => _requests.Contains(request, StringComparer.Ordinal);
 
-    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         var path = request.RequestUri!.AbsolutePath;
         _requests.Enqueue($"{request.Method} {path}");
-        var response = (request.Method.Method, path) switch
+        if (HangFreeze && path == "/broker/freeze")
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+        }
+
+        return (request.Method.Method, path) switch
         {
             ("POST", "/broker/freeze") when FreezeStatus == HttpStatusCode.OK => Json(new FreezeOutcome(null, 0)),
             ("POST", "/broker/freeze") => new HttpResponseMessage(FreezeStatus),
@@ -35,7 +43,6 @@ public sealed class FakeBrokerHandler : HttpMessageHandler
             ("GET", _) when path.StartsWith("/broker/tools/", StringComparison.Ordinal) => Json(Array.Empty<BrokerToolDescriptor>()),
             _ => new HttpResponseMessage(HttpStatusCode.NotFound),
         };
-        return Task.FromResult(response);
     }
 
     private static HttpResponseMessage Json<T>(T value) => new(HttpStatusCode.OK) { Content = JsonContent.Create(value, options: BrokerJson.Options) };
@@ -79,7 +86,7 @@ public sealed class RecordingEvents : ICapybaraEvents
     }
 }
 
-/// <summary>A push channel that accepts everything and records it.</summary>
+/// <summary>A push channel that accepts everything and records it; <see cref="Hold"/> makes sends hang until released.</summary>
 public sealed class RecordingChannel : INotificationChannel
 {
     private readonly ConcurrentQueue<Notification> _sent = new();
@@ -90,11 +97,76 @@ public sealed class RecordingChannel : INotificationChannel
 
     public IReadOnlyList<Notification> Sent => [.. _sent];
 
-    public ValueTask SendAsync(Notification notification, CancellationToken cancellationToken = default)
+    /// <summary>When set, every send waits for this before it is recorded.</summary>
+    public TaskCompletionSource? Hold { get; set; }
+
+    public async ValueTask SendAsync(Notification notification, CancellationToken cancellationToken = default)
     {
+        if (Hold is { } hold)
+        {
+            await hold.Task.WaitAsync(cancellationToken);
+        }
+
         _sent.Enqueue(notification);
-        return ValueTask.CompletedTask;
     }
+}
+
+/// <summary>A runtime without a CLI that records starts, stops and restarts.</summary>
+public sealed class FakeSupervisedRuntime(Contracts.Agents.AgentId agent) : Runtime.Copilot.Hosting.IAgentRuntime, Runtime.Copilot.Supervision.ISupervisedRuntime
+{
+    private int _starts;
+    private int _restarts;
+    private int _stops;
+    private volatile bool _running;
+
+    public Contracts.Agents.AgentId Agent { get; } = agent;
+
+    public int Starts => _starts;
+
+    public int Restarts => _restarts;
+
+    public int Stops => _stops;
+
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref _starts);
+        _running = true;
+        return Task.CompletedTask;
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref _stops);
+        _running = false;
+        return Task.CompletedTask;
+    }
+
+    public Task RestartAsync(CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref _restarts);
+        _running = true;
+        return Task.CompletedTask;
+    }
+
+    public Task<bool> PingAsync(CancellationToken cancellationToken) => Task.FromResult(_running);
+
+    public Task<Runtime.Copilot.Hosting.SelfTestResult> SelfTestAsync(CancellationToken cancellationToken) =>
+        Task.FromResult(new Runtime.Copilot.Hosting.SelfTestResult(true, [], []));
+
+    public Task<Runtime.Copilot.Hosting.TurnResult> RunTurnAsync(Runtime.Copilot.Hosting.AgentTurnRequest request, CancellationToken cancellationToken) =>
+        Task.FromResult(Runtime.Copilot.Hosting.TurnResult.Blocked("fake"));
+
+    public Task<Runtime.Copilot.Hosting.TurnResult?> SteerAsync(string prompt, Contracts.Messaging.MessageOrigin origin, CancellationToken cancellationToken) =>
+        Task.FromResult<Runtime.Copilot.Hosting.TurnResult?>(null);
+
+    public Task SetModelAsync(string model, CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public Task EndSessionAsync(Runtime.Copilot.Hosting.TurnTarget target, CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public Task<Orchestration.Coordination.ConsultReply> ConsultAsync(string sessionId, string question, Contracts.Messaging.Envelope envelope, CancellationToken cancellationToken) =>
+        throw new NotSupportedException("The fake runtime does not answer consults.");
+
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
 
 internal static class Eventually

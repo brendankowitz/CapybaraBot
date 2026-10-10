@@ -9,6 +9,9 @@ Wants=network-online.target
 Type=exec
 User=capybara-broker
 Group=capybara-broker
+# Read access to capybarad's config tree (0750/0640, group capybara) for agents/*/agent.yaml grants (FR-CON-02). The broker
+# cannot traverse /var/lib/capybara (StateDirectoryMode=0700), so this grants nothing else.
+SupplementaryGroups=capybara
 ExecStart=/opt/capybara/capybara-broker
 WorkingDirectory=/opt/capybara
 Environment=DOTNET_ENVIRONMENT=Production

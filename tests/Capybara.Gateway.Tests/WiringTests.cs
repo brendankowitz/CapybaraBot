@@ -266,6 +266,8 @@ public sealed class WiringTests
     [InlineData("backup")]
     [InlineData("restore")]
     [InlineData("agent|Not An Id")]
+    [InlineData("agent")]
+    [InlineData("bakup")]
     public void Command_line_modes_exit_without_starting_the_gateway(string commandLine)
     {
         // backup without configured sources and restore without arguments are usage errors (2), as is a bad agent id.

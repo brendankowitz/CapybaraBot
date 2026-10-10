@@ -113,7 +113,20 @@ public static class CapybaraServiceCollectionExtensions
         runtime.StateRoot = host.StateRoot;
         runtime.ConfigRoot = host.ConfigRoot;
         runtime.GitHubToken ??= SystemdCredentials.Read(host.GitHubTokenCredential);
-        runtime.OtlpEndpoint ??= telemetry.OtlpEndpoint?.ToString();
+        var warnings = new CompositionWarnings();
+        if (runtime.OtlpEndpoint is null && telemetry.OtlpEndpoint is { } otlp)
+        {
+            // The CLI only exports OTLP over HTTP; a gRPC collector port would silently drop its spans.
+            if (string.Equals(telemetry.OtlpProtocol, "http/protobuf", StringComparison.OrdinalIgnoreCase))
+            {
+                runtime.OtlpEndpoint = otlp.ToString();
+            }
+            else
+            {
+                warnings.Add($"{TelemetryOptions.SectionName}:OtlpProtocol is '{telemetry.OtlpProtocol}', which the Copilot CLI cannot export to; agent CLI spans are off. Set {CopilotRuntimeOptions.SectionName}:OtlpEndpoint to an OTLP/HTTP endpoint to enable them.");
+            }
+        }
+
         var autoStart = runtime.AutoStart;
         if (soleAgent is not null)
         {
@@ -124,6 +137,7 @@ public static class CapybaraServiceCollectionExtensions
         services.AddSingleton(host);
         services.AddSingleton(fleet);
         services.AddSingleton(state);
+        services.AddSingleton(warnings);
         services.AddOptions<GatewayOptions>().Bind(configuration.GetSection(GatewayOptions.SectionName));
         services.TryAddSingleton(TimeProvider.System);
 
@@ -240,7 +254,8 @@ public static class CapybaraServiceCollectionExtensions
             fleet,
             sp.GetRequiredService<AgentRegistry>(),
             sp.GetRequiredService<RulesEngine>(),
-            sp.GetRequiredService<IConfigVersioning>()));
+            sp.GetRequiredService<IConfigVersioning>(),
+            state.ConfigScratch));
         services.AddSingleton<IProposalStore>(sp => new FileProposalStore(state.Proposals, sp.GetService<ILogger<FileProposalStore>>()));
         services.AddSingleton(sp => new ProposalService(
             sp.GetRequiredService<IProposalStore>(),
@@ -353,7 +368,8 @@ public static class CapybaraServiceCollectionExtensions
         if (settings.WebPush.PublicKey is { Length: > 0 } publicKey && SystemdCredentials.Read(settings.WebPush.PrivateKeyCredential) is { } privateKey)
         {
             var vapid = new WebPushVapidOptions(settings.WebPush.Subject, publicKey, privateKey);
-            services.AddHttpClient("capybara-webpush");
+            // Push endpoint URLs are capability paths: never log them.
+            services.AddHttpClient("capybara-webpush").RemoveAllLoggers();
             services.AddSingleton<INotificationChannel>(sp => new WebPushChannel(
                 sp.GetRequiredService<IHttpClientFactory>().CreateClient("capybara-webpush"),
                 sp.GetRequiredService<WebPushSubscriptionStore>(),
@@ -369,6 +385,33 @@ public static class CapybaraServiceCollectionExtensions
                 AllowedUserId = settings.Telegram.AllowedUserId,
                 DeepLinkBaseUrl = settings.Telegram.DeepLinkBaseUrl,
             });
+        }
+
+        BoundChannelSends(services);
+    }
+
+    /// <summary>
+    /// Wraps every channel registered so far in <see cref="TimeBoundedNotificationChannel"/>, so a hung endpoint falls
+    /// back to the next channel within 10 s instead of holding an approval push (NFR-04).
+    /// </summary>
+    private static void BoundChannelSends(IServiceCollection services)
+    {
+        for (var i = 0; i < services.Count; i++)
+        {
+            var descriptor = services[i];
+            if (descriptor.ServiceType != typeof(INotificationChannel) || descriptor.IsKeyedService)
+            {
+                continue;
+            }
+
+            Func<IServiceProvider, object> create = descriptor.ImplementationFactory
+                ?? (descriptor.ImplementationInstance is { } instance
+                    ? _ => instance
+                    : sp => ActivatorUtilities.CreateInstance(sp, descriptor.ImplementationType!));
+            services[i] = ServiceDescriptor.Singleton<INotificationChannel>(sp => new TimeBoundedNotificationChannel(
+                (INotificationChannel)create(sp),
+                TimeBoundedNotificationChannel.DefaultTimeout,
+                sp.GetRequiredService<TimeProvider>()));
         }
     }
 

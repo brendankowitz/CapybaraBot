@@ -10,7 +10,8 @@ namespace Capybara.Runtime.Copilot.Hosting;
 /// </summary>
 /// <remarks>
 /// Events are raised synchronously on the runtime's (or the SDK's event) thread, so subscribers must return quickly and
-/// hand any I/O off. A throwing subscriber is logged and never affects the turn or the other subscribers.
+/// hand any I/O off. A throwing subscriber is logged and never affects the turn or the other subscribers. The runtime is
+/// the only production raiser; the raise methods are public so hosts can be exercised without a CLI.
 /// </remarks>
 public sealed partial class RuntimeActivity(ILogger<RuntimeActivity> logger)
 {
@@ -25,13 +26,13 @@ public sealed partial class RuntimeActivity(ILogger<RuntimeActivity> logger)
     /// <summary>The policy refused a tool call that would have reached a URL.</summary>
     public event EventHandler<AgentId>? EgressDenied;
 
-    internal void OnTurnStarted(AgentId agent, SessionKind kind) => Raise(TurnStarted, new TurnActivityEventArgs(agent, kind, null), nameof(TurnStarted));
+    public void OnTurnStarted(AgentId agent, SessionKind kind) => Raise(TurnStarted, new TurnActivityEventArgs(agent, kind, null), nameof(TurnStarted));
 
-    internal void OnTurnEnded(AgentId agent, SessionKind kind, TurnResult? result) => Raise(TurnEnded, new TurnActivityEventArgs(agent, kind, result), nameof(TurnEnded));
+    public void OnTurnEnded(AgentId agent, SessionKind kind, TurnResult? result) => Raise(TurnEnded, new TurnActivityEventArgs(agent, kind, result), nameof(TurnEnded));
 
-    internal void OnCompacted(AgentId agent) => Raise(Compacted, agent, nameof(Compacted));
+    public void OnCompacted(AgentId agent) => Raise(Compacted, agent, nameof(Compacted));
 
-    internal void OnEgressDenied(AgentId agent) => Raise(EgressDenied, agent, nameof(EgressDenied));
+    public void OnEgressDenied(AgentId agent) => Raise(EgressDenied, agent, nameof(EgressDenied));
 
     private void Raise<T>(EventHandler<T>? handler, T args, string name)
     {

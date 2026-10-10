@@ -4,6 +4,7 @@ using Capybara.Gateway.Realtime;
 using Capybara.Observability.Alerts;
 using Capybara.Policy.Audit;
 using Capybara.Policy.Safety;
+using Capybara.Runtime.Copilot.Configuration;
 using Capybara.Runtime.Copilot.Supervision;
 
 namespace Capybara.Gateway.Wiring;
@@ -17,8 +18,10 @@ namespace Capybara.Gateway.Wiring;
 /// </summary>
 /// <remarks>
 /// Each step is isolated: a failing step raises a Critical alert and never stops the rest of the sequence. Engage and
-/// release run one at a time, in the order they happened. A broker that answers "frozen, but not durably" is frozen
-/// now but would forget it on restart, so it counts as engaged with a Critical alert.
+/// release run one at a time, in the order they happened; a step that runs after the switch was already flipped back
+/// is skipped. The broker freeze and the runtime stop run concurrently, and broker calls are bounded by
+/// <see cref="BrokerTimeout"/>, so a hung broker never delays stopping the CLIs. A broker that answers "frozen, but not
+/// durably" is frozen now but would forget it on restart, so it counts as engaged with a Critical alert.
 /// </remarks>
 public sealed partial class KillSwitchCoordinator(
     KillSwitch killSwitch,
@@ -29,9 +32,11 @@ public sealed partial class KillSwitchCoordinator(
     IAlertSink alerts,
     ICapybaraEvents events,
     TimeProvider time,
-    IHostApplicationLifetime lifetime,
+    CopilotRuntimeOptions runtime,
     ILogger<KillSwitchCoordinator> logger) : IHostedService, IDisposable
 {
+    public static readonly TimeSpan BrokerTimeout = TimeSpan.FromSeconds(10);
+
     public const string BrokerAlertKind = "killswitch.broker";
     public const string StepFailedAlertKind = "killswitch.step_failed";
     public const string EngagedAlertKind = "killswitch.engaged";
@@ -40,19 +45,19 @@ public sealed partial class KillSwitchCoordinator(
     private readonly Lock _gate = new();
     private Task _tail = Task.CompletedTask;
 
-    public Task StartAsync(CancellationToken cancellationToken)
+    public async Task StartAsync(CancellationToken cancellationToken)
     {
         killSwitch.Engaged += OnEngaged;
         killSwitch.Released += OnReleased;
 
-        // Composition re-engaged a switch that was on before the restart, so no turn can run. This service starts before
-        // the runtimes (it must hear every engagement), so finish the job once they have started: stop them again.
+        // Composition re-engaged a switch that was on before the restart. This service starts before the runtimes, so
+        // suspending the supervisor now means no CLI is ever started, resumed or self-tested while engaged; the rest of
+        // the sequence (broker freeze, audit, alert, broadcast) follows in the background.
         if (killSwitch.IsEngaged)
         {
-            lifetime.ApplicationStarted.Register(() => Enqueue(() => EngageAsync(killSwitch.Reason ?? "restored after restart", restored: true)));
+            await supervisor.SuspendAsync(cancellationToken);
+            Enqueue(() => EngageAsync(killSwitch.Reason ?? "restored after restart", restored: true));
         }
-
-        return Task.CompletedTask;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
@@ -103,6 +108,13 @@ public sealed partial class KillSwitchCoordinator(
 
     private async Task EngageAsync(string reason, bool restored)
     {
+        if (!killSwitch.IsEngaged)
+        {
+            // Released again before this ran; the queued release that follows restores everything.
+            LogSkipped(logger, "engage");
+            return;
+        }
+
         // Journal first: if capybarad dies part-way, the restart comes back engaged.
         await StepAsync("journal the engagement", () =>
         {
@@ -111,8 +123,9 @@ public sealed partial class KillSwitchCoordinator(
         });
         await StepAsync("audit the engagement", async () =>
             await audit.AppendAsync(new AuditRecord("kill_switch", restored ? "restored" : "engaged", Detail: reason), CancellationToken.None));
-        await FreezeBrokerAsync(reason);
-        await StepAsync("stop the runtimes", () => supervisor.SuspendAsync(CancellationToken.None));
+        await Task.WhenAll(
+            FreezeBrokerAsync(reason),
+            StepAsync("stop the runtimes", () => supervisor.SuspendAsync(CancellationToken.None)));
         await StepAsync("alert", async () =>
             await alerts.PublishAsync(new Alert(EngagedAlertKind, AlertSeverity.Critical, $"Kill switch engaged: {reason}. Resume from the desktop.", time.GetUtcNow()), CancellationToken.None));
         await StepAsync("broadcast", () => events.PublishKillSwitchChangedAsync(engaged: true, CancellationToken.None));
@@ -120,13 +133,21 @@ public sealed partial class KillSwitchCoordinator(
 
     private async Task ReleaseAsync()
     {
+        if (killSwitch.IsEngaged)
+        {
+            // Engaged again before this ran; the queued engagement that follows keeps everything stopped.
+            LogSkipped(logger, "release");
+            return;
+        }
+
         await StepAsync("audit the release", async () =>
             await audit.AppendAsync(new AuditRecord("kill_switch", "released", Detail: "desktop"), CancellationToken.None));
         await StepAsync("unfreeze the broker", async () =>
         {
             try
             {
-                await broker.UnfreezeAsync(CancellationToken.None);
+                using var timeout = new CancellationTokenSource(BrokerTimeout, time);
+                await broker.UnfreezeAsync(timeout.Token);
             }
             catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
             {
@@ -134,10 +155,15 @@ public sealed partial class KillSwitchCoordinator(
                 await alerts.PublishAsync(new Alert(BrokerAlertKind, AlertSeverity.Critical, $"The broker could not be unfrozen ({ex.Message}); connections stay disabled.", time.GetUtcNow()), CancellationToken.None);
             }
         });
-        await StepAsync("resume the runtimes", () =>
+        await StepAsync("resume the runtimes", async () =>
         {
             supervisor.Resume();
-            return Task.CompletedTask;
+
+            // Restart them now rather than at the next health check; only on a host that starts runtimes at all.
+            if (runtime.AutoStart)
+            {
+                await supervisor.CheckOnceAsync(CancellationToken.None);
+            }
         });
         await StepAsync("clear the journal", () =>
         {
@@ -156,7 +182,8 @@ public sealed partial class KillSwitchCoordinator(
     {
         try
         {
-            var outcome = await broker.FreezeAsync(reason, CancellationToken.None);
+            using var timeout = new CancellationTokenSource(BrokerTimeout, time);
+            var outcome = await broker.FreezeAsync(reason, timeout.Token);
             LogBrokerFrozen(logger, outcome.InFlightCalls);
         }
         catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.InternalServerError)
@@ -207,6 +234,9 @@ public sealed partial class KillSwitchCoordinator(
 
     [LoggerMessage(Level = LogLevel.Critical, Message = "Kill switch step failed: {Step}")]
     private static partial void LogStepFailed(ILogger logger, Exception exception, string step);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Kill switch {Step} skipped: the switch changed again before it ran")]
+    private static partial void LogSkipped(ILogger logger, string step);
 
     [LoggerMessage(Level = LogLevel.Critical, Message = "Kill switch sequence failed")]
     private static partial void LogSequenceFailed(ILogger logger, Exception exception);

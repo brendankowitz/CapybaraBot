@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Threading.Channels;
 using Capybara.Channels;
 using Capybara.Contracts.Agents;
 using Capybara.Contracts.Approvals;
@@ -23,7 +24,8 @@ namespace Capybara.Gateway.Wiring;
 /// Domain events are raised synchronously on the thread that changed state, so every bridge hands its I/O to the thread
 /// pool immediately: an approval push is on its way within the same instant as the gate decision (NFR-04 ≤10 s;
 /// low-risk approvals are batched by the router by design, FR-SAF-10). A failing bridge is logged and never reaches the
-/// publisher. In-flight deliveries are awaited on shutdown.
+/// publisher. Agent activity (turn start/end, approval pending) goes through one ordered queue instead, so clients
+/// never end on a stale state. In-flight deliveries are awaited on shutdown.
 /// </remarks>
 public sealed partial class EventBridge(
     ApprovalService approvals,
@@ -45,6 +47,13 @@ public sealed partial class EventBridge(
 
     private readonly ConcurrentDictionary<Task, byte> _inFlight = new();
 
+    // Activity updates (turn start/end, approval pending) are applied and broadcast strictly in the order the events were
+    // raised: applied out of order, a turn's end could land before its start and leave the agent Working forever.
+    private readonly Channel<(string What, Func<Task> Work)> _activity =
+        Channel.CreateUnbounded<(string, Func<Task>)>(new UnboundedChannelOptions { SingleReader = true });
+
+    private Task _activityLoop = Task.CompletedTask;
+
     public Task StartAsync(CancellationToken cancellationToken)
     {
         approvals.Requested += OnApprovalRequested;
@@ -58,6 +67,7 @@ public sealed partial class EventBridge(
         activity.EgressDenied += OnEgressDenied;
         pumps.TurnCompleted += OnInboxTurnCompleted;
         routines.Output += OnRoutineOutput;
+        _activityLoop = Task.Run(RunActivityAsync, CancellationToken.None);
         return Task.CompletedTask;
     }
 
@@ -74,17 +84,17 @@ public sealed partial class EventBridge(
         activity.EgressDenied -= OnEgressDenied;
         pumps.TurnCompleted -= OnInboxTurnCompleted;
         routines.Output -= OnRoutineOutput;
-        await Task.WhenAll(_inFlight.Keys).WaitAsync(cancellationToken);
+        _activity.Writer.TryComplete();
+        await Task.WhenAll([.. _inFlight.Keys, _activityLoop]).WaitAsync(cancellationToken);
     }
 
-    private void OnApprovalRequested(object? sender, ApprovalRequest approval) =>
-        Dispatch("approval requested", async () =>
-        {
-            // Phone first: it is the latency-bound path (NFR-04); the clients also refresh the list on reconnect.
-            await notifications.RouteAsync(NotificationFactory.Approval(approval));
-            await events.PublishApprovalRequestedAsync(approval);
-            await tracker.ApprovalPendingAsync(approval.Agent.Value);
-        });
+    /// <summary>The phone push and the client broadcast are independent: neither waits on the other's I/O (NFR-04).</summary>
+    private void OnApprovalRequested(object? sender, ApprovalRequest approval)
+    {
+        Dispatch("approval push", async () => await notifications.RouteAsync(NotificationFactory.Approval(approval)));
+        Dispatch("approval broadcast", () => events.PublishApprovalRequestedAsync(approval));
+        EnqueueActivity("approval pending", () => tracker.ApprovalPendingAsync(approval.Agent.Value));
+    }
 
     private void OnApprovalDecided(object? sender, ApprovalRequest approval) =>
         Dispatch("approval decided", () => events.PublishApprovalResolvedAsync(approval.Id));
@@ -104,27 +114,26 @@ public sealed partial class EventBridge(
     private void OnThreadAppended(object? sender, FleetThreadEntry entry) =>
         Dispatch("thread entry", () => events.PublishThreadEntryAsync(entry));
 
-    private void OnProposed(object? sender, ChangeProposal proposal) =>
-        Dispatch("proposal", async () =>
-        {
-            await events.PublishProposalAsync(proposal);
+    private void OnProposed(object? sender, ChangeProposal proposal)
+    {
+        Dispatch("proposal broadcast", () => events.PublishProposalAsync(proposal));
 
-            // Content-free: the diff is reviewed in the PWA, never on the phone (FR-AGT-06, NFR-06).
-            await notifications.RouteAsync(new Notification(
+        // Content-free: the diff is reviewed in the PWA, never on the phone (FR-AGT-06, NFR-06).
+        Dispatch("proposal push", async () => await notifications.RouteAsync(new Notification(
                 NotificationKind.Approval,
                 proposal.Agent,
                 $"proposal: {proposal.Agent} → {proposal.Kind}",
                 string.Empty,
                 NotificationPriority.Normal,
                 "/proposals",
-                IsSensitive: true));
-        });
+                IsSensitive: true)));
+    }
 
     private void OnTurnStarted(object? sender, TurnActivityEventArgs e) =>
-        Dispatch("turn started", () => tracker.TurnStartedAsync(e.Agent.Value));
+        EnqueueActivity("turn started", () => tracker.TurnStartedAsync(e.Agent.Value));
 
     private void OnTurnEnded(object? sender, TurnActivityEventArgs e) =>
-        Dispatch("turn ended", () => tracker.TurnCompletedAsync(e.Agent.Value, needsAttention: e.Result?.Status is TurnStatus.Failed or TurnStatus.LimitExceeded));
+        EnqueueActivity("turn ended", () => tracker.TurnCompletedAsync(e.Agent.Value, needsAttention: e.Result?.Status is TurnStatus.Failed or TurnStatus.LimitExceeded));
 
     private void OnCompacted(object? sender, AgentId agent) =>
         Dispatch("compaction", async () => await compaction.RecordCompactionAsync(agent));
@@ -149,6 +158,31 @@ public sealed partial class EventBridge(
         if (string.Equals(e.Routine.DeliveryTarget, "push", StringComparison.OrdinalIgnoreCase))
         {
             Dispatch("routine output", async () => await notifications.RouteAsync(NotificationFactory.Finished(e.Routine.Owner)));
+        }
+    }
+
+    private void EnqueueActivity(string what, Func<Task> work)
+    {
+        if (!_activity.Writer.TryWrite((what, work)))
+        {
+            LogBridgeFailed(logger, new InvalidOperationException("The event bridge has stopped."), what);
+        }
+    }
+
+    private async Task RunActivityAsync()
+    {
+        await foreach (var (what, work) in _activity.Reader.ReadAllAsync())
+        {
+            try
+            {
+                await work();
+            }
+#pragma warning disable CA1031 // One failed broadcast must not stop later activity updates.
+            catch (Exception ex)
+#pragma warning restore CA1031
+            {
+                LogBridgeFailed(logger, ex, what);
+            }
         }
     }
 

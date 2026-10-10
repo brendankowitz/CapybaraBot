@@ -57,11 +57,6 @@ public static class SkillLock
         return Convert.ToHexStringLower(sha.GetHashAndReset());
     }
 
-    private static void Write(string tierDirectory, SortedDictionary<string, string> entries)
-    {
-        var file = Path.Combine(tierDirectory, FileName);
-        var temp = file + ".tmp";
-        File.WriteAllText(temp, JsonSerializer.Serialize(entries, Json));
-        File.Move(temp, file, overwrite: true);
-    }
+    private static void Write(string tierDirectory, SortedDictionary<string, string> entries) =>
+        Configuration.ConfigTree.WriteAtomic(Path.Combine(tierDirectory, FileName), JsonSerializer.Serialize(entries, Json));
 }

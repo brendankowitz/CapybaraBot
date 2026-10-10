@@ -80,12 +80,21 @@ public sealed partial class RuntimeSupervisor : IDisposable
         }
     }
 
-    /// <summary>Releases a quarantined runtime so the next check restarts it. Only reachable from the gateway.</summary>
+    /// <summary>
+    /// Releases a quarantined runtime so the next check restarts it. Only reachable from the gateway. A runtime the
+    /// kill switch stopped stays marked as such, so its restart after release is still not counted as a crash.
+    /// </summary>
     public void Unquarantine(string agent)
     {
         lock (_gate)
         {
-            _states.Remove(agent);
+            if (_states.TryGetValue(agent, out var state))
+            {
+                state.Quarantined = false;
+                state.Crashes.Clear();
+                state.ConsecutiveFailures = 0;
+                state.NextAttemptAt = null;
+            }
         }
     }
 
@@ -112,18 +121,20 @@ public sealed partial class RuntimeSupervisor : IDisposable
 
     /// <summary>
     /// Stops every runtime's process and turns health checks off, so nothing restarts them (FR-SAF-06 kill switch).
-    /// Waits for a check in progress first. A runtime that fails to stop is logged and the rest are still stopped.
+    /// Checks are turned off at once, so a check in progress restarts nothing more; that check is then waited for, and
+    /// every runtime (including one it may just have restarted) is stopped. A runtime that fails to stop is logged and
+    /// the rest are still stopped. Idempotent.
     /// </summary>
     public async Task SuspendAsync(CancellationToken cancellationToken)
     {
+        lock (_gate)
+        {
+            _suspended = true;
+        }
+
         await _checks.WaitAsync(cancellationToken);
         try
         {
-            lock (_gate)
-            {
-                _suspended = true;
-            }
-
             foreach (var runtime in _runtimes)
             {
                 lock (_gate)
@@ -196,6 +207,12 @@ public sealed partial class RuntimeSupervisor : IDisposable
                 state.Stopped = false;
             }
 
+            return;
+        }
+
+        // Suspended while this runtime was being pinged: restarting it now would relaunch a CLI the kill switch stopped.
+        if (IsSuspended)
+        {
             return;
         }
 
