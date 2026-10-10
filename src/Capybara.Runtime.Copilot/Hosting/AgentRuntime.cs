@@ -404,10 +404,12 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
                     _mainTurn = null;
                 }
 
-                // Nothing may still run once the lock is released: steering in flight, or a run a late steer started.
+                // Nothing may still run once the lock is released: steering in flight, or a run a late steer started,
+                // which the kill switch and the turn's credit limit stop just like the turn's own.
                 try
                 {
-                    lateContent = await run.FinishAsync();
+                    using var stop = new TurnStop(turn, _killSwitch.FleetToken);
+                    lateContent = await run.FinishAsync(stop.Token);
                 }
                 catch (TurnAbortFailedException ex)
                 {
@@ -415,9 +417,10 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
                     await DropMainSessionAsync();
                 }
 
-                // Messages steered into this turn share its outcome; a late steer gets the run it started.
+                // Messages steered into this turn share its outcome, and its spend includes a late steer's run; a late
+                // steer gets the run it started.
                 result = (result ?? TurnResult.Failed("the turn did not complete", turn.Snapshot()))
-                    with { RoutineId = request.RoutineId, UserMessagesJoined = run.Joined };
+                    with { RoutineId = request.RoutineId, UserMessagesJoined = run.Joined, Evidence = turn.Snapshot() };
                 inFlight.Done.TrySetResult(lateContent is null ? result : result with { Content = lateContent });
             }
 
@@ -567,14 +570,10 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     /// </summary>
     private async Task<TurnResult> SendTurnAsync(TurnRun run, SessionTurnLog turn, string prompt, MessageSource source, Func<Task> discardSession, CancellationToken cancellationToken)
     {
-        using var overLimit = new CancellationTokenSource();
-
-        // Off the SDK's event thread: cancelling runs the send's cancellation callbacks.
-        using var limitHook = turn.OnLimitExceeded(() => _ = Task.Run(() => TryCancel(overLimit)));
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _killSwitch.FleetToken, overLimit.Token);
+        using var stop = new TurnStop(turn, _killSwitch.FleetToken, cancellationToken);
         try
         {
-            var reply = await run.SendAsync(new MessageOptions { Prompt = prompt, Source = source }, linked.Token);
+            var reply = await run.SendAsync(new MessageOptions { Prompt = prompt, Source = source }, stop.Token);
             return TurnResult.Completed(reply, turn.Snapshot());
         }
         catch (TurnAbortFailedException ex)
@@ -623,6 +622,30 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
 #pragma warning restore CA1031
         {
             LogAlertFailed(_logger, ex, _agent.Id.Value);
+        }
+    }
+
+    /// <summary>Fires when the caller cancels, the fleet kill switch trips, or the turn passes its credit limit.</summary>
+    private sealed class TurnStop : IDisposable
+    {
+        private readonly CancellationTokenSource _overLimit = new();
+        private readonly IDisposable _limitHook;
+        private readonly CancellationTokenSource _linked;
+
+        public TurnStop(SessionTurnLog turn, CancellationToken fleet, CancellationToken caller = default)
+        {
+            // Off the SDK's event thread: cancelling runs the send's cancellation callbacks.
+            _limitHook = turn.OnLimitExceeded(() => _ = Task.Run(() => TryCancel(_overLimit)));
+            _linked = CancellationTokenSource.CreateLinkedTokenSource(caller, fleet, _overLimit.Token);
+        }
+
+        public CancellationToken Token => _linked.Token;
+
+        public void Dispose()
+        {
+            _limitHook.Dispose();
+            _linked.Dispose();
+            _overLimit.Dispose();
         }
     }
 

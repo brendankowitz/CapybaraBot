@@ -100,13 +100,25 @@ public sealed class TurnRunTests
 
         var send = run.SendAsync(Prompt, Ct);
         Assert.True(await run.SteerAsync(Dm, Ct));
+        session.EmitUserMessage(session.SteerIds[0]);  // delivery=steering: inside the run
         session.Emit(TurnEventKind.Idle);
         finish.SetResult("reply");
         Assert.Equal("reply", await send);
 
         Assert.False(await run.SteerAsync(Dm, Ct));
-        Assert.Null(await run.FinishAsync());
+        Assert.Null(await run.FinishAsync(Ct));
         Assert.Equal(1, run.Joined);
+        Assert.DoesNotContain("abort", session.Calls);
+    }
+
+    [Fact]
+    public async Task Steering_is_closed_until_the_turn_is_sent()
+    {
+        var session = new ModelSession();
+        using var run = new TurnRun(session, steerable: true, Timings());
+
+        Assert.False(await run.SteerAsync(Dm, Ct));
+        Assert.Empty(session.Calls);
     }
 
     [Fact]
@@ -132,46 +144,93 @@ public sealed class TurnRunTests
     }
 
     [Fact]
-    public async Task A_steer_that_lands_after_idle_and_starts_its_own_run_is_waited_for_and_its_reply_returned()
+    public async Task A_steer_queued_behind_the_runs_last_call_is_part_of_that_run()
     {
+        // Live: a steer the loop could not inject emits user.message (delivery=queued) after assistant.turn_end, and the
+        // loop goes on without an idle in between; the run's one idle covers it.
         var finish = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var steerArrives = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var session = new ModelSession { SendAsyncResult = _ => finish.Task, SteerDelivery = steerArrives.Task };
+        var session = new ModelSession { SendAsyncResult = _ => finish.Task };
         using var run = new TurnRun(session, steerable: true, Timings());
 
         var send = run.SendAsync(Prompt, Ct);
-        var steer = run.SteerAsync(Dm, Ct);           // admitted while active, still in flight...
-        session.Emit(TurnEventKind.Idle);              // ...when the run ends
+        Assert.True(await run.SteerAsync(Dm, Ct));
+        session.Emit(TurnEventKind.Assistant, "OK");
+        session.EmitUserMessage(session.SteerIds[0]);
+        session.Emit(TurnEventKind.RunActivity);
+        session.Emit(TurnEventKind.Assistant, "AFTER");
+        session.Emit(TurnEventKind.Idle);
+        finish.SetResult("AFTER");
+        await send;
+
+        Assert.Null(await run.FinishAsync(Ct));
+        Assert.DoesNotContain("abort", session.Calls);
+    }
+
+    [Fact]
+    public async Task A_steer_whose_send_returns_before_the_idle_event_but_lands_after_it_has_its_run_awaited()
+    {
+        // Review round 3, I4: the steer's response came back before the turn's idle was dispatched, so it looked joined;
+        // its user.message (delivery=idle) after that idle shows it started a run of its own.
+        var finish = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var session = new ModelSession { SendAsyncResult = _ => finish.Task };
+        using var run = new TurnRun(session, steerable: true, Timings());
+
+        var send = run.SendAsync(Prompt, Ct);
+        Assert.True(await run.SteerAsync(Dm, Ct));     // the response is back while no idle has been seen
+        session.Emit(TurnEventKind.Idle);               // the turn's run ended before the CLI took the steer
         finish.SetResult("turn reply");
         await send;
-        steerArrives.SetResult();                      // the CLI takes it after idle and starts a run for it
-        Assert.True(await steer);
-        var finishing = run.FinishAsync();
-        session.Emit(TurnEventKind.Other);
+        var finishing = run.FinishAsync(Ct);
+        session.EmitUserMessage(session.SteerIds[0]);  // delivery=idle: a run of its own
+        session.Emit(TurnEventKind.RunActivity);
         session.Emit(TurnEventKind.Assistant, "reply to the DM");
+        await Task.Delay(50, Ct);
         Assert.False(finishing.IsCompleted);
         session.Emit(TurnEventKind.Idle);
 
         Assert.Equal("reply to the DM", await finishing);
+        Assert.DoesNotContain("abort", session.Calls);
     }
 
     [Fact]
-    public async Task A_late_steer_the_cli_merged_shows_no_activity_and_finishes_promptly()
+    public async Task A_steers_user_message_seen_before_its_send_returns_is_still_attributed()
     {
         var finish = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var steerArrives = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var session = new ModelSession { SendAsyncResult = _ => finish.Task, SteerDelivery = steerArrives.Task };
+        var session = new ModelSession { SendAsyncResult = _ => finish.Task };
+        session.OnSteer = (s, id) =>
+        {
+            s.Emit(TurnEventKind.Idle);
+            s.EmitUserMessage(id);
+            s.Emit(TurnEventKind.Assistant, "late reply");
+        };
         using var run = new TurnRun(session, steerable: true, Timings());
 
         var send = run.SendAsync(Prompt, Ct);
-        var steer = run.SteerAsync(Dm, Ct);
+        Assert.True(await run.SteerAsync(Dm, Ct));
+        finish.SetResult("turn reply");
+        await send;
+        var finishing = run.FinishAsync(Ct);
+        await Task.Delay(50, Ct);
+        Assert.False(finishing.IsCompleted);
+        session.Emit(TurnEventKind.Idle);
+
+        Assert.Equal("late reply", await finishing);
+    }
+
+    [Fact]
+    public async Task A_steer_never_taken_into_a_run_finishes_after_the_grace_without_an_abort()
+    {
+        var finish = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var session = new ModelSession { SendAsyncResult = _ => finish.Task };
+        using var run = new TurnRun(session, steerable: true, Timings());
+
+        var send = run.SendAsync(Prompt, Ct);
+        Assert.True(await run.SteerAsync(Dm, Ct));
         session.Emit(TurnEventKind.Idle);
         finish.SetResult("turn reply");
         await send;
-        steerArrives.SetResult();
-        await steer;
 
-        Assert.Null(await run.FinishAsync());
+        Assert.Null(await run.FinishAsync(Ct));
         Assert.DoesNotContain("abort", session.Calls);
     }
 
@@ -179,22 +238,75 @@ public sealed class TurnRunTests
     public async Task A_late_run_that_overruns_is_aborted_before_the_turn_ends()
     {
         var finish = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var steerArrives = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var session = new ModelSession { SendAsyncResult = _ => finish.Task, SteerDelivery = steerArrives.Task };
+        var session = new ModelSession { SendAsyncResult = _ => finish.Task };
         using var run = new TurnRun(session, steerable: true, Timings(timeout: TimeSpan.FromMilliseconds(150)));
+
+        var send = run.SendAsync(Prompt, Ct);
+        await run.SteerAsync(Dm, Ct);
+        session.Emit(TurnEventKind.Idle);
+        finish.SetResult("turn reply");
+        await send;
+        session.EmitUserMessage(session.SteerIds[0]);
+        session.Emit(TurnEventKind.Assistant, "partial");
+
+        Assert.Equal("partial", await run.FinishAsync(Ct));
+        Assert.Contains("abort", session.Calls);
+        Assert.False(session.Running);
+    }
+
+    [Fact]
+    public async Task A_late_run_is_aborted_at_once_when_the_turn_is_stopped()
+    {
+        // The kill switch or the turn's credit limit stop a late steer's run like the turn's own.
+        var finish = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var session = new ModelSession { SendAsyncResult = _ => finish.Task };
+        using var run = new TurnRun(session, steerable: true, Timings(timeout: TimeSpan.FromSeconds(30)));
+        using var stop = new CancellationTokenSource();
+
+        var send = run.SendAsync(Prompt, Ct);
+        await run.SteerAsync(Dm, Ct);
+        session.Emit(TurnEventKind.Idle);
+        finish.SetResult("turn reply");
+        await send;
+        session.EmitUserMessage(session.SteerIds[0]);
+        var finishing = run.FinishAsync(stop.Token);
+        await Task.Delay(50, Ct);
+        Assert.False(finishing.IsCompleted);
+
+        var stopped = DateTime.UtcNow;
+        await stop.CancelAsync();
+        await finishing;
+
+        Assert.Contains("abort", session.Calls);
+        Assert.True(DateTime.UtcNow - stopped < TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task Steering_that_never_completes_means_the_session_must_be_discarded()
+    {
+        var finish = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var session = new ModelSession { SendAsyncResult = _ => finish.Task, SteerDelivery = new TaskCompletionSource().Task };
+        using var run = new TurnRun(session, steerable: true, Timings());
 
         var send = run.SendAsync(Prompt, Ct);
         var steer = run.SteerAsync(Dm, Ct);
         session.Emit(TurnEventKind.Idle);
         finish.SetResult("turn reply");
         await send;
-        steerArrives.SetResult();
-        await steer;
-        session.Emit(TurnEventKind.Assistant, "partial");
 
-        Assert.Equal("partial", await run.FinishAsync());
-        Assert.Contains("abort", session.Calls);
-        Assert.False(session.Running);
+        await Assert.ThrowsAsync<TurnAbortFailedException>(() => run.FinishAsync(Ct));
+        Assert.False(steer.IsCompleted);
+    }
+
+    [Fact]
+    public void Only_the_root_agents_run_events_are_the_turns()
+    {
+        Assert.Equal(TurnEventKind.Idle, CopilotTurnSession.Map(new SessionIdleEvent { Data = new SessionIdleData() })?.Kind);
+        Assert.Equal(
+            new TurnEvent(TurnEventKind.UserMessage, MessageId: "m1"),
+            CopilotTurnSession.Map(new UserMessageEvent { Data = new UserMessageData { Content = "hi", MessageId = "m1" } }));
+        Assert.Null(CopilotTurnSession.Map(new AssistantMessageEvent { AgentId = "sub-1", Data = new AssistantMessageData { Content = "x", MessageId = "a" } }));
+        Assert.Null(CopilotTurnSession.Map(new SessionTitleChangedEvent { Data = new SessionTitleChangedData { Title = "t" } }));
     }
 
     /// <summary>A session that behaves like the bundled CLI around runs, idle and abort.</summary>
@@ -203,6 +315,7 @@ public sealed class TurnRunTests
         private readonly Lock _gate = new();
         private readonly List<Action<TurnEvent>> _handlers = [];
         private readonly List<string> _calls = [];
+        private readonly List<string> _steerIds = [];
 
         public Func<ModelSession, string?>? Send { get; init; }
 
@@ -211,6 +324,20 @@ public sealed class TurnRunTests
         public Task? SteerDelivery { get; init; }
 
         public Exception? SteerFailure { get; init; }
+
+        /// <summary>Runs when a steer reaches the session, before its send returns.</summary>
+        public Action<ModelSession, string>? OnSteer { get; set; }
+
+        public IReadOnlyList<string> SteerIds
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return [.. _steerIds];
+                }
+            }
+        }
 
         public bool Running { get; set; }
 
@@ -253,7 +380,7 @@ public sealed class TurnRunTests
             return Send is null ? "ok" : Send(this);
         }
 
-        public async Task SendAsync(MessageOptions message, CancellationToken cancellationToken)
+        public async Task<string> SendAsync(MessageOptions message, CancellationToken cancellationToken)
         {
             Record("steer");
             if (SteerFailure is not null)
@@ -261,10 +388,19 @@ public sealed class TurnRunTests
                 throw SteerFailure;
             }
 
+            var id = Guid.NewGuid().ToString();
+            lock (_gate)
+            {
+                _steerIds.Add(id);
+            }
+
+            OnSteer?.Invoke(this, id);
             if (SteerDelivery is not null)
             {
                 await SteerDelivery.WaitAsync(cancellationToken);
             }
+
+            return id;
         }
 
         public Task AbortAsync(CancellationToken cancellationToken)
@@ -278,9 +414,13 @@ public sealed class TurnRunTests
             return Task.CompletedTask;
         }
 
-        public void Emit(TurnEventKind kind, string? content = null)
+        public void Emit(TurnEventKind kind, string? content = null) => Emit(new TurnEvent(kind, content));
+
+        public void EmitUserMessage(string id) => Emit(new TurnEvent(TurnEventKind.UserMessage, MessageId: id));
+
+        private void Emit(TurnEvent e)
         {
-            Running = kind != TurnEventKind.Idle;
+            Running = e.Kind != TurnEventKind.Idle;
             Action<TurnEvent>[] handlers;
             lock (_gate)
             {
@@ -289,7 +429,7 @@ public sealed class TurnRunTests
 
             foreach (var handler in handlers)
             {
-                handler(new TurnEvent(kind, content));
+                handler(e);
             }
         }
 
