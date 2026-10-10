@@ -126,27 +126,37 @@ public sealed class CredentialManager(
             throw new OAuthException("invalid_state", "The authorization request expired; start consent again.");
         }
 
+        // Same lock as refresh: a refresh finishing late must not overwrite the freshly consented credential.
+        var gate = _refreshLocks.GetOrAdd(connection.Id, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken);
         OAuthTokenResponse token;
         try
         {
-            var registration = Registration(connection.Provider);
-            var secret = await ClientSecretAsync(registration, cancellationToken);
-            token = await oauth.ExchangeCodeAsync(registration.ResolveTokenEndpoint(connection.Provider), registration.ClientId!, secret, code, pending.Verifier, registration.RedirectUri!, cancellationToken);
-        }
-        catch (Exception ex) when (ex is OAuthException or HttpRequestException or JsonException)
-        {
-            await audit.AppendAsync(new AuditRecord("oauth_consent_completed", "deny", Detail: $"connection={connection.Id}; code exchange failed ({Describe(ex)})"), CancellationToken.None);
-            throw;
-        }
+            try
+            {
+                var registration = Registration(connection.Provider);
+                var secret = await ClientSecretAsync(registration, cancellationToken);
+                token = await oauth.ExchangeCodeAsync(registration.ResolveTokenEndpoint(connection.Provider), registration.ClientId!, secret, code, pending.Verifier, registration.RedirectUri!, cancellationToken);
+            }
+            catch (Exception ex) when (ex is OAuthException or HttpRequestException or JsonException)
+            {
+                await audit.AppendAsync(new AuditRecord("oauth_consent_completed", "deny", Detail: $"connection={connection.Id}; code exchange failed ({Describe(ex)})"), CancellationToken.None);
+                throw;
+            }
 
-        await vault.SetAsync(connection.Id, new ConnectionCredential
+            await vault.SetAsync(connection.Id, new ConnectionCredential
+            {
+                AccessToken = token.AccessToken,
+                AccessTokenExpiresAt = now.AddSeconds(token.ExpiresIn),
+                RefreshToken = token.RefreshToken,
+                ConsentedAt = now,
+                RefreshedAt = now,
+            }, cancellationToken);
+        }
+        finally
         {
-            AccessToken = token.AccessToken,
-            AccessTokenExpiresAt = now.AddSeconds(token.ExpiresIn),
-            RefreshToken = token.RefreshToken,
-            ConsentedAt = now,
-            RefreshedAt = now,
-        }, cancellationToken);
+            gate.Release();
+        }
         await audit.AppendAsync(new AuditRecord("oauth_consent_completed", "allow", Detail: $"connection={connection.Id}; refreshToken={(token.RefreshToken is null ? "absent" : "stored")}"), CancellationToken.None);
         return connection;
     }
@@ -215,10 +225,14 @@ public sealed class CredentialManager(
         }
         catch (Exception ex) when (ex is HttpRequestException || (ex is OperationCanceledException && !cancellationToken.IsCancellationRequested))
         {
-            // Let the next call retry delivery instead of waiting for an undelivered request to expire.
+            // Let the next call retry delivery instead of waiting for an undelivered request to expire. Only this
+            // request is withdrawn: one created meanwhile (e.g. from the desktop) stays.
             lock (_pendingGate)
             {
-                _pendingByConnection.Remove(connection.Id);
+                if (_pendingByConnection.TryGetValue(connection.Id, out var current) && ReferenceEquals(current.Request, request))
+                {
+                    _pendingByConnection.Remove(connection.Id);
+                }
             }
 
             await audit.AppendAsync(new AuditRecord("oauth_consent_requested", "deny", Detail: $"connection={connection.Id}; delivery failed ({Describe(ex)})"), CancellationToken.None);

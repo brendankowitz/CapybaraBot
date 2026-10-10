@@ -67,7 +67,7 @@ public sealed class McpEndpointTests : IAsyncLifetime
         Assert.Contains("message body", Assert.IsType<TextContentBlock>(Assert.Single(result.Content)).Text, StringComparison.Ordinal);
         var call = Assert.Single(_harness.Connector.Calls);
         Assert.Equal("read", call.Operation);
-        Assert.Equal("email_read", Assert.Single(_harness.Audit.Entries).Tool);
+        Assert.Equal("email_read", Assert.Single(_harness.BrokerCalls).Tool);
     }
 
     [Fact]

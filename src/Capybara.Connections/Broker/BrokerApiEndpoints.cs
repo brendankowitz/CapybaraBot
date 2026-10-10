@@ -21,7 +21,7 @@ namespace Capybara.Connections.Broker;
 /// <item><c>GET /broker/credentials/health</c> → <see cref="CredentialHealth"/>[] (metadata only)</item>
 /// <item><c>POST /broker/connections/{id}/authorize</c> → <see cref="InteractiveAuthRequest"/></item>
 /// <item><c>POST /broker/oauth/complete</c> <see cref="OAuthCompletion"/> → <see cref="ConnectionStatus"/></item>
-/// <item><c>POST /broker/freeze</c> <see cref="BrokerFreezeRequest"/>, <c>POST /broker/unfreeze</c> → 204</item>
+/// <item><c>POST /broker/freeze</c> <see cref="BrokerFreezeRequest"/> → <see cref="FreezeOutcome"/>, <c>POST /broker/unfreeze</c> → 204</item>
 /// <item><c>POST /broker/mcp/{agentId}/token</c> → <see cref="McpAgentEndpoint"/></item>
 /// <item><c>GET /broker/health</c> → <see cref="BrokerHealth"/></item>
 /// </list>
@@ -72,8 +72,8 @@ public static class BrokerApiEndpoints
             // Not bound to the request token: a disconnecting caller must not abort the kill switch (FR-SAF-06).
             var outcome = await freeze.FreezeAsync(request.Reason);
             return outcome.Durable
-                ? Results.NoContent()
-                : Results.Problem(outcome.Error, statusCode: StatusCodes.Status500InternalServerError, title: "frozen, but not durably");
+                ? Results.Ok(outcome)
+                : Results.Problem($"{outcome.Error}; inFlightCalls={outcome.InFlightCalls}", statusCode: StatusCodes.Status500InternalServerError, title: "frozen, but not durably");
         });
         api.MapPost("/unfreeze", async (BrokerFreeze freeze, CancellationToken ct) =>
         {

@@ -20,7 +20,9 @@ public sealed class BrokerTests
         Assert.True(result.Allowed);
         Assert.Equal(Taint.Tainted, result.Taint);
         Assert.DoesNotContain(token, result.Text, StringComparison.Ordinal);
-        var entry = Assert.Single(h.Audit.Entries);
+        Assert.Equal(["broker_attempt", "broker_call"], h.Audit.Entries.Select(e => e.Kind));
+        Assert.Equal(h.Audit.Entries[0].ArgsHash, h.Audit.Entries[1].ArgsHash);
+        var entry = Assert.Single(h.BrokerCalls);
         Assert.Equal(("broker_call", "allow", "ea", "email_read", "agent:ea:main"), (entry.Kind, entry.Decision, entry.Agent, entry.Tool, entry.SessionId));
         Assert.Equal(64, entry.ArgsHash!.Length);
         Assert.Contains("taint=Tainted", entry.Detail, StringComparison.Ordinal);
@@ -54,10 +56,14 @@ public sealed class BrokerTests
         await h.Broker.InvokeAsync(new BrokerCall("research", "email", "read", "{\"id\":\"1\"}"), ct);    // no grants
         await h.Broker.InvokeAsync(new BrokerCall("ea", "email", "read", "{\"id\":\"1\"}"), ct);          // allowed
 
-        Assert.Equal(["deny", "deny", "deny", "deny", "allow"], h.Audit.Entries.Select(e => e.Decision));
-        Assert.Contains("not authorized", h.Audit.Entries[0].Detail, StringComparison.Ordinal);
-        Assert.Contains("no matching grant", h.Audit.Entries[1].Detail, StringComparison.Ordinal);
-        Assert.Contains("not valid JSON", h.Audit.Entries[2].Detail, StringComparison.Ordinal);
+        var outcomes = h.BrokerCalls.ToList();
+        Assert.Equal(["deny", "deny", "deny", "deny", "allow"], outcomes.Select(e => e.Decision));
+        Assert.Contains("not authorized", outcomes[0].Detail, StringComparison.Ordinal);
+        Assert.Contains("no matching grant", outcomes[1].Detail, StringComparison.Ordinal);
+        Assert.Contains("not valid JSON", outcomes[2].Detail, StringComparison.Ordinal);
+
+        // Only the call that reached the connector has an attempt record.
+        Assert.Single(h.Audit.Entries, e => e.Kind == "broker_attempt");
         Assert.Single(h.Connector.Calls);
     }
 
@@ -72,7 +78,7 @@ public sealed class BrokerTests
 
         Assert.False(result.Allowed);
         Assert.Contains("Missing argument: id", result.Reason, StringComparison.Ordinal);
-        Assert.Equal("deny", Assert.Single(h.Audit.Entries).Decision);
+        Assert.Equal("deny", Assert.Single(h.BrokerCalls).Decision);
     }
 
     [Fact]
@@ -115,7 +121,7 @@ public sealed class BrokerTests
         Assert.Contains("frozen", frozen.Reason, StringComparison.Ordinal);
         Assert.True(thawed.Allowed);
         Assert.Single(h.Connector.Calls);
-        Assert.Equal(["broker_freeze", "broker_call", "broker_unfreeze", "broker_call"], h.Audit.Entries.Select(e => e.Kind));
+        Assert.Equal(["broker_freeze", "broker_call", "broker_unfreeze", "broker_attempt", "broker_call"], h.Audit.Entries.Select(e => e.Kind));
     }
 
     [Fact]
@@ -139,7 +145,7 @@ public sealed class BrokerTests
         var path = Path.Combine(dir.Path, "audit", "broker-audit.jsonl");
         using var log = new FileAuditLog(path, TimeProvider.System);
         using var h = new BrokerHarness();
-        var broker = new ConnectionBroker(new Grants.GrantEnforcer(h.Grants), h.Catalog, h.Registry, h.Credentials, log, h.Freeze);
+        var broker = h.CreateBroker(log);
         await h.AuthorizeAsync();
         var ct = TestContext.Current.CancellationToken;
 
@@ -152,7 +158,7 @@ public sealed class BrokerTests
             entries.Add(entry);
         }
 
-        Assert.Equal(["allow", "deny"], entries.Select(e => e.Decision));
+        Assert.Equal(["attempt", "allow", "deny"], entries.Select(e => e.Decision));
         Assert.True(await log.VerifyAsync(ct));
     }
 

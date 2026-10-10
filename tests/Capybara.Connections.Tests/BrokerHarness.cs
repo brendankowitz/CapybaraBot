@@ -9,6 +9,7 @@ using Capybara.Contracts.Connections;
 using Capybara.Contracts.Messaging;
 using Capybara.Contracts.Storage;
 using Capybara.Testing;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 
 namespace Capybara.Connections.Tests;
@@ -41,8 +42,11 @@ internal sealed class BrokerHarness : IDisposable
         FreezeMarker = freezeMarker ?? Path.Combine(_dir.Path, "broker.frozen");
         Freeze = new BrokerFreeze(FreezeMarker, Audit);
         Catalog = new BrokerToolCatalog(Grants, Registry);
-        Broker = new ConnectionBroker(new GrantEnforcer(Grants), Catalog, Registry, Credentials, Audit, Freeze);
+        Broker = CreateBroker(Audit);
     }
+
+    public ConnectionBroker CreateBroker(Policy.Audit.IAuditLog audit) =>
+        new(new GrantEnforcer(Grants), Catalog, Registry, Credentials, audit, Freeze, NullLogger<ConnectionBroker>.Instance);
 
     public FakeTimeProvider Time { get; } = new(DateTimeOffset.Parse("2026-10-10T08:00:00Z", System.Globalization.CultureInfo.InvariantCulture));
 

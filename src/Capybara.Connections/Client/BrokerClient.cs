@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using Capybara.Connections.Broker;
 using Capybara.Connections.Health;
 using Capybara.Connections.Model;
 using Capybara.Connections.OAuth;
@@ -39,7 +40,14 @@ public sealed class BrokerClient(HttpClient http)
     /// broker could not make the freeze durable or audit it; the broker is frozen in memory regardless, so callers
     /// should alert rather than retry blindly.
     /// </summary>
-    public ValueTask FreezeAsync(string reason, CancellationToken cancellationToken = default) => PostAsync("/broker/freeze", new BrokerFreezeRequest(reason), cancellationToken);
+    /// <returns>How many provider requests were already in flight when the freeze landed (they cannot be recalled).</returns>
+    public async ValueTask<FreezeOutcome> FreezeAsync(string reason, CancellationToken cancellationToken = default)
+    {
+        using var response = await http.PostAsJsonAsync("/broker/freeze", new BrokerFreezeRequest(reason), BrokerJson.Options, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<FreezeOutcome>(BrokerJson.Options, cancellationToken)
+            ?? throw new HttpRequestException("The broker returned no freeze outcome.");
+    }
 
     public ValueTask UnfreezeAsync(CancellationToken cancellationToken = default) => PostAsync<object?>("/broker/unfreeze", null, cancellationToken);
 
