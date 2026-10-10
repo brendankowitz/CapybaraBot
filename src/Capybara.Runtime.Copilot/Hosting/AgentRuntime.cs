@@ -65,6 +65,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     private CapybaraSession? _mainSession;
     private string _model;
     private InFlightTurn? _mainTurn;
+    private bool _mainToolsAtMaxDepth;
 
     public AgentRuntime(
         AgentDefinition agent,
@@ -345,15 +346,16 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         CopilotSession? session = null;
         try
         {
-            var budget = request.Budget ?? new Budget(_agent.Budget.SessionMaxCredits, MainTurnToolCalls, _options.TurnTimeout);
-            var envelope = _envelopes.CreateRoot(request.Principal, _agent.Id, budget, _options.TurnTimeout, request.RootTaskId);
+            var (envelope, creditLimit) = TurnEnvelope(request);
             session = await EnsureMainSessionAsync(envelope, cancellationToken);
             context = _mainSession!;
             context.Envelope = envelope;
             context.TurnOrigin = request.Origin;
+            context.TurnFrom = request.From;
             context.RoutineId = request.RoutineId;
             context.DryRun = request.DryRun;
-            var turn = context.BeginTurn(request.Budget?.Credits);
+            var turn = context.BeginTurn(creditLimit);
+            await MatchToolsToDepthAsync(session, context, cancellationToken);
             _taint.Apply(context.SessionId, request.Taint);
 
             if (request.Model is { } model && model != context.Model)
@@ -407,6 +409,40 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         }
     }
 
+    /// <summary>
+    /// The envelope a turn runs under, and its credit limit. A turn handling another agent's message continues that
+    /// message's chain within its carved budget (FR-A2A-05), which also limits the turn's own spend; any other turn is a
+    /// new root, limited only by a routine's per-run budget when it has one.
+    /// </summary>
+    private (Envelope Envelope, decimal? CreditLimit) TurnEnvelope(AgentTurnRequest request)
+    {
+        var cap = request.Budget ?? new Budget(_agent.Budget.SessionMaxCredits, MainTurnToolCalls, _options.TurnTimeout);
+        if (request.Origin == MessageOrigin.Agent && request.Envelope is { } incoming)
+        {
+            var continued = EnvelopeFactory.ContinueFrom(incoming, _agent.Id, cap);
+            return (continued, continued.Budget.Credits);
+        }
+
+        return (_envelopes.CreateRoot(request.Principal, _agent.Id, cap, _options.TurnTimeout), request.Budget?.Credits);
+    }
+
+    /// <summary>
+    /// The main session's custom tools are fixed when it is built, but a turn continuing another agent's chain may run at
+    /// maximum depth, where agent-to-agent tools must be absent (FR-A2A-06). The tool set is swapped whenever a turn's
+    /// depth class differs from the one it was built for.
+    /// </summary>
+    private async Task MatchToolsToDepthAsync(CopilotSession session, CapybaraSession context, CancellationToken cancellationToken)
+    {
+        var atMax = context.Envelope.IsAtMaxDepth;
+        if (atMax == _mainToolsAtMaxDepth)
+        {
+            return;
+        }
+
+        await session.SetToolsAsync([.. await _configs.BuildToolsAsync(context, cancellationToken)], cancellationToken);
+        _mainToolsAtMaxDepth = atMax;
+    }
+
     /// <summary>A per-turn model override (a routine's model) does not outlive its turn.</summary>
     private async Task RestoreModelAsync(CopilotSession? session, CapybaraSession context)
     {
@@ -444,16 +480,16 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         await gate.WaitAsync(cancellationToken);
         try
         {
-            var envelope = target.Task?.Envelope
-                ?? _envelopes.CreateRoot(request.Principal, _agent.Id, request.Budget ?? new Budget(_agent.Budget.SessionMaxCredits, MainTurnToolCalls, _options.TurnTimeout), _options.TurnTimeout, request.RootTaskId);
+            var (envelope, creditLimit) = target.Task is { } task ? (task.Envelope, task.Envelope.Budget.Credits) : TurnEnvelope(request);
             var context = new CapybaraSession(_agent, sessionId, target.Kind, envelope, target.Task?.Id)
             {
                 TurnOrigin = request.Origin,
+                TurnFrom = request.From,
                 RoutineId = request.RoutineId,
                 DryRun = request.DryRun,
                 Model = request.Model ?? _model,
             };
-            var turn = context.BeginTurn(target.Task?.Envelope.Budget.Credits ?? request.Budget?.Credits);
+            var turn = context.BeginTurn(creditLimit);
             _taint.Apply(sessionId, envelope.Taint);
             _taint.Apply(sessionId, request.Taint);
 
@@ -625,6 +661,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         _mainSession ??= new CapybaraSession(_agent, SessionIds.Main(_agent.Id), SessionKind.Main, envelope) { Model = _model };
         _mainSession.Envelope = envelope;
         _main = await OpenAsync(_mainSession, cancellationToken);
+        _mainToolsAtMaxDepth = envelope.IsAtMaxDepth;
         return _main;
     }
 

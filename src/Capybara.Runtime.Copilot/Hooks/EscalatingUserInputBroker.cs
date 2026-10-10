@@ -1,4 +1,5 @@
 using Capybara.Channels;
+using Capybara.Contracts.Messaging;
 using Capybara.Orchestration.Coordination;
 using Capybara.Runtime.Copilot.Configuration;
 using Capybara.Runtime.Copilot.Sessions;
@@ -10,8 +11,9 @@ namespace Capybara.Runtime.Copilot.Hooks;
 /// <c>ask_user</c> routing (FR-A2A-07): only the root, user-facing agent of a piece of work talks to the human. A
 /// sub-agent working a delegated task instead sets the task to <c>INPUT_REQUIRED</c>; the question bubbles up the hop
 /// path to the requester, whose answer comes back later as a message in the task session (agent content, so data and
-/// never consent, FR-A2A-08). A root session escalates to the user's phone and waits up to
-/// <see cref="CopilotRuntimeOptions.UserEscalationTimeout"/>. Consults and dry runs never ask anyone.
+/// never consent, FR-A2A-08). A root turn started by the user or the host escalates to the user's phone and waits up to
+/// <see cref="CopilotRuntimeOptions.UserEscalationTimeout"/>. A turn handling another agent's message is told to ask that
+/// agent instead; event-triggered turns (attacker-controllable content), consults and dry runs never ask anyone.
 /// </summary>
 /// <remarks>Without an <see cref="IUserEscalation"/> (no phone channel) a root session's question goes unanswered.</remarks>
 public sealed partial class EscalatingUserInputBroker(
@@ -41,7 +43,16 @@ public sealed partial class EscalatingUserInputBroker(
             return result.Success ? QuestionPassedUp : null;
         }
 
-        if (session.Depth > 0 || escalation is null)
+        // Only a turn the user or the host started is user-facing. A turn handling another agent's message is not: an
+        // agent's content must never put a question in front of the user (FR-A2A-08).
+        if (session.TurnOrigin == MessageOrigin.Agent)
+        {
+            return session.TurnFrom is { } sender
+                ? $"Only the user-facing agent may ask the user. Send your question to {sender} with send_message and end this turn; the reply will arrive as a new message."
+                : null;
+        }
+
+        if (session.TurnOrigin is not (MessageOrigin.User or MessageOrigin.System) || session.Depth > 0 || escalation is null)
         {
             return null;
         }

@@ -71,6 +71,13 @@ public sealed partial class SessionHandlers(
             return Deny("the arguments contain a secret or credential; secrets must never be passed to tools");
         }
 
+        // FR-A2A-06: the tools are removed at max depth; this also covers a live session whose tools could not be swapped.
+        if (session.Envelope.IsAtMaxDepth && FleetTools.AgentToAgent.Contains(input.ToolName, StringComparer.Ordinal))
+        {
+            turn.RecordAction($"{input.ToolName}: denied (depth limit)");
+            return Deny($"depth limit reached ({Contracts.Messaging.Envelope.MaxDepth}); agent-to-agent calls are not available in this turn");
+        }
+
         // FR-RTN-08: checked before the protocol bypass, so no dry run reaches another agent, memory or a proposal.
         if (session.DryRun && DryRunForbidden.Contains(input.ToolName))
         {

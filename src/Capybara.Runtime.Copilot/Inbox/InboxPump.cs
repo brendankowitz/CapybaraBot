@@ -266,7 +266,7 @@ public sealed partial class InboxPump
                 Target = target,
                 From = message.From,
                 Taint = message.Taint,
-                RootTaskId = target.Kind == SessionKind.Main ? message.Envelope?.RootTaskId : null,
+                Envelope = message.Origin == MessageOrigin.Agent && target.Task is null ? message.Envelope : null,
             },
             assignment);
     }

@@ -34,6 +34,24 @@ public sealed class EnvelopeFactory(TimeProvider time)
         };
     }
 
+    /// <summary>
+    /// The envelope of a turn that handles another agent's message (FR-A2A-05): it continues the sender's chain — same
+    /// trace, root task, parent task, depth, deadline, taint and principal — within the budget carved for the hop, never
+    /// more than <paramref name="cap"/>. The hop path restarts at <paramref name="self"/> so the receiver can reply to
+    /// the sender; the depth limit and the per-pair exchange limit (keyed by the root task) still bound the chain.
+    /// </summary>
+    public static Envelope ContinueFrom(Envelope incoming, AgentId self, Budget cap)
+    {
+        ArgumentNullException.ThrowIfNull(incoming);
+        ArgumentNullException.ThrowIfNull(cap);
+        var budget = incoming.Budget;
+        return incoming with
+        {
+            HopPath = [self],
+            Budget = new Budget(Math.Min(budget.Credits, cap.Credits), Math.Min(budget.ToolCalls, cap.ToolCalls), budget.Wallclock < cap.Wallclock ? budget.Wallclock : cap.Wallclock),
+        };
+    }
+
     public EnvelopeResult CreateChild(Envelope parent, AgentId target, Budget requested, Taint callerTaint, string? parentTaskId = null)
     {
         ArgumentNullException.ThrowIfNull(parent);

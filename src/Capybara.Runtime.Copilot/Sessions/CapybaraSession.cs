@@ -71,7 +71,10 @@ public sealed class CapybaraSession
     /// <summary>Who triggered the current turn. Only <see cref="MessageOrigin.User"/> can be consent.</summary>
     public MessageOrigin TurnOrigin { get; set; } = MessageOrigin.System;
 
-    /// <summary>Routine that triggered the turn, for cost attribution. Its usage is reported by the routine run.</summary>
+    /// <summary>The agent whose message started the current turn, when <see cref="TurnOrigin"/> is an agent.</summary>
+    public AgentId? TurnFrom { get; set; }
+
+    /// <summary>Routine that triggered the turn, for cost attribution (FR-OBS-03).</summary>
     public string? RoutineId { get; set; }
 
     /// <summary>

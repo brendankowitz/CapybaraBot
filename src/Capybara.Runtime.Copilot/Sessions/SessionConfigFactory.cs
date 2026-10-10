@@ -159,13 +159,32 @@ public sealed partial class SessionConfigFactory(
         return [.. tools, .. protocol.Where(t => !tools.Contains(t, StringComparer.Ordinal))];
     }
 
+    /// <summary>
+    /// The custom tools for <paramref name="session"/> as it is now (its depth may have changed since it was built), for
+    /// <c>SetToolsAsync</c> on a live session. Lists broker tools afresh.
+    /// </summary>
+    public async ValueTask<IReadOnlyList<AIFunctionDeclaration>> BuildToolsAsync(CapybaraSession session, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        var brokerTools = await BrokerToolsAsync(session, cancellationToken);
+        return ComposeTools(session, AvailableToolsFor(session), brokerTools);
+    }
+
+    /// <summary>Host tools win a name clash: a broker tool can never shadow a fleet tool. Broker tools are gated.</summary>
+    private List<AIFunctionDeclaration> ComposeTools(CapybaraSession session, IReadOnlyList<string> available, IReadOnlyList<AIFunction> brokerTools)
+    {
+        var hostTools = tools.GetTools(session, [.. available]);
+        var hostNames = hostTools.Select(t => t.Name).ToHashSet(StringComparer.Ordinal);
+        var gated = brokerTools.Where(t => !hostNames.Contains(t.Name)).ToList();
+        session.SetCustomTools(hostNames, gated.Select(t => t.Name));
+        return [.. hostTools, .. gated.Select(t => handlers.GateInvocation(session, t))];
+    }
+
     private T Apply<T>(T config, CapybaraSession session, SessionSecrets resolved, IReadOnlyList<AIFunction> brokerTools)
         where T : SessionConfigBase
     {
         var agent = session.Agent;
         var available = AvailableToolsFor(session);
-        var hostTools = tools.GetTools(session, [.. available]);
-        var hostNames = hostTools.Select(t => t.Name).ToHashSet(StringComparer.Ordinal);
 
         config.Model = session.Model;
         config.RemoteSession = RemoteSessionFor(session);
@@ -173,10 +192,7 @@ public sealed partial class SessionConfigFactory(
         config.GitHubTokenProvider = GitHubTokenProvider();
         config.AvailableTools = [.. available, .. InfrastructureTools];
 
-        // Host tools win a name clash: a broker tool can never shadow a fleet tool.
-        var gated = brokerTools.Where(t => !hostNames.Contains(t.Name)).ToList();
-        config.Tools = [.. hostTools, .. gated.Select(t => handlers.GateInvocation(session, t))];
-        session.SetCustomTools(hostNames, gated.Select(t => t.Name));
+        config.Tools = [.. ComposeTools(session, available, brokerTools)];
         config.McpServers = McpServersFor(agent, resolved.McpTokens);
         config.ToolSearch = new ToolSearchConfig { Enabled = true, DeferThreshold = options.ToolSearchDeferThreshold };
         config.ManagedSettings = ManagedSettingsFor(agent);

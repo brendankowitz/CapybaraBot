@@ -348,7 +348,8 @@ public sealed class InboxPumpTests
         });
 
         var request = Assert.Single(ea.Requests);
-        Assert.Equal(root.RootTaskId, request.RootTaskId);
+        Assert.Equal(root.RootTaskId, request.Envelope!.RootTaskId);
+        Assert.Equal(1, request.Envelope.Depth);
         Assert.Equal("user:brendan", request.Principal);
     }
 

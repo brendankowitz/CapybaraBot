@@ -35,8 +35,10 @@ public sealed record AgentTurnRequest
     public Budget? Budget { get; init; }
 
     /// <summary>
-    /// The agent-to-agent conversation this turn continues. The turn gets a fresh root envelope (so it may reply to the
-    /// sender) under the same root task id, so the per-pair exchange limit spans turns (FR-A2A-11).
+    /// For a turn that handles another agent's message: the message's envelope. The turn continues that chain — depth,
+    /// carved budget, deadline, root task and taint carry over (FR-A2A-05/06, FR-A2A-11) — instead of starting a fresh
+    /// root. Ignored unless <see cref="Origin"/> is <see cref="MessageOrigin.Agent"/>, and for delegated tasks, which run
+    /// under the task's own envelope.
     /// </summary>
-    public string? RootTaskId { get; init; }
+    public Envelope? Envelope { get; init; }
 }
