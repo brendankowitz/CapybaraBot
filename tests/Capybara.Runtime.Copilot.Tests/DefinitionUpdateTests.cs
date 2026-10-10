@@ -77,6 +77,44 @@ public sealed class DefinitionUpdateTests
     }
 
     [Fact]
+    public async Task When_the_replacement_cli_fails_to_start_the_next_main_turn_still_uses_the_edited_definition()
+    {
+        // Every CLI start fails (no such executable), leaving a client that cannot serve: the swap's restart throws.
+        var broker = new ListingRecorder();
+        using var f = new RuntimeFixture(broker: broker);
+        f.Options.CliPath = Path.Combine(f.Root, "no-such-copilot-cli");
+        var agent = Ea with { Tools = [.. Ea.Tools, "email_read"] };
+        await using var runtime = f.Runtime(agent);
+        await Assert.ThrowsAnyAsync<Exception>(() => runtime.StartAsync(Ct));
+
+        // A main turn builds the main-session context from the original definition (and then fails: no CLI).
+        await runtime.RunTurnAsync(new AgentTurnRequest { Prompt = "hi", Origin = Contracts.Messaging.MessageOrigin.User, Principal = "user" }, Ct);
+        Assert.Contains(broker.Listings, tools => tools.Contains("email_read"));
+
+        var narrowed = agent with { Tools = [.. Ea.Tools], EgressDomains = [] };
+        await Assert.ThrowsAnyAsync<Exception>(() => runtime.UpdateDefinitionAsync(narrowed, Ct));
+        broker.Listings.Clear();
+
+        await runtime.RunTurnAsync(new AgentTurnRequest { Prompt = "hi", Origin = Contracts.Messaging.MessageOrigin.User, Principal = "user" }, Ct);
+
+        Assert.Same(narrowed, runtime.Definition);
+        Assert.NotEmpty(broker.Listings);
+        Assert.All(broker.Listings, tools => Assert.DoesNotContain("email_read", tools));
+    }
+
+    /// <summary>Records the tool allowlist every session build asks the broker for: the definition that session uses.</summary>
+    private sealed class ListingRecorder : Connections.Client.IBrokerToolSource
+    {
+        public System.Collections.Concurrent.ConcurrentBag<string[]> Listings { get; } = [];
+
+        public ValueTask<IReadOnlyList<Microsoft.Extensions.AI.AIFunction>> GetToolsAsync(string agentId, string sessionId, IReadOnlyCollection<string> availableTools, CancellationToken cancellationToken = default)
+        {
+            Listings.Add([.. availableTools]);
+            return ValueTask.FromResult<IReadOnlyList<Microsoft.Extensions.AI.AIFunction>>([]);
+        }
+    }
+
+    [Fact]
     public async Task A_process_level_edit_to_a_runtime_that_is_not_running_starts_no_cli()
     {
         // Stopped by the kill switch, or never started on this host: the release (or the next start) uses the new definition.

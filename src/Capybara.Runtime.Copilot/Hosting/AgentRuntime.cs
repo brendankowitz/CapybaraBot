@@ -142,6 +142,11 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
                     return change;
                 }
 
+                // The main session's context carries the definition it was built with. Discard it first, so that whatever
+                // fails below (a CLI that will not start), the next turn builds a new one from the current definition and
+                // resumes the persisted session with that configuration re-registered (FR-AGT-03).
+                _mainSession = null;
+
                 if (change == DefinitionChange.Process && _client is not null)
                 {
                     // The running process enforces the old egress, MCP servers and provider. No session turn may run on it
@@ -169,9 +174,6 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
                     await DropMainSessionAsync();
                 }
 
-                // The main session's context carries the definition it was built with; the next turn builds a new one
-                // and resumes the persisted session with the new configuration re-registered (FR-AGT-03).
-                _mainSession = null;
                 LogDefinitionUpdated(_logger, definition.Id.Value, change);
                 return change;
             }
@@ -225,6 +227,48 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     }
 
     public async Task<bool> PingAsync(CancellationToken cancellationToken)
+    {
+        // A start, stop, restart or definition swap is in progress: the CLI is being changed on purpose, not down. Whoever
+        // acts on "down" must still confirm it under the lock (RestartIfDownAsync), since this can change right after.
+        if (_lifecycleLock.CurrentCount == 0)
+        {
+            return true;
+        }
+
+        return await PingCoreAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Confirms the CLI is down while holding the lifecycle lock, so a definition swap can neither be mistaken for a crash
+    /// nor be followed by a second, ungated restart of the CLI it just started. Only if it is still down is
+    /// <paramref name="confirmRestart"/> asked (crash accounting, quarantine) and the CLI restarted.
+    /// </summary>
+    public async Task<bool> RestartIfDownAsync(Func<bool> confirmRestart, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(confirmRestart);
+        await _lifecycleLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (await PingCoreAsync(cancellationToken))
+            {
+                return false;
+            }
+
+            if (confirmRestart())
+            {
+                await StopCoreAsync();
+                await StartCoreAsync(cancellationToken);
+            }
+
+            return true;
+        }
+        finally
+        {
+            _lifecycleLock.Release();
+        }
+    }
+
+    private async Task<bool> PingCoreAsync(CancellationToken cancellationToken)
     {
         if (_client is not { } client)
         {

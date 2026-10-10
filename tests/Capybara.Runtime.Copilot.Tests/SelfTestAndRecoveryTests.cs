@@ -104,6 +104,35 @@ public sealed class SelfTestAndRecoveryTests : IDisposable
     }
 
     [Fact]
+    public async Task A_health_check_racing_a_definition_swap_records_no_crash_and_restarts_nothing()
+    {
+        // The first ping lands while the swap has no CLI; by the time the runtime holds its lifecycle lock, the new CLI is up.
+        var runtime = new SwappingRuntime();
+        using var supervisor = new RuntimeSupervisor([runtime], _alerts, new SupervisorOptions { MaxCrashes = 1 }, _time, NullLogger<RuntimeSupervisor>.Instance, Guard(), new RecordingReconciler(runtime));
+
+        await supervisor.CheckOnceAsync(Ct);
+
+        Assert.Equal(0, runtime.Restarts);
+        Assert.Empty(runtime.Calls);
+        var health = Assert.Single(supervisor.Health);
+        Assert.Equal(0, health.RecentCrashes);
+        Assert.Equal(RuntimeHealthState.Healthy, health.State);
+        Assert.Empty(_alerts.Recent);
+    }
+
+    [Fact]
+    public async Task A_runtime_confirmed_down_under_its_lock_is_still_counted_and_restarted()
+    {
+        var runtime = new ScriptedRuntime { Healthy = false };
+        using var supervisor = new RuntimeSupervisor([runtime], _alerts, new SupervisorOptions(), _time, NullLogger<RuntimeSupervisor>.Instance, Guard(), new RecordingReconciler(runtime));
+
+        await supervisor.CheckOnceAsync(Ct);
+
+        Assert.Equal(1, runtime.Restarts);
+        Assert.Equal(1, Assert.Single(supervisor.Health).RecentCrashes);
+    }
+
+    [Fact]
     public async Task Failing_reconciler_does_not_skip_the_self_test()
     {
         var runtime = new ScriptedRuntime { Healthy = false };
@@ -324,7 +353,7 @@ public sealed class SelfTestAndRecoveryTests : IDisposable
 
         public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
-        public Task<bool> PingAsync(CancellationToken cancellationToken) => Task.FromResult(Healthy);
+        public virtual Task<bool> PingAsync(CancellationToken cancellationToken) => Task.FromResult(Healthy);
 
         public Task RestartAsync(CancellationToken cancellationToken)
         {
@@ -337,6 +366,14 @@ public sealed class SelfTestAndRecoveryTests : IDisposable
             Calls.Add("selftest");
             return SelfTestThrows ? throw new InvalidOperationException("session would not resume") : Task.FromResult(SelfTest);
         }
+    }
+
+    /// <summary>Down at the first ping (a definition swap in progress), up at every later one (the swap finished).</summary>
+    private sealed class SwappingRuntime : ScriptedRuntime
+    {
+        private int _pings;
+
+        public override Task<bool> PingAsync(CancellationToken cancellationToken) => Task.FromResult(Interlocked.Increment(ref _pings) > 1);
     }
 
     private sealed class HistoryRuntime(IReadOnlyList<SessionEvent> events) : ScriptedRuntime, ISessionEventHistory

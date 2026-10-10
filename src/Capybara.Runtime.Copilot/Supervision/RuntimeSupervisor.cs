@@ -225,51 +225,56 @@ public sealed partial class RuntimeSupervisor : IDisposable
             return;
         }
 
-        int crashes;
-        bool quarantined;
-        bool deliberate;
-        lock (_gate)
-        {
-            // A runtime stopped by SuspendAsync is down on purpose: bring it back without counting a crash.
-            deliberate = state.Stopped;
-            if (!deliberate)
-            {
-                state.Crashes.Enqueue(now);
-            }
-
-            while (state.Crashes.TryPeek(out var oldest) && now - oldest > _options.CrashWindow)
-            {
-                state.Crashes.Dequeue();
-            }
-
-            crashes = state.Crashes.Count;
-            if (!deliberate && crashes >= _options.MaxCrashes)
-            {
-                state.Quarantined = true;
-            }
-
-            quarantined = state.Quarantined;
-        }
-
-        if (quarantined)
-        {
-            LogQuarantined(_logger, agent, crashes);
-            await _alerts.PublishAsync(
-                new Alert("runtime.quarantined", AlertSeverity.Critical, $"Runtime for {agent} crashed {crashes} times and was quarantined.", now, agent),
-                cancellationToken);
-            return;
-        }
-
-        LogRestarting(_logger, agent, crashes);
+        // The first ping can race a definition swap that briefly has no CLI. The runtime confirms "down" under its own
+        // lifecycle lock and only then lets the crash be counted and the restart run, so a swap is never a crash and the
+        // CLI it just started is never restarted again behind the session-turn gate.
+        var crashes = 0;
+        var quarantined = false;
+        var restarting = false;
+        bool wasDown;
         try
         {
-            await runtime.RestartAsync(cancellationToken);
-            lock (_gate)
-            {
-                state.ConsecutiveFailures = 0;
-                state.NextAttemptAt = null;
-                state.Stopped = false;
-            }
+            wasDown = await runtime.RestartIfDownAsync(
+                () =>
+                {
+                    if (IsSuspended)
+                    {
+                        return false;
+                    }
+
+                    lock (_gate)
+                    {
+                        // A runtime stopped by SuspendAsync is down on purpose: bring it back without counting a crash.
+                        var deliberate = state.Stopped;
+                        if (!deliberate)
+                        {
+                            state.Crashes.Enqueue(now);
+                        }
+
+                        while (state.Crashes.TryPeek(out var oldest) && now - oldest > _options.CrashWindow)
+                        {
+                            state.Crashes.Dequeue();
+                        }
+
+                        crashes = state.Crashes.Count;
+                        if (!deliberate && crashes >= _options.MaxCrashes)
+                        {
+                            state.Quarantined = true;
+                        }
+
+                        quarantined = state.Quarantined;
+                    }
+
+                    if (quarantined)
+                    {
+                        return false;
+                    }
+
+                    LogRestarting(_logger, agent, crashes);
+                    restarting = true;
+                    return true;
+                },
+                cancellationToken);
         }
 #pragma warning disable CA1031 // A failed restart backs off; it must not stop supervision of other agents.
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -285,8 +290,28 @@ public sealed partial class RuntimeSupervisor : IDisposable
             return;
         }
 
+        if (!wasDown || restarting)
+        {
+            // Up after all (a swap or restart had just finished), or restarted now.
+            lock (_gate)
+            {
+                state.ConsecutiveFailures = 0;
+                state.NextAttemptAt = null;
+                state.Stopped = false;
+            }
+        }
+
+        if (quarantined)
+        {
+            LogQuarantined(_logger, agent, crashes);
+            await _alerts.PublishAsync(
+                new Alert("runtime.quarantined", AlertSeverity.Critical, $"Runtime for {agent} crashed {crashes} times and was quarantined.", now, agent),
+                cancellationToken);
+            return;
+        }
+
         // Suspended while it restarted: the suspension stops it again, so neither reconcile nor self-test it now.
-        if (IsSuspended)
+        if (!restarting || IsSuspended)
         {
             return;
         }

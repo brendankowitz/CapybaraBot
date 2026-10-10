@@ -17,6 +17,28 @@ public interface ISupervisedRuntime
 
     Task RestartAsync(CancellationToken cancellationToken);
 
+    /// <summary>
+    /// The supervisor's restart: confirms the runtime is still down and, only then, asks <paramref name="confirmRestart"/>
+    /// (which records the crash and returns <see langword="false"/> to leave it down, e.g. quarantined) and restarts it.
+    /// Returns whether it was down. A runtime whose own lifecycle changes concurrently (<see cref="AgentRuntime"/>, during
+    /// a definition swap) must do the check and the restart under one lock; the default suits runtimes without that.
+    /// </summary>
+    async Task<bool> RestartIfDownAsync(Func<bool> confirmRestart, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(confirmRestart);
+        if (await PingAsync(cancellationToken))
+        {
+            return false;
+        }
+
+        if (confirmRestart())
+        {
+            await RestartAsync(cancellationToken);
+        }
+
+        return true;
+    }
+
     /// <summary>Compares the tools the runtime exposes with the agent's allowlist (FR-AGT-09).</summary>
     Task<SelfTestResult> SelfTestAsync(CancellationToken cancellationToken);
 }
