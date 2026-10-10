@@ -387,8 +387,17 @@ public static class CapybaraServiceCollectionExtensions
             QuietHours = new QuietHoursOptions { Enabled = settings.QuietHours.Enabled, StartsAt = settings.QuietHours.StartsAt, EndsAt = settings.QuietHours.EndsAt },
         };
 
-        // What the user chose in the PWA outranks the config defaults (FR-CLI-07).
-        options = NotificationSettings.ApplySaved(options, core.State.NotificationSettings);
+        // What the user chose in the PWA outranks the config defaults (FR-CLI-07). An unreadable file must not keep the
+        // gateway (and with it the kill switch) from starting: the config defaults apply and the user is told.
+        try
+        {
+            options = NotificationSettings.ApplySaved(options, core.State.NotificationSettings);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or System.Text.Json.JsonException or IOException)
+        {
+            core.Warnings.Add($"{core.State.NotificationSettings} could not be read ({ex.GetType().Name}); the configured notification defaults apply until the settings are saved again.");
+        }
+
         services.AddSingleton(sp => new NotificationSettings(core.State.NotificationSettings, sp.GetRequiredService<NotificationRouter>(), sp.GetRequiredService<AgentRegistry>()));
 
         // One escalation instance serves the runtime (IUserEscalation) and the questions page (FR-A2A-07).

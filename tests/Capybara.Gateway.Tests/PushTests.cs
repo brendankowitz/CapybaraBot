@@ -105,5 +105,31 @@ public sealed class PushTests(ApiFactory factory) : IClassFixture<ApiFactory>
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    [Fact]
+    public void Saved_settings_apply_at_start_and_an_unreadable_file_falls_back_to_the_defaults()
+    {
+        using (var saved = new SettingsFileFactory("""{"agents":{"research":false},"quietHours":{"enabled":true,"startsAt":"23:00:00","endsAt":"06:00:00"}}"""))
+        {
+            _ = saved.CreateClient();
+            var options = saved.Services.GetRequiredService<NotificationRouter>().Options;
+            Assert.False(options.AgentNotificationToggles[AgentId.Parse("research")]);
+            Assert.Equal(new TimeOnly(23, 0), options.QuietHours.StartsAt);
+        }
+
+        using var corrupt = new SettingsFileFactory("{ not json");
+        _ = corrupt.CreateClient();
+        Assert.True(corrupt.Services.GetRequiredService<NotificationRouter>().Options.AgentNotificationToggles[AgentId.Parse("research")]);
+        Assert.Contains(corrupt.Services.GetRequiredService<Composition.CompositionWarnings>().Messages, m => m.Contains("notification-settings.json", StringComparison.Ordinal));
+    }
+
     private static string Base64Url(byte[] bytes) => Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    private sealed class SettingsFileFactory : ApiFactory
+    {
+        public SettingsFileFactory(string content)
+        {
+            Directory.CreateDirectory(Path.Combine(StateRoot, "channels"));
+            File.WriteAllText(Path.Combine(StateRoot, "channels", "notification-settings.json"), content);
+        }
+    }
 }
