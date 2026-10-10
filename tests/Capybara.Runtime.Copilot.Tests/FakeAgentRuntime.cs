@@ -15,6 +15,14 @@ internal sealed class FakeAgentRuntime(AgentId agent) : IAgentRuntime
 
     public AgentId Agent { get; } = agent;
 
+    public AgentDefinition Definition { get; private set; } = Testing.TestAgents.Create(agent.Value);
+
+    public Task UpdateDefinitionAsync(AgentDefinition definition, CancellationToken cancellationToken)
+    {
+        Definition = definition;
+        return Task.CompletedTask;
+    }
+
     /// <summary>The turn body; completes with "done" by default.</summary>
     public Func<AgentTurnRequest, CancellationToken, Task<TurnResult>> Turn { get; set; } =
         (_, _) => Task.FromResult(TurnResult.Completed("done", TurnEvidence.Empty));

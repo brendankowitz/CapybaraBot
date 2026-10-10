@@ -200,6 +200,10 @@ public sealed class InboxResilienceTests
 
         public AgentId Agent => _inner.Agent;
 
+        public AgentDefinition Definition => _inner.Definition;
+
+        public Task UpdateDefinitionAsync(AgentDefinition definition, CancellationToken cancellationToken) => _inner.UpdateDefinitionAsync(definition, cancellationToken);
+
         public System.Collections.Concurrent.ConcurrentQueue<AgentTurnRequest> Requests => _inner.Requests;
 
         public Task<TurnResult> RunTurnAsync(AgentTurnRequest request, CancellationToken cancellationToken) => _inner.RunTurnAsync(request, cancellationToken);

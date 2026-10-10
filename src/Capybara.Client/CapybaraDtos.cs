@@ -106,7 +106,8 @@ public sealed record ProposalDto(
     DateTimeOffset CreatedAt,
     string? DecidedBy = null,
     DateTimeOffset? DecidedAt = null,
-    string? Error = null);
+    string? Error = null,
+    string? Effect = null);
 
 public sealed record ProposalDecisionDto(bool Approve);
 

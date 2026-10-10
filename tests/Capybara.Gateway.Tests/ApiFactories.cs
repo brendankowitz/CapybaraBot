@@ -93,12 +93,20 @@ public sealed class ReplyingFactory : ApiFactory
     {
         base.ConfigureServices(services);
         services.RemoveAll<AgentRuntimePool>();
-        services.AddSingleton(sp => new AgentRuntimePool(sp.GetRequiredService<AgentRegistry>(), agent => new ReplyingRuntime(agent.Id, this)));
+        services.AddSingleton(sp => new AgentRuntimePool(sp.GetRequiredService<AgentRegistry>(), agent => new ReplyingRuntime(agent, this)));
     }
 
-    private sealed class ReplyingRuntime(AgentId agent, ReplyingFactory factory) : IAgentRuntime, ISupervisedRuntime
+    private sealed class ReplyingRuntime(AgentDefinition initial, ReplyingFactory factory) : IAgentRuntime, ISupervisedRuntime
     {
-        public AgentId Agent { get; } = agent;
+        public AgentId Agent { get; } = initial.Id;
+
+        public AgentDefinition Definition { get; private set; } = initial;
+
+        public Task UpdateDefinitionAsync(AgentDefinition definition, CancellationToken cancellationToken)
+        {
+            Definition = definition;
+            return Task.CompletedTask;
+        }
 
         public async Task<TurnResult> RunTurnAsync(AgentTurnRequest request, CancellationToken cancellationToken)
         {

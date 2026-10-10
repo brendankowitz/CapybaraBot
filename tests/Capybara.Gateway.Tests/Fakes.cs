@@ -121,21 +121,36 @@ public sealed class RecordingChannel : INotificationChannel
     }
 }
 
-/// <summary>A runtime without a CLI that records starts, stops and restarts.</summary>
-public sealed class FakeSupervisedRuntime(Contracts.Agents.AgentId agent) : Runtime.Copilot.Hosting.IAgentRuntime, Runtime.Copilot.Supervision.ISupervisedRuntime
+/// <summary>A runtime without a CLI that records starts, stops, restarts, self-tests and definition updates.</summary>
+public sealed class FakeSupervisedRuntime(Contracts.Agents.AgentDefinition initial) : Runtime.Copilot.Hosting.IAgentRuntime, Runtime.Copilot.Supervision.ISupervisedRuntime
 {
     private int _starts;
     private int _restarts;
     private int _stops;
+    private int _selfTests;
     private volatile bool _running;
+    private volatile Contracts.Agents.AgentDefinition _definition = initial;
 
-    public Contracts.Agents.AgentId Agent { get; } = agent;
+    public Contracts.Agents.AgentId Agent { get; } = initial.Id;
+
+    public Contracts.Agents.AgentDefinition Definition => _definition;
 
     public int Starts => _starts;
 
     public int Restarts => _restarts;
 
     public int Stops => _stops;
+
+    public int SelfTests => _selfTests;
+
+    public int DefinitionUpdates { get; private set; }
+
+    public Task UpdateDefinitionAsync(Contracts.Agents.AgentDefinition definition, CancellationToken cancellationToken)
+    {
+        _definition = definition;
+        DefinitionUpdates++;
+        return Task.CompletedTask;
+    }
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
@@ -166,8 +181,11 @@ public sealed class FakeSupervisedRuntime(Contracts.Agents.AgentId agent) : Runt
 
     public Task<bool> PingAsync(CancellationToken cancellationToken) => Task.FromResult(_running);
 
-    public Task<Runtime.Copilot.Hosting.SelfTestResult> SelfTestAsync(CancellationToken cancellationToken) =>
-        Task.FromResult(new Runtime.Copilot.Hosting.SelfTestResult(true, [], []));
+    public Task<Runtime.Copilot.Hosting.SelfTestResult> SelfTestAsync(CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref _selfTests);
+        return Task.FromResult(new Runtime.Copilot.Hosting.SelfTestResult(true, [], []));
+    }
 
     public Task<Runtime.Copilot.Hosting.TurnResult> RunTurnAsync(Runtime.Copilot.Hosting.AgentTurnRequest request, CancellationToken cancellationToken) =>
         Task.FromResult(Runtime.Copilot.Hosting.TurnResult.Blocked("fake"));

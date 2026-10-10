@@ -317,6 +317,50 @@ public sealed partial class RuntimeSupervisor : IDisposable
         }
     }
 
+    /// <summary>
+    /// Makes an edited definition, already swapped into <paramref name="runtime"/>, take effect in its process
+    /// (FR-AGT-06, FR-AGT-09): restarts the CLI when <paramref name="restartProcess"/> (egress, MCP servers, provider),
+    /// then re-runs the tool self-test, which pauses the agent if its tools no longer match. Serialized with health
+    /// checks. While suspended (kill switch) nothing runs: the release restarts and self-tests every runtime anyway. A
+    /// failed restart is logged and left to the next health check, which retries with backoff.
+    /// </summary>
+    public async Task ApplyDefinitionChangeAsync(ISupervisedRuntime runtime, bool restartProcess, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(runtime);
+        await _checks.WaitAsync(cancellationToken);
+        try
+        {
+            if (IsSuspended)
+            {
+                return;
+            }
+
+            if (restartProcess)
+            {
+                try
+                {
+                    await runtime.RestartAsync(cancellationToken);
+                }
+#pragma warning disable CA1031 // The health check that follows sees it down and restarts it with backoff.
+                catch (Exception ex) when (ex is not OperationCanceledException)
+#pragma warning restore CA1031
+                {
+                    LogRestartFailed(_logger, ex, runtime.Agent.Value);
+                    return;
+                }
+            }
+
+            if (_selfTest is not null)
+            {
+                await _selfTest.VerifyAsync(runtime, cancellationToken);
+            }
+        }
+        finally
+        {
+            _checks.Release();
+        }
+    }
+
     public void Dispose() => _checks.Dispose();
 
     public TimeSpan Backoff(int consecutiveFailures)

@@ -42,7 +42,8 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     private const int MainTurnToolCalls = 200;
     private const string ImmediateMode = "immediate";
 
-    private readonly AgentDefinition _agent;
+    // Replaced as a whole by UpdateDefinitionAsync; readers take one snapshot per session they build.
+    private volatile AgentDefinition _agent;
     private readonly CopilotRuntimeOptions _options;
     private readonly SessionConfigFactory _configs;
     private readonly EnvelopeFactory _envelopes;
@@ -107,6 +108,50 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     }
 
     public AgentId Agent => _agent.Id;
+
+    public AgentDefinition Definition => _agent;
+
+    public async Task UpdateDefinitionAsync(AgentDefinition definition, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        if (definition.Id != _agent.Id)
+        {
+            throw new ArgumentException($"'{definition.Id}' is not a definition of '{_agent.Id}'.", nameof(definition));
+        }
+
+        // Lifecycle before main, the only order any path takes both in: no start, stop or restart runs meanwhile, and
+        // the main-session turn in flight finishes on the definition it started with.
+        await _lifecycleLock.WaitAsync(cancellationToken);
+        try
+        {
+            await _mainLock.WaitAsync(cancellationToken);
+            try
+            {
+                var previous = _agent;
+                _agent = definition;
+
+                // A model set from a client (FR-AGT-08) is kept unless the config's own model changed.
+                if (definition.Model != previous.Model)
+                {
+                    _model = definition.Model;
+                }
+
+                // The main session's context carries the definition it was built with; the next turn builds a new one
+                // and resumes the persisted session with the new configuration re-registered (FR-AGT-03).
+                await DropMainSessionAsync();
+                _mainSession = null;
+                LogDefinitionUpdated(_logger, definition.Id.Value);
+            }
+            finally
+            {
+                _mainLock.Release();
+            }
+        }
+        finally
+        {
+            _lifecycleLock.Release();
+        }
+    }
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
@@ -826,6 +871,9 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Runtime for {Agent} started")]
     private static partial void LogStarted(ILogger logger, string agent);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Runtime for {Agent} now uses its edited definition; its main session will be rebuilt")]
+    private static partial void LogDefinitionUpdated(ILogger logger, string agent);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Resumed session {SessionId}")]
     private static partial void LogResumed(ILogger logger, string sessionId);

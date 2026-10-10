@@ -116,6 +116,35 @@ public sealed class SelfTestAndRecoveryTests : IDisposable
     }
 
     [Fact]
+    public async Task An_edited_definition_restarts_the_cli_only_when_asked_and_always_re_runs_the_self_test()
+    {
+        var runtime = new ScriptedRuntime { SelfTest = new SelfTestResult(false, [], ["bash"]) };
+        using var supervisor = new RuntimeSupervisor([runtime], _alerts, new SupervisorOptions(), _time, NullLogger<RuntimeSupervisor>.Instance, Guard(), new RecordingReconciler(runtime));
+
+        await supervisor.ApplyDefinitionChangeAsync(runtime, restartProcess: false, Ct);
+        Assert.Equal(0, runtime.Restarts);
+        Assert.Equal(["selftest"], runtime.Calls);
+        Assert.True(_killSwitch.IsBlocked(runtime.Agent));
+
+        await supervisor.ApplyDefinitionChangeAsync(runtime, restartProcess: true, Ct);
+        Assert.Equal(1, runtime.Restarts);
+        Assert.Equal(["selftest", "selftest"], runtime.Calls);
+    }
+
+    [Fact]
+    public async Task An_edited_definition_is_not_restarted_into_a_suspended_fleet()
+    {
+        var runtime = new ScriptedRuntime();
+        using var supervisor = new RuntimeSupervisor([runtime], _alerts, new SupervisorOptions(), _time, NullLogger<RuntimeSupervisor>.Instance, Guard(), new RecordingReconciler(runtime));
+        supervisor.MarkSuspended();
+
+        await supervisor.ApplyDefinitionChangeAsync(runtime, restartProcess: true, Ct);
+
+        Assert.Equal(0, runtime.Restarts);
+        Assert.Empty(runtime.Calls);
+    }
+
+    [Fact]
     public void Finished_turn_is_completed()
     {
         var recovery = TurnRecovery.Analyze(

@@ -258,7 +258,7 @@ public sealed class KillSwitchAndBridgeTimingTests
             services.RemoveAll<AgentRuntimePool>();
             services.AddSingleton(sp => new AgentRuntimePool(sp.GetRequiredService<AgentRegistry>(), agent =>
             {
-                var runtime = new FakeSupervisedRuntime(agent.Id);
+                var runtime = new FakeSupervisedRuntime(agent);
                 _runtimes.Enqueue(runtime);
                 return runtime;
             }));
