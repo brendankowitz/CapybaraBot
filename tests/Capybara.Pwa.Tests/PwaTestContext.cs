@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using Bunit;
 using Capybara.Client;
 using Capybara.Pwa.Services;
@@ -9,17 +10,25 @@ using Microsoft.JSInterop;
 
 namespace Capybara.Pwa.Tests;
 
-/// <summary>A bUnit context wired to a scripted gateway; the SignalR connection is replaced by a no-op.</summary>
+/// <summary>A bUnit context wired to a scripted gateway; the SignalR connection is replaced by a no-op and JS interop is loose.</summary>
 public abstract class PwaTestContext : BunitContext
 {
+    protected static readonly JsonSerializerOptions Web = new(JsonSerializerDefaults.Web);
+
     protected PwaTestContext()
     {
+        JSInterop.Mode = JSRuntimeMode.Loose;
         Gateway = new FakeGateway();
         Services.AddSingleton(new CapybaraApiClient(new HttpClient(Gateway) { BaseAddress = new Uri("https://capybara.test") }));
         Services.AddSingleton<CapybaraRealtimeService>(sp => new OfflineRealtime(sp.GetRequiredService<NavigationManager>(), new TokenStore(sp.GetRequiredService<IJSRuntime>())));
     }
 
     protected FakeGateway Gateway { get; }
+
+    /// <summary>Whether the device offers desktop-only actions (<c>capybaraDevice.isDesktop</c>).</summary>
+    protected void SetDesktop(bool desktop) => JSInterop.Setup<bool>("capybaraDevice.isDesktop").SetResult(desktop);
+
+    protected void ServeJson<T>(string pathAndQuery, T value) => Gateway.Respond("GET", pathAndQuery, JsonSerializer.Serialize(value, Web));
 
     private sealed class OfflineRealtime(NavigationManager navigation, TokenStore tokens) : CapybaraRealtimeService(navigation, tokens)
     {

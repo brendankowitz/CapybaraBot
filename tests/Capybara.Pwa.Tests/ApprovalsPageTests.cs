@@ -7,29 +7,38 @@ namespace Capybara.Pwa.Tests;
 
 public sealed class ApprovalsPageTests : PwaTestContext
 {
-    private static readonly JsonSerializerOptions Web = new(JsonSerializerDefaults.Web);
+    private static ApprovalDto Approval(string id, string tool, object args, string risk = "High", string? rationale = "sends email externally", string? argsJson = null, string? preview = null) => new(
+        id, "nonce-" + id, "ea", tool, "hash", preview ?? $"ea → {tool} {JsonSerializer.Serialize(args)}", risk, risk != "High", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddMinutes(10), "escalate", rationale, ArgsJson: argsJson);
 
-    private static ApprovalDto Approval(string id, string tool, object args, string risk = "High") => new(
-        id, "nonce-" + id, "ea", tool, "hash", $"ea → {tool} {JsonSerializer.Serialize(args)}", risk, risk != "High", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddMinutes(10), "escalate", "sends email externally");
+    private void Serve(params ApprovalDto[] approvals) => ServeJson("/api/approvals", approvals);
 
-    private void Serve(params ApprovalDto[] approvals) => Gateway.Respond("GET", "/api/approvals", JsonSerializer.Serialize(approvals, Web));
+    private IRenderedComponent<Approvals> RenderLoaded()
+    {
+        var cut = Render<Approvals>();
+        cut.WaitForAssertion(() => Assert.NotEmpty(cut.FindAll("article.approval")));
+        return cut;
+    }
+
+    private static bool IsDisabled(IRenderedComponent<Approvals> cut, string label) => cut.FindAll("button").Single(b => b.TextContent == label).HasAttribute("disabled");
 
     [Fact]
-    public void Email_preview_never_renders_remote_images_links_or_scripts()
+    public void Email_preview_renders_no_remote_content_but_lists_every_url_as_text()
     {
         var html = "<p>Hello <b>Sam</b></p><img src=\"http://tracker.evil.test/p.gif\"><a href=\"http://phish.evil.test/login\">your invoice</a><script>alert(1)</script>";
         Serve(Approval("a1", "email_send", new { to = "sam@example.com", subject = "Invoice", body = html }));
 
-        var cut = Render<Approvals>();
+        var cut = RenderLoaded();
 
-        cut.WaitForAssertion(() => Assert.NotEmpty(cut.FindAll(".email-preview")));
         Assert.Empty(cut.FindAll("img"));
         Assert.Empty(cut.FindAll("a"));
         Assert.Empty(cut.FindAll("script"));
-        Assert.DoesNotContain("evil.test", cut.Markup, StringComparison.Ordinal);
         Assert.Contains("sam@example.com", cut.Find(".email-preview dd").TextContent, StringComparison.Ordinal);
         Assert.Contains("Hello Sam", cut.Find(".email-body").TextContent, StringComparison.Ordinal);
-        Assert.Contains("1 remote image(s)", cut.Markup, StringComparison.Ordinal);
+        var references = cut.Find(".email-references").TextContent;
+        Assert.Contains("http://tracker.evil.test/p.gif", references, StringComparison.Ordinal);
+        Assert.Contains("http://phish.evil.test/login", references, StringComparison.Ordinal);
+        Assert.Contains("alert(1)", cut.Find(".hidden-content-text").TextContent, StringComparison.Ordinal);
+        Assert.NotEmpty(cut.FindAll("p.hidden-content"));
     }
 
     [Fact]
@@ -37,12 +46,22 @@ public sealed class ApprovalsPageTests : PwaTestContext
     {
         Serve(Approval("a1", "email_send", new { to = "sam@example.com", subject = "Hi", body = "see https://example.com/a.png and ![x](https://example.com/b.png)" }));
 
-        var cut = Render<Approvals>();
+        var cut = RenderLoaded();
 
-        cut.WaitForAssertion(() => Assert.NotEmpty(cut.FindAll(".email-body")));
         Assert.Empty(cut.FindAll("img"));
         Assert.Empty(cut.FindAll("a"));
         Assert.Contains("https://example.com/a.png", cut.Find(".email-body").TextContent, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Exact_arguments_are_always_available()
+    {
+        Serve(Approval("a1", "email_send", new { to = "sam@example.com", subject = "Hi", body = "<b>x</b>" }));
+
+        var cut = RenderLoaded();
+
+        Assert.Contains("sam@example.com", cut.Find("details pre.exact-args").TextContent, StringComparison.Ordinal);
+        Assert.Contains("\\u003Cb\\u003Ex", cut.Find("details pre.exact-args").TextContent, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -50,9 +69,8 @@ public sealed class ApprovalsPageTests : PwaTestContext
     {
         Serve(Approval("a2", "github_commit_file", new { branch = "fix", patch = "--- a\n+++ b\n@@ -1 +1 @@\n-old <b>x</b>\n+new" }, risk: "Medium"));
 
-        var cut = Render<Approvals>();
+        var cut = RenderLoaded();
 
-        cut.WaitForAssertion(() => Assert.NotEmpty(cut.FindAll("pre.diff")));
         Assert.Single(cut.FindAll(".diff-add"));
         Assert.Single(cut.FindAll(".diff-del"));
         Assert.Empty(cut.FindAll("pre.diff b"));
@@ -66,20 +84,75 @@ public sealed class ApprovalsPageTests : PwaTestContext
     {
         Serve(Approval("a3", "calendar_create", new { title = "Sync", attendees = "a@x.y,b@x.y" }));
 
-        var cut = Render<Approvals>();
+        var cut = RenderLoaded();
 
-        cut.WaitForAssertion(() => Assert.Equal(2, cut.FindAll("table.args tbody tr").Count));
+        Assert.Equal(2, cut.FindAll("table.args tbody tr").Count);
         Assert.DoesNotContain("Always", cut.FindAll("button").Select(b => b.TextContent));
         Assert.Contains("Reviewer:", cut.Markup, StringComparison.Ordinal);
     }
 
     [Fact]
+    public void Html_in_an_argument_value_or_reviewer_rationale_is_text()
+    {
+        Serve(Approval("a4", "calendar_create", new { title = "<img src=x onerror=alert(1)>", note = "<a href='http://evil.test'>x</a>" }, rationale: "<b onmouseover=x>looks fine</b><img src=http://evil.test/r.gif>"));
+
+        var cut = RenderLoaded();
+
+        Assert.Empty(cut.FindAll("img"));
+        Assert.Empty(cut.FindAll("a"));
+        Assert.Single(cut.FindAll("article b")); // only the reviewer verdict label, not the injected <b>
+        Assert.Equal("<img src=x onerror=alert(1)>", cut.FindAll("table.args td code")[0].TextContent);
+        Assert.Contains("<b onmouseover=x>looks fine</b>", cut.Find("p.reviewer").TextContent, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_cut_off_preview_can_only_be_denied()
+    {
+        Serve(Approval("a5", "email_send", new { }, risk: "Low", preview: """ea → email_send {"body":"a very long body that was cut…"""));
+
+        var cut = RenderLoaded();
+
+        Assert.True(IsDisabled(cut, "Allow once"));
+        Assert.True(IsDisabled(cut, "Always"));
+        Assert.False(IsDisabled(cut, "Deny"));
+        Assert.Contains("cut off", cut.Find("p.block-reason").TextContent, StringComparison.Ordinal);
+        Assert.True(cut.Find("details").HasAttribute("open"));
+    }
+
+    [Fact]
+    public void Full_args_from_the_server_make_a_cut_preview_approvable()
+    {
+        var args = JsonSerializer.Serialize(new { body = new string('x', 3_000), subject = "s", to = "attacker@evil.test" });
+        Serve(Approval("a6", "email_send", new { }, risk: "Low", preview: "ea → email_send {\"body\":\"xxxx…", argsJson: args));
+
+        var cut = RenderLoaded();
+
+        Assert.False(IsDisabled(cut, "Allow once"));
+        Assert.Equal("attacker@evil.test", cut.Find(".email-preview dd").TextContent);
+    }
+
+    [Fact]
+    public void Case_variant_duplicate_keys_do_not_crash_the_page_and_block_allow()
+    {
+        Serve(
+            Approval("ok", "calendar_create", new { title = "Sync" }, risk: "Low"),
+            Approval("dup", "calendar_create", new { }, risk: "Low", preview: """ea → calendar_create {"To":"a@x.y","to":"b@x.y"}"""));
+
+        var cut = Render<Approvals>();
+
+        cut.WaitForAssertion(() => Assert.Equal(2, cut.FindAll("article.approval").Count));
+        var dup = cut.FindAll("article.approval")[1];
+        Assert.Equal(2, dup.QuerySelectorAll("tr.conflict").Length);
+        Assert.True(dup.QuerySelectorAll("button").Single(b => b.TextContent == "Allow once").HasAttribute("disabled"));
+        Assert.False(cut.FindAll("article.approval")[0].QuerySelectorAll("button").Single(b => b.TextContent == "Allow once").HasAttribute("disabled"));
+    }
+
+    [Fact]
     public void Deciding_posts_the_nonce_and_decision_then_reloads()
     {
-        Serve(Approval("a4", "calendar_create", new { title = "Sync" }, risk: "Low"));
-        Gateway.Respond("POST", "/api/approvals/a4", string.Empty, System.Net.HttpStatusCode.NoContent);
-        var cut = Render<Approvals>();
-        cut.WaitForAssertion(() => Assert.NotEmpty(cut.FindAll("article.approval")));
+        Serve(Approval("a7", "calendar_create", new { title = "Sync" }, risk: "Low"));
+        Gateway.Respond("POST", "/api/approvals/a7", string.Empty, System.Net.HttpStatusCode.NoContent);
+        var cut = RenderLoaded();
 
         cut.FindAll("button").Single(b => b.TextContent == "Allow once").Click();
 
@@ -87,7 +160,7 @@ public sealed class ApprovalsPageTests : PwaTestContext
         {
             var post = Assert.Single(Gateway.Requests, r => r.Method == "POST");
             using var body = JsonDocument.Parse(post.Body!);
-            Assert.Equal("nonce-a4", body.RootElement.GetProperty("nonce").GetString());
+            Assert.Equal("nonce-a7", body.RootElement.GetProperty("nonce").GetString());
             Assert.Equal("AllowOnce", body.RootElement.GetProperty("decision").GetString());
         });
     }
@@ -95,10 +168,9 @@ public sealed class ApprovalsPageTests : PwaTestContext
     [Fact]
     public void A_settled_approval_shows_the_gateway_error()
     {
-        Serve(Approval("a5", "calendar_create", new { title = "Sync" }, risk: "Low"));
-        Gateway.Respond("POST", "/api/approvals/a5", "approval is no longer pending", System.Net.HttpStatusCode.Conflict);
-        var cut = Render<Approvals>();
-        cut.WaitForAssertion(() => Assert.NotEmpty(cut.FindAll("article.approval")));
+        Serve(Approval("a8", "calendar_create", new { title = "Sync" }, risk: "Low"));
+        Gateway.Respond("POST", "/api/approvals/a8", "approval is no longer pending", System.Net.HttpStatusCode.Conflict);
+        var cut = RenderLoaded();
 
         cut.FindAll("button").Single(b => b.TextContent == "Deny").Click();
 

@@ -17,6 +17,7 @@ public sealed class CapybaraApiClientTests
     public static TheoryData<string, string, string, Func<CapybaraApiClient, Task>> CommandRoutes => new()
     {
         { "pause", "POST", "/api/agents/ea/pause", c => c.PauseAgentAsync("ea") },
+        { "mark read", "POST", "/api/agents/ea/read", c => c.MarkAgentReadAsync("ea") },
         { "resume", "POST", "/api/agents/ea/resume", c => c.ResumeAgentAsync("ea") },
         { "model", "PUT", "/api/agents/ea/model", c => c.SetModelAsync("ea", "gpt-5") },
         { "unquarantine", "POST", "/api/runtimes/ea/unquarantine", c => c.UnquarantineRuntimeAsync("ea") },
@@ -53,7 +54,7 @@ public sealed class CapybaraApiClientTests
 
     public static TheoryData<string, string, string, Func<CapybaraApiClient, Task>> ReadRoutes => new()
     {
-        { "agents", "/api/agents", """[{"id":"ea","name":"EA","job":"assist","model":"auto","paused":false,"budgetExhausted":true}]""", async c => Assert.True((await c.GetAgentsAsync())[0].BudgetExhausted) },
+        { "agents", "/api/agents", """[{"id":"ea","name":"EA","job":"assist","model":"auto","paused":false,"budgetExhausted":true,"state":"working","unread":3}]""", async c => { var a = (await c.GetAgentsAsync())[0]; Assert.True(a.BudgetExhausted); Assert.Equal("working", a.State); Assert.Equal(3, a.Unread); } },
         { "history", "/api/agents/ea/history?limit=25", """[{"at":"2026-01-01T00:00:00Z","role":"user","content":"hi"}]""", async c => Assert.Equal("user", (await c.GetChatHistoryAsync("ea", 25))[0].Role) },
         { "runtimes", "/api/runtimes", """[{"id":"ea","state":"Running"}]""", async c => Assert.Equal("Running", (await c.GetRuntimesAsync())[0].State) },
         { "templates", "/api/lifecycle/templates", """["assistant"]""", async c => Assert.Equal("assistant", (await c.GetAgentTemplatesAsync())[0]) },
@@ -61,7 +62,7 @@ public sealed class CapybaraApiClientTests
         { "tasks", "/api/tasks", """[{"id":"t1","agent":"ea","summary":"s","status":"working"}]""", async c => Assert.Equal("working", (await c.GetTasksAsync())[0].Status) },
         { "alerts", "/api/alerts", """[{"kind":"quota","severity":"Warning","message":"m","at":"2026-01-01T00:00:00Z"}]""", async c => Assert.Equal("Warning", (await c.GetAlertsAsync())[0].Severity) },
         { "ledger", "/api/ledger", """{"agents":[],"byModel":{},"byRoutine":{}}""", async c => Assert.Equal(JsonValueKind.Array, (await c.GetLedgerAsync()).Agents.ValueKind) },
-        { "approvals", "/api/approvals", """[{"id":"a1","nonce":"n","agent":"ea","tool":"email_send","argsHash":"h","preview":"p","risk":"High","offersAlwaysAllow":false,"createdAt":"2026-01-01T00:00:00Z","expiresAt":"2026-01-01T00:10:00Z","reviewerVerdict":"escalate"}]""", async c => Assert.Equal("escalate", (await c.GetApprovalsAsync())[0].ReviewerVerdict) },
+        { "approvals", "/api/approvals", """[{"id":"a1","nonce":"n","agent":"ea","tool":"email_send","argsHash":"h","preview":"p","risk":"High","offersAlwaysAllow":false,"createdAt":"2026-01-01T00:00:00Z","expiresAt":"2026-01-01T00:10:00Z","reviewerVerdict":"escalate","argsJson":"{\"to\":\"x\"}"}]""", async c => { var a = (await c.GetApprovalsAsync())[0]; Assert.Equal("escalate", a.ReviewerVerdict); Assert.Equal("{\"to\":\"x\"}", a.ArgsJson); } },
         { "question", "/api/questions/q%2F1", """{"id":"q/1","agent":"ea","title":"t","body":"b","choices":["a","b"]}""", async c => Assert.Equal(2, (await c.GetQuestionAsync("q/1")).Choices?.Count) },
         { "proposals", "/api/proposals?status=Pending", """[{"id":"p1","agent":"ea","kind":"Soul","name":null,"targetPath":"agents/ea/SOUL.md","diff":"-a\n+b","rationale":"r","status":"Pending","createdAt":"2026-01-01T00:00:00Z"}]""", async c => Assert.Equal("-a\n+b", (await c.GetProposalsAsync("Pending"))[0].Diff) },
         { "proposal", "/api/proposals/p1", """{"id":"p1","agent":"ea","kind":"Soul","targetPath":"x","diff":"d","rationale":"r","status":"Stale","createdAt":"2026-01-01T00:00:00Z"}""", async c => Assert.Equal("Stale", (await c.GetProposalAsync("p1")).Status) },
@@ -93,7 +94,9 @@ public sealed class CapybaraApiClientTests
 
     public static TheoryData<string, string, string, string, Func<CapybaraApiClient, Task>> ResultCommands => new()
     {
-        { "turn", "POST", "/api/agents/ea/turn", """{"content":"done","sessionId":"s1"}""", async c => Assert.Equal("s1", (await c.SendTurnAsync("ea", "hi")).SessionId) },
+        { "turn", "POST", "/api/agents/ea/turn", """{"status":"Completed","content":"done","evidence":{"x":1}}""", async c => Assert.Equal("done", (await c.SendTurnAsync("ea", "hi")).Summary) },
+        { "turn blocked", "POST", "/api/agents/ea/turn", """{"status":"Blocked","content":null,"error":"the kill switch is engaged"}""", async c => Assert.Equal("Blocked: the kill switch is engaged", (await c.SendTurnAsync("ea", "hi")).Summary) },
+        { "turn accepted", "POST", "/api/agents/ea/turn", """{"status":"Accepted","messageId":"m1"}""", async c => Assert.True((await c.SendTurnAsync("ea", "hi")).IsAccepted) },
         { "create", "POST", "/api/agents", """{"applied":true,"errors":[]}""", async c => Assert.True((await c.CreateAgentAsync(new CreateAgentDto("assistant", "ea2", "EA 2"))).Applied) },
         { "duplicate", "POST", "/api/agents/ea/duplicate", """{"applied":false,"errors":["exists"]}""", async c => Assert.Equal(["exists"], (await c.DuplicateAgentAsync("ea", new DuplicateAgentDto("ea2", "EA 2"))).Errors) },
         { "hide", "POST", "/api/agents/ea/hide", """{"applied":true,"errors":[]}""", async c => Assert.True((await c.SetAgentHiddenAsync("ea", hidden: true)).Applied) },
@@ -226,6 +229,75 @@ public sealed class CapybaraApiClientTests
         var (client, _) = Create("null");
 
         await Assert.ThrowsAsync<HttpRequestException>(() => client.GetBudgetsAsync(TestContext.Current.CancellationToken));
+    }
+
+    [Theory]
+    [InlineData("<!doctype html><html></html>", "text/html")]
+    [InlineData("plain", "text/plain")]
+    public async Task A_200_that_is_not_json_is_an_error_not_data(string body, string contentType)
+    {
+        // The SPA fallback answering for a route the gateway does not serve must never be read as an empty list.
+        var (client, _) = Create(body, HttpStatusCode.OK, contentType);
+
+        var error = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetApprovalsAsync(TestContext.Current.CancellationToken));
+
+        Assert.Contains("non-JSON", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Malformed_json_with_a_json_content_type_is_an_error()
+    {
+        var (client, _) = Create("{not json");
+
+        var error = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetBudgetsAsync(TestContext.Current.CancellationToken));
+
+        Assert.Contains("non-JSON", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Problem_json_content_types_are_accepted()
+    {
+        var (client, _) = Create("""{"isEngaged":false}""", contentType: "application/problem+json");
+
+        Assert.False((await client.GetKillSwitchAsync(TestContext.Current.CancellationToken)).IsEngaged);
+    }
+
+    [Fact]
+    public async Task Memory_export_failure_throws_with_the_status()
+    {
+        var (client, _) = Create("boom", HttpStatusCode.InternalServerError, "text/plain");
+
+        var error = await Assert.ThrowsAsync<HttpRequestException>(() => client.ExportMemoryAsync(TestContext.Current.CancellationToken));
+
+        Assert.Equal(HttpStatusCode.InternalServerError, error.StatusCode);
+    }
+
+    [Fact]
+    public void Replies_are_the_assistant_entries_right_after_the_matching_user_message()
+    {
+        var t = DateTimeOffset.UnixEpoch;
+        ChatEntryDto[] history =
+        [
+            new(t, "user", "hello"),
+            new(t, "assistant", "old reply"),
+            new(t, "user", "hello"),
+            new(t, "assistant", "new reply 1"),
+            new(t, "assistant", "new reply 2"),
+            new(t, "user", "something else"),
+            new(t, "assistant", "unrelated"),
+        ];
+
+        Assert.Equal(["new reply 1", "new reply 2"], ChatReplies.To(history, "hello").Select(e => e.Content));
+        Assert.Empty(ChatReplies.To(history[..3], "hello"));
+        Assert.Empty(ChatReplies.To(history, "never sent"));
+    }
+
+    [Fact]
+    public void Turn_summary_never_hides_a_turn_that_did_not_run()
+    {
+        Assert.Equal("(no reply)", new TurnResultDto("Completed").Summary);
+        Assert.Equal("OverBudget: budget reached", new TurnResultDto("OverBudget", Error: "budget reached").Summary);
+        Assert.Equal("Failed: the turn did not complete.", new TurnResultDto("Failed").Summary);
     }
 
     [Fact]

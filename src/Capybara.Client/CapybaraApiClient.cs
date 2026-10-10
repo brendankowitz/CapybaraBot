@@ -32,6 +32,9 @@ public sealed class CapybaraApiClient(HttpClient http)
     /// <summary>Sends a user turn; with <see cref="TurnRequestDto.Incognito"/> the session reads and writes no memory.</summary>
     public Task<TurnResultDto> SendTurnAsync(string id, TurnRequestDto request, CancellationToken cancellationToken = default) => PostForAsync<TurnResultDto>($"/api/agents/{Id(id)}/turn", request, cancellationToken);
 
+    /// <summary>Marks the agent's messages as seen, clearing its unread count.</summary>
+    public Task MarkAgentReadAsync(string id, CancellationToken cancellationToken = default) => PostAsync($"/api/agents/{Id(id)}/read", null, cancellationToken);
+
     public Task SetModelAsync(string id, string model, CancellationToken cancellationToken = default) => SendAsync(HttpMethod.Put, $"/api/agents/{Id(id)}/model", new SetModelDto(model), cancellationToken);
 
     public Task<IReadOnlyList<ChatEntryDto>> GetChatHistoryAsync(string id, int limit = 100, CancellationToken cancellationToken = default) => GetAsync<IReadOnlyList<ChatEntryDto>>($"/api/agents/{Id(id)}/history?limit={limit}", cancellationToken);
@@ -110,8 +113,16 @@ public sealed class CapybaraApiClient(HttpClient http)
     public async Task<Stream> ExportMemoryAsync(CancellationToken cancellationToken = default)
     {
         var response = await http.GetAsync(new Uri("/api/memory/export", UriKind.Relative), HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        await EnsureSuccessAsync(response, cancellationToken);
-        return await response.Content.ReadAsStreamAsync(cancellationToken);
+        try
+        {
+            await EnsureSuccessAsync(response, cancellationToken);
+            return await response.Content.ReadAsStreamAsync(cancellationToken);
+        }
+        catch
+        {
+            response.Dispose();
+            throw;
+        }
     }
 
     // ---- Routines -------------------------------------------------------------------------------------------------
@@ -199,8 +210,24 @@ public sealed class CapybaraApiClient(HttpClient http)
     private static async Task<T> ReadAsync<T>(HttpResponseMessage response, CancellationToken cancellationToken)
     {
         await EnsureSuccessAsync(response, cancellationToken);
-        return await response.Content.ReadFromJsonAsync<T>(JsonOptions, cancellationToken)
-            ?? throw new HttpRequestException($"The gateway returned an empty body for {response.RequestMessage?.RequestUri?.AbsolutePath}.", null, response.StatusCode);
+        var route = response.RequestMessage?.RequestUri?.AbsolutePath;
+
+        // A 200 that is not JSON is the SPA fallback or a proxy page answering for a missing route: never parse it as data.
+        var mediaType = response.Content.Headers.ContentType?.MediaType;
+        if (mediaType is null || !(mediaType.Equals("application/json", StringComparison.OrdinalIgnoreCase) || mediaType.EndsWith("+json", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new HttpRequestException($"Unexpected non-JSON response ({mediaType ?? "no content type"}) for {route}.", null, response.StatusCode);
+        }
+
+        try
+        {
+            return await response.Content.ReadFromJsonAsync<T>(JsonOptions, cancellationToken)
+                ?? throw new HttpRequestException($"The gateway returned an empty body for {route}.", null, response.StatusCode);
+        }
+        catch (Exception ex) when (ex is JsonException or NotSupportedException)
+        {
+            throw new HttpRequestException($"Unexpected non-JSON response for {route}: {ex.Message}", ex, response.StatusCode);
+        }
     }
 
     private static async Task EnsureSuccessAsync(HttpResponseMessage response, CancellationToken cancellationToken)

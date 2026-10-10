@@ -7,12 +7,30 @@ namespace Capybara.Client;
 
 // ---- Agents -----------------------------------------------------------------------------------------------------
 
-public sealed record AgentStatusDto(string Id, string Name, string Job, string Model, bool Paused, bool BudgetExhausted, bool Hidden = false);
+// State: working, needsAttention or idle (same wire values as the SignalR AgentStatusChanged event); Unread: messages the user has not seen.
+public sealed record AgentStatusDto(string Id, string Name, string Job, string Model, bool Paused, bool BudgetExhausted, bool Hidden = false, string State = "idle", int Unread = 0);
 
 /// <summary>A user turn. <see cref="Incognito"/> turns read and write no memory (FR-MEM-12).</summary>
 public sealed record TurnRequestDto(string Prompt, bool Incognito = false, string? ConversationId = null);
 
-public sealed record TurnResultDto(string Content, IReadOnlyList<object>? Artifacts = null, string? SessionId = null);
+// Status: Completed, Blocked, OverBudget, LimitExceeded, Throttled, Failed (the runtime's TurnStatus; HTTP is 200 for all of them)
+// or Accepted (the turn was queued through the inbox; the reply arrives in the chat history, see MessageId). Content is the
+// reply when Completed; Error says why it did not run or failed.
+public sealed record TurnResultDto(string Status, string? Content = null, string? Error = null, string? MessageId = null, string? RoutineId = null, int UserMessagesJoined = 0)
+{
+    public const string CompletedStatus = "Completed";
+    public const string AcceptedStatus = "Accepted";
+
+    public bool IsCompleted => Status == CompletedStatus;
+
+    public bool IsAccepted => Status == AcceptedStatus;
+
+    /// <summary>What to show the user: the reply, or the status with its reason. Never empty, so a turn that did not run is not silent.</summary>
+    public string Summary => IsCompleted
+        ? (string.IsNullOrEmpty(Content) ? "(no reply)" : Content)
+        : IsAccepted ? "Queued: the reply will appear in the chat history."
+        : $"{Status}: {(string.IsNullOrEmpty(Error) ? "the turn did not complete." : Error)}";
+}
 
 public sealed record SetModelDto(string Model);
 
@@ -29,7 +47,9 @@ public sealed record ThreadEntryDto(DateTimeOffset At, string From, string To, s
 
 public sealed record ApprovalDecisionDto(string Nonce, string Decision);
 
-// Preview: Server-rendered text: <c>"{agent} → {tool} {canonical args json}"</c>, at most 2000 chars. Always untrusted text.
+// Preview: server text "{agent} → {tool} {canonical args json}", at most 2000 chars and it may be cut mid-JSON (recipients can fall
+// off the end). ArgsJson: the full, untruncated canonical args JSON (server must supply it). When it is missing and the preview is
+// cut, clients can only Deny. Everything here is untrusted agent output.
 public sealed record ApprovalDto(
     string Id,
     string Nonce,
@@ -43,7 +63,8 @@ public sealed record ApprovalDto(
     DateTimeOffset ExpiresAt,
     string? ReviewerVerdict = null,
     string? ReviewerRationale = null,
-    string? Origin = null);
+    string? Origin = null,
+    string? ArgsJson = null);
 
 /// <summary>The three approval choices. Wire values are the <c>ApprovalDecision</c> enum names (case-insensitive).</summary>
 public static class ApprovalDecisions

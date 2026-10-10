@@ -8,8 +8,6 @@ namespace Capybara.Pwa.Tests;
 
 public sealed class RoutinesPageTests : PwaTestContext
 {
-    private static readonly JsonSerializerOptions Web = new(JsonSerializerDefaults.Web);
-
     private void Serve(decimal projection = 42.5m, int runs = 25, bool enabled = false, bool autoPaused = false)
     {
         var history = Enumerable.Range(0, runs).Select(i => new RoutineRunDto(DateTimeOffset.UtcNow.AddHours(-i), "Completed", 1.5m, "auto")).ToList();

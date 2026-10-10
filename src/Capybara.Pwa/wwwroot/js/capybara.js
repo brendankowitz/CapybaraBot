@@ -1,4 +1,8 @@
 // Browser interop for the Capybara PWA. Blazor owns all HTTP calls; these helpers only touch browser APIs.
+// (The page's CSP forbids inline scripts, so the service worker is registered here.)
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('service-worker.js').catch(() => {});
+}
 
 window.capybaraStorage = {
   get: key => localStorage.getItem(key),
@@ -11,26 +15,47 @@ window.capybaraDevice = {
   isDesktop: () => matchMedia('(pointer:fine) and (min-width: 900px)').matches,
 };
 
-// Reports whether the PWA has focus so the server suppresses push while it is in use (FR-CLI-07).
+// Reports whether the PWA has focus so the server suppresses push while it is in use (FR-CLI-07). Focus expires on the server
+// after ~60 s without a refresh, so while visible this repeats every 30 s; leaving the page reports unfocused with a keepalive
+// request (the .NET interop is not reliable while a page unloads, and sendBeacon cannot carry the Authorization header).
 window.capybaraPresence = (() => {
+  const heartbeatMs = 30000;
   let handlers = null;
+  let timer = null;
+  const focused = () => document.visibilityState === 'visible' && document.hasFocus();
+  const leave = () => {
+    const token = localStorage.getItem('capybara.deviceToken');
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) {
+      headers.Authorization = 'Bearer ' + token;
+    }
+    fetch('/api/presence', { method: 'POST', headers, body: JSON.stringify({ focused: false }), keepalive: true }).catch(() => {});
+  };
   return {
     start: ref => {
       if (handlers) {
         return;
       }
-      const send = () => ref.invokeMethodAsync('SetFocused', document.visibilityState === 'visible' && document.hasFocus()).catch(() => {});
+      const send = () => ref.invokeMethodAsync('SetFocused', focused()).catch(() => {});
       handlers = [
-        [document, 'visibilitychange', send],
+        [document, 'visibilitychange', () => (document.visibilityState === 'hidden' ? leave() : send())],
         [window, 'focus', send],
         [window, 'blur', send],
+        [window, 'pagehide', leave],
       ];
       handlers.forEach(([target, name, fn]) => target.addEventListener(name, fn));
+      timer = setInterval(() => {
+        if (focused()) {
+          send();
+        }
+      }, heartbeatMs);
       send();
     },
     stop: () => {
       (handlers || []).forEach(([target, name, fn]) => target.removeEventListener(name, fn));
       handlers = null;
+      clearInterval(timer);
+      timer = null;
     },
   };
 })();

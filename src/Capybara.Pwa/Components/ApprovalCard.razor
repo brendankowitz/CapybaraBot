@@ -1,5 +1,7 @@
 @* Rich approval preview (FR-CLI-02, FR-SAF-04, FR-SAF-07). Every value comes from an agent and is bound as a text node:
-   no MarkupString, no <img>, no <a>, so nothing remote can load or unfurl. *@
+   no MarkupString, no <img>, no <a>, so nothing remote can load or unfurl. Nothing is hidden either: link/image targets and
+   non-displayed content are listed as text, and the exact arguments are always one click away. A card whose arguments were not
+   seen in full can only be denied. *@
 @{
     var preview = ApprovalPreview.Parse(Approval);
 }
@@ -14,6 +16,11 @@
         <p class="reviewer">Reviewer: <b>@Approval.ReviewerVerdict</b>@(string.IsNullOrEmpty(Approval.ReviewerRationale) ? string.Empty : " - " + Approval.ReviewerRationale)</p>
     }
 
+    @if (preview.BlockReason is { } reason)
+    {
+        <p class="warning block-reason" role="alert">@reason You can only deny this request.</p>
+    }
+
     @switch (preview.Kind)
     {
         case "email" when preview.Email is { } email:
@@ -24,9 +31,19 @@
                     <dt>Subject</dt><dd>@email.Subject</dd>
                 </dl>
                 <pre class="email-body">@email.BodyText</pre>
+                @if (email.References.Count > 0)
+                {
+                    <p class="muted">Links and images in the email (shown as text, never loaded):</p>
+                    <ul class="email-references">@foreach (var reference in email.References) { <li><code>@reference</code></li> }</ul>
+                }
+                @if (email.HiddenContent.Count > 0)
+                {
+                    <p class="warning hidden-content">Hidden content: this email contains text a mail client would not display.</p>
+                    @foreach (var hidden in email.HiddenContent) { <pre class="hidden-content-text">@hidden</pre> }
+                }
                 @if (email.RemoteImagesBlocked > 0 || email.LinksStripped > 0)
                 {
-                    <p class="muted">Not rendered: @email.RemoteImagesBlocked remote image(s), @email.LinksStripped link(s) shown as plain text.</p>
+                    <p class="muted">Not rendered: @email.RemoteImagesBlocked image(s), @email.LinksStripped link(s).</p>
                 }
             </section>
             break;
@@ -35,33 +52,30 @@
             break;
     }
 
-    @if (preview.Truncated)
-    {
-        <p class="warning">Preview was truncated; review carefully.</p>
-        <pre>@preview.Raw</pre>
-    }
-    else if (preview.Args.Count > 0)
+    @if (preview.Args.Count > 0)
     {
         <table class="args">
             <thead><tr><th>Argument</th><th>Value</th></tr></thead>
             <tbody>
             @foreach (var arg in preview.Args)
             {
-                <tr><th scope="row">@arg.Key</th><td><code>@arg.Value</code></td></tr>
+                var conflicting = preview.ConflictingKeys.Contains(arg.Key, StringComparer.OrdinalIgnoreCase);
+                <tr class="@(conflicting ? "conflict" : string.Empty)"><th scope="row">@arg.Key@(conflicting ? " (conflicting name)" : string.Empty)</th><td><code>@arg.Value</code></td></tr>
             }
             </tbody>
         </table>
     }
-    else if (preview.Kind == "args")
-    {
-        <pre>@preview.Raw</pre>
-    }
+
+    <details open="@(!preview.CanApprove || (preview.Args.Count == 0 && preview.Kind == "args"))">
+        <summary>Exact arguments as received</summary>
+        <pre class="exact-args">@preview.Exact</pre>
+    </details>
 
     <div class="actions">
-        <button type="button" @onclick="() => OnDecide.InvokeAsync(ApprovalDecisions.AllowOnce)">Allow once</button>
+        <button type="button" disabled="@(!preview.CanApprove)" @onclick="() => OnDecide.InvokeAsync(ApprovalDecisions.AllowOnce)">Allow once</button>
         @if (Approval.OffersAlwaysAllow)
         {
-            <button type="button" @onclick="() => OnDecide.InvokeAsync(ApprovalDecisions.AlwaysAllow)">Always</button>
+            <button type="button" disabled="@(!preview.CanApprove)" @onclick="() => OnDecide.InvokeAsync(ApprovalDecisions.AlwaysAllow)">Always</button>
         }
         <button type="button" class="danger" @onclick="() => OnDecide.InvokeAsync(ApprovalDecisions.Deny)">Deny</button>
     </div>

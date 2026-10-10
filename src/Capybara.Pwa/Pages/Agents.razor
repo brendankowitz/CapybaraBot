@@ -15,7 +15,7 @@ else
     <section class="cards">
     @foreach (var agent in _agents.Where(a => !a.Hidden || _showHidden))
     {
-        var status = _activity.TryGetValue(agent.Id, out var item) ? item : ("idle", 0);
+        var status = _activity.TryGetValue(agent.Id, out var item) ? item : (agent.State, agent.Unread);
         <article class="card" @key="agent.Id">
             <h2><a href="@($"agents/{agent.Id}")">@agent.Name</a></h2>
             <p>@agent.Job</p>
@@ -38,7 +38,9 @@ else
                     <summary>Manage (desktop)</summary>
                     <button type="button" @onclick="() => LifecycleAsync(() => Api.SetAgentHiddenAsync(agent.Id, !agent.Hidden))">@(agent.Hidden ? "Unhide" : "Hide")</button>
                     <button type="button" @onclick="() => LifecycleAsync(() => Api.ArchiveAgentAsync(agent.Id))">Archive</button>
-                    <button type="button" disabled="@string.IsNullOrWhiteSpace(_newId)" @onclick="() => LifecycleAsync(() => Api.DuplicateAgentAsync(agent.Id, new DuplicateAgentDto(_newId, _newName)))">Duplicate as "@_newId"</button>
+                    <button type="button" disabled="@string.IsNullOrWhiteSpace(_duplicateId)" @onclick="() => LifecycleAsync(() => Api.DuplicateAgentAsync(agent.Id, new DuplicateAgentDto(_duplicateId, _duplicateName)))">Duplicate as "@_duplicateId"</button>
+                    <input @bind="_duplicateId" placeholder="duplicate id" />
+                    <input @bind="_duplicateName" placeholder="duplicate name" />
                     <label>Type the id to delete<input @bind="_deleteConfirm" @bind:event="oninput" placeholder="@agent.Id" /></label>
                     <button type="button" class="danger" disabled="@(_deleteConfirm != agent.Id)" @onclick="() => DeleteAsync(agent)">Delete (revokes grants, removes workspace)</button>
                 </details>
@@ -78,6 +80,8 @@ else
     private string _template = string.Empty;
     private string _newId = string.Empty;
     private string _newName = string.Empty;
+    private string _duplicateId = string.Empty;
+    private string _duplicateName = string.Empty;
     private string _deleteConfirm = string.Empty;
 
     protected override async Task OnInitializedAsync()

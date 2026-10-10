@@ -29,6 +29,7 @@
     private sealed record ChatLine(DateTimeOffset At, string Kind, string Text);
 
     private readonly List<ChatLine> _lines = [];
+    private readonly CancellationTokenSource _disposed = new();
     private string _prompt = string.Empty;
     private string _model = string.Empty;
     private bool _incognito;
@@ -36,6 +37,12 @@
     private bool _busy;
 
     [Parameter] public string Id { get; set; } = string.Empty;
+
+    /// <summary>How often the history is re-read while a queued (Accepted) turn has no reply yet.</summary>
+    [Parameter] public TimeSpan PollInterval { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>How many times to poll before telling the user the reply has not arrived.</summary>
+    [Parameter] public int MaxPolls { get; set; } = 90;
 
     protected override async Task OnInitializedAsync()
     {
@@ -46,6 +53,7 @@
             _lines.Add(new ChatLine(entry.At, entry.Role, entry.Content));
         }
 
+        await TryAsync(() => Api.MarkAgentReadAsync(Id));
         await Realtime.TryStartAsync();
     }
 
@@ -68,11 +76,50 @@
         ClearError();
         _busy = true;
         var result = await TryAsync(() => Api.SendTurnAsync(Id, new TurnRequestDto(prompt, _incognito, _conversationId)));
-        _busy = false;
-        if (result is not null)
+        if (result is { IsAccepted: true })
         {
-            _lines.Add(new ChatLine(DateTimeOffset.Now, "assistant", result.Content));
+            await AwaitReplyAsync(prompt);
         }
+        else if (result is not null)
+        {
+            _lines.Add(Describe(result));
+        }
+
+        _busy = false;
+    }
+
+    // Every status is shown: a turn that did not run (paused, over budget, throttled) must not look like an empty reply.
+    private static ChatLine Describe(TurnResultDto result) => new(DateTimeOffset.Now, result.IsCompleted ? "assistant" : "status", result.Summary);
+
+    // The turn was queued through the inbox: the reply lands in the chat history right after our message (matched by content, not by\n    // clock), so poll until an assistant entry follows it.
+    private async Task AwaitReplyAsync(string prompt)
+    {
+        for (var attempt = 0; attempt < MaxPolls && !_disposed.IsCancellationRequested; attempt++)
+        {
+            try
+            {
+                await Task.Delay(PollInterval, _disposed.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            var history = await TryAsync(() => Api.GetChatHistoryAsync(Id));
+            if (history is null)
+            {
+                return;
+            }
+
+            var replies = ChatReplies.To(history, prompt);
+            if (replies.Count > 0)
+            {
+                _lines.AddRange(replies.Select(r => new ChatLine(r.At, "assistant", r.Content)));
+                return;
+            }
+        }
+
+        _lines.Add(new ChatLine(DateTimeOffset.Now, "status", "No reply yet. It will appear here when the agent finishes."));
     }
 
     private async Task SetModelAsync()
@@ -96,5 +143,10 @@
         });
     }
 
-    public void Dispose() => Realtime.ThreadEntry -= OnThreadEntry;
+    public void Dispose()
+    {
+        Realtime.ThreadEntry -= OnThreadEntry;
+        _disposed.Cancel();
+        _disposed.Dispose();
+    }
 }

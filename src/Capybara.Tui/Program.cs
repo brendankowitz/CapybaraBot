@@ -15,7 +15,7 @@ try
 }
 catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or UnauthorizedAccessException or FileNotFoundException or ArgumentException or IOException)
 {
-    AnsiConsole.MarkupLine($"[red]{Markup.Escape(ex.Message)}[/]");
+    AnsiConsole.MarkupLine($"[red]{Tables.Safe(ex.Message)}[/]");
     return 1;
 }
 
@@ -41,7 +41,7 @@ static async Task<int> RunAsync(ParsedCommand command, CapybaraApiClient api, st
         case "thread":
             foreach (var entry in await api.GetThreadAsync())
             {
-                AnsiConsole.MarkupLine($"[blue]{Markup.Escape(entry.From)}[/] → [green]{Markup.Escape(entry.To)}[/]: {Markup.Escape(Tables.Clean(entry.Summary))}");
+                AnsiConsole.MarkupLine($"[blue]{Tables.Safe(entry.From)}[/] → [green]{Tables.Safe(entry.To)}[/]: {Tables.Safe(entry.Summary)}");
             }
 
             return 0;
@@ -89,8 +89,30 @@ static async Task ChatAsync(CapybaraApiClient api, string agent)
         }
 
         var result = await api.SendTurnAsync(agent, prompt);
-        AnsiConsole.Write(Tables.Plain(result.Content));
-        AnsiConsole.WriteLine();
+        if (!result.IsAccepted)
+        {
+            AnsiConsole.Write(Tables.Plain(result.Summary));
+            AnsiConsole.WriteLine();
+            continue;
+        }
+
+        // Queued through the inbox: the reply lands in the chat history right after our message.
+        AnsiConsole.MarkupLine("[grey]Queued, waiting for the reply…[/]");
+        for (var attempt = 0; attempt < 90; attempt++)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(2));
+            var replies = ChatReplies.To(await api.GetChatHistoryAsync(agent), prompt);
+            if (replies.Count > 0)
+            {
+                foreach (var reply in replies)
+                {
+                    AnsiConsole.Write(Tables.Plain(reply.Content));
+                    AnsiConsole.WriteLine();
+                }
+
+                break;
+            }
+        }
     }
 }
 
@@ -112,7 +134,7 @@ static async Task ProposalsAsync(CapybaraApiClient api, SubCommand sub)
     {
         case "show":
             var proposal = await api.GetProposalAsync(sub.Target!);
-            AnsiConsole.MarkupLine($"[bold]{Markup.Escape(proposal.Kind)}[/] by {Markup.Escape(proposal.Agent)} → {Markup.Escape(proposal.TargetPath)} ({Markup.Escape(proposal.Status)})");
+            AnsiConsole.MarkupLine($"[bold]{Tables.Safe(proposal.Kind)}[/] by {Tables.Safe(proposal.Agent)} → {Tables.Safe(proposal.TargetPath)} ({Tables.Safe(proposal.Status)})");
             AnsiConsole.Write(Tables.Plain(proposal.Rationale));
             AnsiConsole.WriteLine();
             AnsiConsole.Write(Tables.Plain(proposal.Diff));
@@ -120,7 +142,7 @@ static async Task ProposalsAsync(CapybaraApiClient api, SubCommand sub)
             break;
         case "approve" or "reject":
             var decided = await api.DecideProposalAsync(sub.Target!, approve: sub.Verb == "approve");
-            AnsiConsole.MarkupLine($"Proposal {Markup.Escape(decided.Id)}: {Markup.Escape(decided.Status)}{(decided.Error is null ? string.Empty : $" - {Markup.Escape(decided.Error)}")}");
+            AnsiConsole.MarkupLine($"Proposal {Tables.Safe(decided.Id)}: {Tables.Safe(decided.Status)}{(decided.Error is null ? string.Empty : $" - {Tables.Safe(decided.Error)}")}");
             break;
         default:
             AnsiConsole.Write(Tables.Proposals(await api.GetProposalsAsync()));
@@ -151,7 +173,7 @@ static async Task MemoryAsync(CapybaraApiClient api, SubCommand sub, string? out
                 await zip.CopyToAsync(file);
             }
 
-            AnsiConsole.MarkupLine($"Exported to {Markup.Escape(path)}.");
+            AnsiConsole.MarkupLine($"Exported to {Tables.Safe(path)}.");
             break;
         default:
             AnsiConsole.Write(Tables.MemoryPages(await api.GetMemoryPagesAsync(sub.Target)));
@@ -172,7 +194,7 @@ static async Task RoutinesAsync(CapybaraApiClient api, SubCommand sub, decimal? 
             break;
         case "dry-run":
             var result = await api.DryRunRoutineAsync(sub.Target!);
-            AnsiConsole.MarkupLine($"Dry run: {Markup.Escape(result.Status)} ({result.Credits:0.##} credits). Auto-denied approvals: {Markup.Escape(result.DeniedApprovals.Count == 0 ? "none" : string.Join(", ", result.DeniedApprovals))}");
+            AnsiConsole.MarkupLine($"Dry run: {Tables.Safe(result.Status)} ({result.Credits:0.##} credits). Auto-denied approvals: {Tables.Safe(result.DeniedApprovals.Count == 0 ? "none" : string.Join(", ", result.DeniedApprovals))}");
             if (!string.IsNullOrEmpty(result.Output))
             {
                 AnsiConsole.Write(Tables.Plain(result.Output));
@@ -190,7 +212,7 @@ static async Task RoutinesAsync(CapybaraApiClient api, SubCommand sub, decimal? 
 static async Task EnableRoutineAsync(CapybaraApiClient api, string id, decimal? acknowledgedCredits)
 {
     var routine = (await api.GetRoutinesAsync()).FirstOrDefault(r => r.Id == id) ?? throw new ArgumentException($"No routine '{id}'.");
-    AnsiConsole.MarkupLine($"Routine [bold]{Markup.Escape(routine.Id)}[/] projects [yellow]{routine.ProjectedMonthlyCredits:0.##}[/] credits per month.");
+    AnsiConsole.MarkupLine($"Routine [bold]{Tables.Safe(routine.Id)}[/] projects [yellow]{routine.ProjectedMonthlyCredits:0.##}[/] credits per month.");
     AnsiConsole.Write(Tables.RoutineRuns(routine));
     var acknowledged = acknowledgedCredits
         ?? (AnsiConsole.Confirm($"Acknowledge {routine.ProjectedMonthlyCredits:0.##} credits/month and enable?", defaultValue: false)
@@ -203,9 +225,9 @@ static async Task EnableRoutineAsync(CapybaraApiClient api, string id, decimal? 
 static async Task DashboardAsync(CapybaraApiClient api, Uri baseUrl, string token)
 {
     await using var realtime = new CapybaraRealtimeClient(baseUrl, () => Task.FromResult<string?>(token));
-    realtime.OnAgentStatusChanged((id, state, unread) => AnsiConsole.MarkupLine($"{Markup.Escape(id)}: {Markup.Escape(state)} unread={unread}"));
+    realtime.OnAgentStatusChanged((id, state, unread) => AnsiConsole.MarkupLine($"{Tables.Safe(id)}: {Tables.Safe(state)} unread={unread}"));
     realtime.OnKillSwitchChanged(engaged => AnsiConsole.MarkupLine(engaged ? "[red]Kill switch engaged[/]" : "[green]Kill switch released[/]"));
-    realtime.OnApprovalRequested(a => AnsiConsole.MarkupLine($"[yellow]Approval needed[/]: {Markup.Escape(a.Agent)} → {Markup.Escape(a.Tool)}"));
+    realtime.OnApprovalRequested(a => AnsiConsole.MarkupLine($"[yellow]Approval needed[/]: {Tables.Safe(a.Agent)} → {Tables.Safe(a.Tool)}"));
     await realtime.StartAsync();
     AnsiConsole.Write(Tables.Agents(await api.GetAgentsAsync()));
     await Task.Delay(Timeout.InfiniteTimeSpan);

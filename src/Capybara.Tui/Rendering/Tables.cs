@@ -10,7 +10,7 @@ public static class Tables
         var table = new Table().AddColumn("Id").AddColumn("Name").AddColumn("Job").AddColumn("Model").AddColumn("State");
         foreach (var agent in agents)
         {
-            table.AddRow(Markup.Escape(agent.Id), Markup.Escape(agent.Name), Markup.Escape(agent.Job), Markup.Escape(agent.Model), agent.Paused || agent.BudgetExhausted ? "paused" : "ready");
+            table.AddRow(Safe(agent.Id), Safe(agent.Name), Safe(agent.Job), Safe(agent.Model), agent.Paused || agent.BudgetExhausted ? "paused" : "ready");
         }
 
         return table;
@@ -21,7 +21,7 @@ public static class Tables
         var table = new Table().AddColumn("Id").AddColumn("Agent").AddColumn("Tool").AddColumn("Risk").AddColumn("Preview");
         foreach (var approval in approvals)
         {
-            table.AddRow(Markup.Escape(approval.Id), Markup.Escape(approval.Agent), Markup.Escape(approval.Tool), Markup.Escape(approval.Risk), Markup.Escape(Clean(approval.Preview)));
+            table.AddRow(Safe(approval.Id), Safe(approval.Agent), Safe(approval.Tool), Safe(approval.Risk), Safe(approval.Preview));
         }
 
         return table;
@@ -32,7 +32,7 @@ public static class Tables
         var table = new Table().AddColumn("Id").AddColumn("Agent").AddColumn("Kind").AddColumn("Target").AddColumn("Status").AddColumn("Rationale");
         foreach (var p in proposals)
         {
-            table.AddRow(Markup.Escape(p.Id), Markup.Escape(p.Agent), Markup.Escape(p.Kind), Markup.Escape(p.TargetPath), Markup.Escape(p.Status), Markup.Escape(p.Rationale));
+            table.AddRow(Safe(p.Id), Safe(p.Agent), Safe(p.Kind), Safe(p.TargetPath), Safe(p.Status), Safe(p.Rationale));
         }
 
         return table;
@@ -43,7 +43,7 @@ public static class Tables
         var table = new Table().AddColumn("Path").AddColumn(new TableColumn("Bytes").RightAligned()).AddColumn("Updated");
         foreach (var page in pages)
         {
-            table.AddRow(Markup.Escape(page.Path), page.Size.ToString(System.Globalization.CultureInfo.InvariantCulture), page.UpdatedAt?.ToString("u", System.Globalization.CultureInfo.InvariantCulture) ?? "-");
+            table.AddRow(Safe(page.Path), page.Size.ToString(System.Globalization.CultureInfo.InvariantCulture), page.UpdatedAt?.ToString("u", System.Globalization.CultureInfo.InvariantCulture) ?? "-");
         }
 
         return table;
@@ -54,7 +54,7 @@ public static class Tables
         var table = new Table().AddColumn("Id").AddColumn("Kind").AddColumn("Path").AddColumn("Proposed by").AddColumn("Reason");
         foreach (var change in changes)
         {
-            table.AddRow(Markup.Escape(change.Id), Markup.Escape(change.Kind), Markup.Escape(change.Path), Markup.Escape(change.ProposedBy), Markup.Escape(change.Reason ?? "-"));
+            table.AddRow(Safe(change.Id), Safe(change.Kind), Safe(change.Path), Safe(change.ProposedBy), Safe(change.Reason ?? "-"));
         }
 
         return table;
@@ -66,7 +66,7 @@ public static class Tables
         foreach (var r in routines)
         {
             var state = r.AutoPaused ? "auto-paused" : r.Paused ? "paused" : r.Enabled ? "enabled" : "disabled";
-            table.AddRow(Markup.Escape(r.Id), Markup.Escape(r.Owner), Markup.Escape(r.Kind), state, r.ProjectedMonthlyCredits.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
+            table.AddRow(Safe(r.Id), Safe(r.Owner), Safe(r.Kind), state, r.ProjectedMonthlyCredits.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
         }
 
         return table;
@@ -77,7 +77,7 @@ public static class Tables
         var table = new Table().AddColumn("At").AddColumn("Status").AddColumn("Model").AddColumn(new TableColumn("Credits").RightAligned());
         foreach (var run in routine.LastRuns.Take(20))
         {
-            table.AddRow(run.At.ToString("u", System.Globalization.CultureInfo.InvariantCulture), Markup.Escape(run.Status), Markup.Escape(run.Model ?? "-"), run.Credits.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
+            table.AddRow(run.At.ToString("u", System.Globalization.CultureInfo.InvariantCulture), Safe(run.Status), Safe(run.Model ?? "-"), run.Credits.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
         }
 
         return table;
@@ -90,17 +90,17 @@ public static class Tables
         table.AddRow("fleet", "month", Credits(budgets.Monthly.Spent), Credits(budgets.Monthly.Limit));
         foreach (var agent in budgets.Agents)
         {
-            table.AddRow("agent", Markup.Escape(agent.Agent) + (agent.Exhausted ? " [red](exhausted)[/]" : string.Empty), $"{Credits(agent.SpentToday)} / {Credits(agent.SpentThisMonth)}", $"{Credits(agent.DailyLimit)} / {Credits(agent.MonthlyLimit)}");
+            table.AddRow("agent", Safe(agent.Agent) + (agent.Exhausted ? " [red](exhausted)[/]" : string.Empty), $"{Credits(agent.SpentToday)} / {Credits(agent.SpentThisMonth)}", $"{Credits(agent.DailyLimit)} / {Credits(agent.MonthlyLimit)}");
         }
 
         foreach (var model in budgets.ByModel)
         {
-            table.AddRow("model", Markup.Escape(model.Key), Credits(model.Credits), "-");
+            table.AddRow("model", Safe(model.Key), Credits(model.Credits), "-");
         }
 
         foreach (var routine in budgets.ByRoutine)
         {
-            table.AddRow("routine", Markup.Escape(routine.Key), Credits(routine.Credits), "-");
+            table.AddRow("routine", Safe(routine.Key), Credits(routine.Credits), "-");
         }
 
         if (budgets.Quota is { } quota)
@@ -113,9 +113,18 @@ public static class Tables
 
     private static string Credits(decimal value) => value.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
 
-    /// <summary>Agent- and server-supplied text as inert output: control characters (terminal escapes) are dropped.</summary>
-    public static string Clean(string text) => string.Concat(text.Where(c => c is '\n' or '\t' || !char.IsControl(c)));
+    /// <summary>
+    /// Untrusted text as inert output: terminal escapes, other control characters and invisible/bidi format characters
+    /// (U+202A–202E, U+2066–2069, zero-width, all Unicode Cf) are dropped. Newlines and tabs survive.
+    /// </summary>
+    public static string Clean(string? text) =>
+        string.IsNullOrEmpty(text) ? string.Empty : string.Concat(text.Where(c => c is '\n' or '\t' || !(char.IsControl(c) || IsInvisible(c))));
+
+    /// <summary>For every untrusted table cell or markup argument: cleaned, then escaped so brackets are literal.</summary>
+    public static string Safe(string? text) => Markup.Escape(Clean(text));
 
     /// <summary>Untrusted multi-line text (diffs, page bodies) rendered without markup interpretation.</summary>
-    public static Text Plain(string text) => new(Clean(text));
+    public static Text Plain(string? text) => new(Clean(text));
+
+    private static bool IsInvisible(char c) => char.GetUnicodeCategory(c) is System.Globalization.UnicodeCategory.Format or System.Globalization.UnicodeCategory.LineSeparator or System.Globalization.UnicodeCategory.ParagraphSeparator;
 }
