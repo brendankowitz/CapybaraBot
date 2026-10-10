@@ -10,7 +10,7 @@ public interface IGrantProvider
     IReadOnlyList<Grant> GetGrants(string agentId);
 }
 
-/// <summary>Mutable in-memory grant provider for tests and bootstrap config; human UI owns mutations (FR-CON-07).</summary>
+/// <summary>In-memory grant provider for tests. The broker itself uses the read-only <see cref="ConfigGrantProvider"/> (FR-CON-07).</summary>
 public sealed class InMemoryGrantProvider : IGrantProvider
 {
     private readonly Dictionary<string, IReadOnlyList<Grant>> _grants = new(StringComparer.Ordinal);
@@ -29,6 +29,11 @@ public sealed class GrantEnforcer(IGrantProvider grants)
 {
     public GrantDecision Decide(string agentId, string connection, string operation, JsonElement args)
     {
+        if (args.ValueKind != JsonValueKind.Object)
+        {
+            return GrantDecision.Deny("arguments must be a JSON object");
+        }
+
         var grant = grants.GetGrants(agentId).FirstOrDefault(g => string.Equals(g.Connection, connection, StringComparison.Ordinal) && g.Permits(operation));
         if (grant is null)
         {
@@ -74,30 +79,4 @@ public sealed record GrantDecision(bool Allowed, string Reason)
     public static GrantDecision Allow() => new(true, "allowed");
 
     public static GrantDecision Deny(string reason) => new(false, reason);
-}
-
-/// <summary>Human-only administration surface for connections and grants (FR-CON-07, FR-SAF-11).</summary>
-public sealed class ConnectionAdministration(InMemoryGrantProvider grants)
-{
-    public void ReplaceGrants(HumanPrincipal principal, string agentId, IReadOnlyList<Grant> newGrants)
-    {
-        ArgumentNullException.ThrowIfNull(principal);
-        if (principal.Surface is HumanSurface.Agent)
-        {
-            throw new InvalidOperationException("Agents cannot administer connections or grants.");
-        }
-
-        grants.Set(agentId, newGrants);
-    }
-}
-
-/// <summary>Explicit human principal required for connection administration (FR-CON-07).</summary>
-public sealed record HumanPrincipal(string Subject, HumanSurface Surface);
-
-public enum HumanSurface
-{
-    Phone,
-    Desktop,
-    Tui,
-    Agent,
 }

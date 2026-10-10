@@ -4,12 +4,16 @@ using Microsoft.Extensions.Options;
 
 namespace Capybara.Connections.Health;
 
-/// <summary>Credential health metadata for expiry alerting (FR-CON-05).</summary>
-public sealed record CredentialHealth(string ConnectionId, CredentialKind Kind, DateTimeOffset ExpiresAt, bool GoogleAppInProduction = true, string? Detail = null);
+/// <summary>
+/// Credential health metadata for expiry alerting (FR-CON-05). A <see langword="null"/> <paramref name="ExpiresAt"/>
+/// means the expiry is unknown, which is itself alerted as a warning: unknown is never treated as healthy.
+/// </summary>
+public sealed record CredentialHealth(string ConnectionId, CredentialKind Kind, DateTimeOffset? ExpiresAt, bool GoogleAppInProduction = true, string? Detail = null);
 
 public enum CredentialKind
 {
     GoogleRefreshTokenTesting,
+    GoogleRefreshToken,
     MicrosoftRefreshToken,
     GitHubFineGrainedPat,
     GitHubAppInstallationToken,
@@ -54,9 +58,13 @@ public sealed class TokenHealthMonitor(ICredentialHealthSource source, IAlertSin
                 await alerts.PublishAsync(new Alert("token_health", AlertSeverity.Critical, $"{item.ConnectionId}: Google OAuth app is not in production; testing refresh tokens expire after 7 days.", now), cancellationToken);
             }
 
-            if (item.ExpiresAt <= now.Add(lead))
+            if (item.ExpiresAt is not { } expires)
             {
-                await alerts.PublishAsync(new Alert("token_expiry", item.ExpiresAt <= now ? AlertSeverity.Critical : AlertSeverity.Warning, $"{item.ConnectionId}: {item.Kind} expires at {item.ExpiresAt:O}.", now), cancellationToken);
+                await alerts.PublishAsync(new Alert("token_expiry_unknown", AlertSeverity.Warning, item.Detail is { } unknown ? $"{item.ConnectionId}: {unknown}" : $"{item.ConnectionId}: {item.Kind} expiry is unknown.", now), cancellationToken);
+            }
+            else if (expires <= now.Add(lead))
+            {
+                await alerts.PublishAsync(new Alert("token_expiry", expires <= now ? AlertSeverity.Critical : AlertSeverity.Warning, item.Detail is { } detail ? $"{item.ConnectionId}: {detail}" : $"{item.ConnectionId}: {item.Kind} expires at {expires:O}.", now), cancellationToken);
             }
         }
     }

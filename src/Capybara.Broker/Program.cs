@@ -1,26 +1,17 @@
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json.Serialization;
 using Capybara.Connections.Broker;
-using Capybara.Connections.Connectors;
 using Capybara.Connections.DependencyInjection;
 using Capybara.Connections.Mcp;
 using Capybara.Connections.Model;
-using Capybara.Connections.Vault;
-using Capybara.Contracts.Storage;
 
+// capybara-broker (FR-CON-01): the only process that holds connection credentials. It listens on loopback (or a Unix
+// socket) and serves capybarad's /broker API plus the per-agent MCP endpoints.
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSystemd();
-builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
-var brokerOptions = builder.Configuration.GetSection("Broker").Get<BrokerOptions>() ?? new BrokerOptions();
-var credentialsDirectory = Environment.GetEnvironmentVariable("CREDENTIALS_DIRECTORY") ?? brokerOptions.CredentialsDirectory;
-if (!string.IsNullOrWhiteSpace(credentialsDirectory))
-{
-    builder.Services.AddSingleton<ISecretStore>(new CredentialsDirectorySecretStore(credentialsDirectory));
-}
-
-builder.Services.AddCapybaraConnections(new ConnectionsOptions { CredentialsDirectory = credentialsDirectory });
-builder.Services.AddSingleton(brokerOptions);
+builder.Services.ConfigureHttpJsonOptions(o => BrokerJson.Configure(o.SerializerOptions));
+var brokerOptions = builder.Configuration.GetSection(BrokerOptions.Section).Get<BrokerOptions>() ?? new BrokerOptions();
+builder.Services.AddCapybaraConnectionBroker(brokerOptions);
 builder.WebHost.ConfigureKestrel(options =>
 {
     if (!string.IsNullOrWhiteSpace(brokerOptions.UnixSocketPath))
@@ -36,7 +27,7 @@ builder.WebHost.ConfigureKestrel(options =>
 var app = builder.Build();
 app.Use(async (context, next) =>
 {
-    if (context.Request.Path.StartsWithSegments("/broker") && !await BrokerApiAuthentication.IsAuthorizedAsync(context, credentialsDirectory, brokerOptions.ApiKey))
+    if (context.Request.Path.StartsWithSegments("/broker") && !BrokerApiAuthentication.IsAuthorized(context.Request, brokerOptions.ReadApiKey()))
     {
         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
         return;
@@ -45,54 +36,23 @@ app.Use(async (context, next) =>
     await next(context);
 });
 
+app.MapCapybaraBrokerApi();
 app.MapCapybaraMcpEndpoints();
-app.MapPost("/broker/invoke", async (BrokerCall call, ConnectionBroker broker, CancellationToken ct) => await broker.InvokeAsync(call.AgentId, call.Connection, call.Operation, call.ArgsJson, ct));
-app.MapGet("/broker/connections", (IConnectorRegistry registry) => registry.List().Select(c => new ConnectionStatus(c.ConnectionId, Guess(c.ConnectionId), true, null)).ToArray());
-app.MapGet("/broker/health", () => TypedResults.Json(new { status = "ok" }));
 
 await app.RunAsync();
 
-static ConnectionProviderKind Guess(string id) => id.Contains("github", StringComparison.OrdinalIgnoreCase) ? ConnectionProviderKind.GitHub : id.Contains("gmail", StringComparison.OrdinalIgnoreCase) ? ConnectionProviderKind.Gmail : ConnectionProviderKind.MicrosoftGraph;
-
-internal sealed class BrokerOptions
-{
-    public int Port { get; set; } = 8788;
-
-    public string? UnixSocketPath { get; set; }
-
-    public string? CredentialsDirectory { get; set; }
-
-    public string? ApiKey { get; set; }
-}
-
+/// <summary>The /broker API is for capybarad only: it must present the shared broker API key (constant-time compare).</summary>
 internal static class BrokerApiAuthentication
 {
-    public static async ValueTask<bool> IsAuthorizedAsync(HttpContext context, string? credentialsDirectory, string? configuredKey)
+    public static bool IsAuthorized(HttpRequest request, string? expected)
     {
-        var supplied = ReadBearer(context.Request);
-        if (string.IsNullOrWhiteSpace(supplied))
+        var header = request.Headers.Authorization.ToString();
+        var supplied = header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? header[7..] : null;
+        if (string.IsNullOrWhiteSpace(supplied) || string.IsNullOrWhiteSpace(expected))
         {
             return false;
         }
 
-        var expected = configuredKey;
-        if (string.IsNullOrWhiteSpace(expected) && !string.IsNullOrWhiteSpace(credentialsDirectory))
-        {
-            var path = Path.Combine(credentialsDirectory, "broker-api-key");
-            expected = File.Exists(path) ? (await File.ReadAllTextAsync(path, context.RequestAborted)).Trim() : null;
-        }
-
-        return !string.IsNullOrWhiteSpace(expected) && FixedEquals(expected, supplied);
-    }
-
-    private static string? ReadBearer(HttpRequest request)
-    {
-        var header = request.Headers.Authorization.ToString();
-        return header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? header[7..] : null;
-    }
-
-    private static bool FixedEquals(string expected, string supplied)
-    {
         var expectedBytes = Encoding.UTF8.GetBytes(expected);
         var suppliedBytes = Encoding.UTF8.GetBytes(supplied);
         return expectedBytes.Length == suppliedBytes.Length && CryptographicOperations.FixedTimeEquals(expectedBytes, suppliedBytes);

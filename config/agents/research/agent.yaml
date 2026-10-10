@@ -10,6 +10,7 @@ tools:
   - memory_read
   - memory_search
   - remember
+  # Copilot CLI built-ins. No broker tools and no grants: research holds no private data.
   - web_fetch
   - web_search
 trifecta:

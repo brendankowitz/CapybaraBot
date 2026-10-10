@@ -15,12 +15,16 @@ tools:
   - remember
   - forget
   - propose_change
+  # Broker tools are named {connection}_{operation}; the broker serves only what the grants below allow.
+  - email_list
   - email_read
-  - calendar_read
+  - email_draft
   - email_send
-  - calendar_write
-externalActionTools: [email_send, calendar_write]
-approvalRequiredTools: [email_send, calendar_write]
+  - calendar_list
+  - calendar_read
+  - calendar_create
+externalActionTools: [email_send, calendar_create]
+approvalRequiredTools: [email_send, calendar_create]
 trifecta:
   untrustedInput: true
   privateData: true
@@ -33,12 +37,15 @@ accepts:
   consults: true
   messages: true
   tasks: false
+# Connections are defined in the broker's config (email = Gmail, calendar = Google Calendar); operations are the
+# connector's operation names. Drafting is allowed; sending and creating events are approval-gated above.
 grants:
-  - connection: gmail
-    operations: [read, draft, send]
+  - connection: email
+    operations: [list, read, draft, send]
   - connection: calendar
-    operations: [read, write]
-egress: [gmail.googleapis.com, www.googleapis.com]
+    operations: [list, read, create]
+# Provider calls are made by capybara-broker, so the EA itself needs no direct egress.
+egress: []
 budget:
   dailyCredits: 60
   monthlyCredits: 1500
