@@ -328,7 +328,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         try
         {
             var budget = request.Budget ?? new Budget(_agent.Budget.SessionMaxCredits, MainTurnToolCalls, _options.TurnTimeout);
-            var envelope = _envelopes.CreateRoot(request.Principal, _agent.Id, budget, _options.TurnTimeout);
+            var envelope = _envelopes.CreateRoot(request.Principal, _agent.Id, budget, _options.TurnTimeout, request.RootTaskId);
             session = await EnsureMainSessionAsync(envelope, cancellationToken);
             context = _mainSession!;
             context.Envelope = envelope;
@@ -403,7 +403,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         try
         {
             var envelope = target.Task?.Envelope
-                ?? _envelopes.CreateRoot(request.Principal, _agent.Id, request.Budget ?? new Budget(_agent.Budget.SessionMaxCredits, MainTurnToolCalls, _options.TurnTimeout), _options.TurnTimeout);
+                ?? _envelopes.CreateRoot(request.Principal, _agent.Id, request.Budget ?? new Budget(_agent.Budget.SessionMaxCredits, MainTurnToolCalls, _options.TurnTimeout), _options.TurnTimeout, request.RootTaskId);
             var context = new CapybaraSession(_agent, sessionId, target.Kind, envelope, target.Task?.Id)
             {
                 TurnOrigin = request.Origin,

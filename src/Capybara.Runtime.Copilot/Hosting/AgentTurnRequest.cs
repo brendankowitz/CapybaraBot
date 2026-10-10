@@ -33,4 +33,10 @@ public sealed record AgentTurnRequest
 
     /// <summary>Budget for a session without a task envelope, e.g. a routine's per-run budget.</summary>
     public Budget? Budget { get; init; }
+
+    /// <summary>
+    /// The agent-to-agent conversation this turn continues. The turn gets a fresh root envelope (so it may reply to the
+    /// sender) under the same root task id, so the per-pair exchange limit spans turns (FR-A2A-11).
+    /// </summary>
+    public string? RootTaskId { get; init; }
 }
