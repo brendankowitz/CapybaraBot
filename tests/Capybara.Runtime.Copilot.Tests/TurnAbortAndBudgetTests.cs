@@ -16,60 +16,14 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace Capybara.Runtime.Copilot.Tests;
 
 /// <summary>
-/// Review round 1, items 2 and 7: a stopped turn is aborted (and its idle awaited) before the failure surfaces; a turn
-/// that passes its own credit limit trips the abort; routine credits reach the ledger live and exactly once.
+/// Review round 1, item 7: a turn that passes its own credit limit trips the abort; routine credits reach the ledger
+/// live and exactly once. (Abort handling itself is covered by <see cref="TurnRunTests"/>.)
 /// </summary>
 public sealed class TurnAbortAndBudgetTests
 {
     private static readonly AgentDefinition Ea = TestAgents.Create("ea");
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
-
-    private static readonly MessageOptions Hello = new() { Prompt = "hello" };
-
-    [Fact]
-    public async Task A_completed_send_is_not_aborted()
-    {
-        var session = new FakeTurnSession { Reply = "hi" };
-
-        Assert.Equal("hi", await TurnSender.SendAsync(session, Hello, TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(1), Ct));
-        Assert.Equal(["send"], session.Calls);
-    }
-
-    [Fact]
-    public async Task A_timed_out_send_is_aborted_and_idle_awaited_before_the_failure_surfaces()
-    {
-        var session = new FakeTurnSession { SendFailure = new TimeoutException("too slow"), AbortDelay = TimeSpan.FromMilliseconds(50) };
-
-        await Assert.ThrowsAsync<TimeoutException>(() => TurnSender.SendAsync(session, Hello, TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(5), Ct));
-
-        Assert.Equal(["send", "abort", "idle"], session.Calls);
-    }
-
-    [Fact]
-    public async Task A_cancelled_send_is_aborted_too()
-    {
-        using var cancel = new CancellationTokenSource();
-        var session = new FakeTurnSession { WaitForCancellation = true };
-
-        var send = TurnSender.SendAsync(session, Hello, TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(5), cancel.Token);
-        await Eventually.TrueAsync(() => session.Calls.Contains("send"), "send started");
-        await cancel.CancelAsync();
-
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send);
-        Assert.Equal(["send", "abort", "idle"], session.Calls);
-    }
-
-    [Fact]
-    public async Task An_abort_that_fails_tells_the_caller_to_discard_the_session()
-    {
-        var session = new FakeTurnSession { SendFailure = new TimeoutException("too slow"), AbortFailure = new TimeoutException("never idle") };
-
-        var ex = await Assert.ThrowsAsync<TurnAbortFailedException>(() => TurnSender.SendAsync(session, Hello, TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(1), Ct));
-
-        Assert.IsType<TimeoutException>(ex.InnerException);
-        Assert.Equal("never idle", ex.AbortFailure!.Message);
-    }
 
     [Fact]
     public void A_turn_that_passes_its_credit_limit_fires_its_limit_callbacks_once()
@@ -171,65 +125,6 @@ public sealed class TurnAbortAndBudgetTests
     }
 
     private static AssistantUsageEvent Usage(double cost) => new() { Data = new AssistantUsageData { Model = "auto", Cost = cost } };
-
-    /// <summary>Records the order of send, abort and idle.</summary>
-    private sealed class FakeTurnSession : ITurnSession
-    {
-        private readonly Lock _gate = new();
-        private readonly List<string> _calls = [];
-
-        public string? Reply { get; init; }
-
-        public Exception? SendFailure { get; init; }
-
-        public bool WaitForCancellation { get; init; }
-
-        public Exception? AbortFailure { get; init; }
-
-        public TimeSpan AbortDelay { get; init; }
-
-        public IReadOnlyList<string> Calls
-        {
-            get
-            {
-                lock (_gate)
-                {
-                    return [.. _calls];
-                }
-            }
-        }
-
-        public async Task<string?> SendAndWaitAsync(MessageOptions message, TimeSpan timeout, CancellationToken cancellationToken)
-        {
-            Add("send");
-            if (WaitForCancellation)
-            {
-                await Task.Delay(Timeout.Infinite, cancellationToken);
-            }
-
-            return SendFailure is null ? Reply : throw SendFailure;
-        }
-
-        public async Task AbortAsync(TimeSpan idleTimeout)
-        {
-            Add("abort");
-            await Task.Delay(AbortDelay);
-            if (AbortFailure is not null)
-            {
-                throw AbortFailure;
-            }
-
-            Add("idle");
-        }
-
-        private void Add(string call)
-        {
-            lock (_gate)
-            {
-                _calls.Add(call);
-            }
-        }
-    }
 
     private sealed class AsyncKillSwitch : IAsyncDisposable
     {

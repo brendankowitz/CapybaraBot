@@ -2,6 +2,7 @@ using Capybara.Contracts.Agents;
 using Capybara.Contracts.Messaging;
 using Capybara.Runtime.Copilot.Hosting;
 using Capybara.Runtime.Copilot.Sessions;
+using Capybara.Runtime.Copilot.Supervision;
 using Capybara.Testing;
 using GitHub.Copilot;
 
@@ -51,6 +52,19 @@ public sealed class LiveSessionCreationTests
                 var config = await f.Configs.CreateConfigAsync(session, ct);
                 await using var created = await client.CreateSessionAsync(config, ct);
                 TestContext.Current.TestOutputHelper?.WriteLine($"{session.Kind}: created with MaxAiCredits={config.SessionLimits?.MaxAiCredits}");
+                if (session.Kind == SessionKind.Main)
+                {
+                    // The real self-test comparison (FR-AGT-09) must pass on what the CLI reports.
+                    var actual = await ToolMetadataPoller.WaitForToolsAsync(
+                        async token => (await created.Rpc.Tools.GetCurrentMetadataAsync(token)).Tools?.Select(t => t.Name).ToList(),
+                        TimeSpan.FromSeconds(30),
+                        TimeSpan.FromMilliseconds(250),
+                        TimeProvider.System,
+                        ct);
+                    var result = SelfTestGuard.Normalize(AgentRuntime.Compare(SessionConfigFactory.AvailableToolsFor(session), actual.ToHashSet(StringComparer.Ordinal)));
+                    Assert.True(result.Passed, $"missing: {string.Join(',', result.Missing)}; unexpected: {string.Join(',', result.Unexpected)}");
+                }
+
                 await client.DeleteSessionAsync(session.SessionId, ct);
             }
         }

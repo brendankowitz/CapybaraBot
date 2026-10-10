@@ -187,13 +187,13 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
             turn = _mainTurn;
         }
 
-        if (turn is not { Steerable: true })
+        // The run decides admission under its own lock: steering closes at its idle, so a message can never be counted
+        // as joined to a run that already ended without the turn also waiting for what it started.
+        if (turn is null || !await turn.Run.SteerAsync(new MessageOptions { Prompt = prompt, Source = SourceFor(origin, null), Mode = ImmediateMode }, cancellationToken))
         {
             return null;
         }
 
-        await turn.Session.SendAsync(new MessageOptions { Prompt = prompt, Source = SourceFor(origin, null), Mode = ImmediateMode }, cancellationToken);
-        Interlocked.Increment(ref turn.Joined);
         LogSteered(_logger, _agent.Id.Value);
         return await turn.Done.Task.WaitAsync(cancellationToken);
     }
@@ -357,16 +357,18 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
             }
 
             var prompt = await _memory.PrepareAsync(context, request.Prompt, cancellationToken);
-            var inFlight = new InFlightTurn(session, steerable: !request.DryRun);
+            using var run = new TurnRun(new CopilotTurnSession(session), steerable: !request.DryRun, Timings);
+            var inFlight = new InFlightTurn(run);
             lock (_turnGate)
             {
                 _mainTurn = inFlight;
             }
 
             TurnResult? result = null;
+            string? lateContent = null;
             try
             {
-                result = await SendTurnAsync(session, turn, prompt, SourceFor(request.Origin, request.From), DropMainSessionAsync, cancellationToken);
+                result = await SendTurnAsync(run, turn, prompt, SourceFor(request.Origin, request.From), DropMainSessionAsync, cancellationToken);
             }
             finally
             {
@@ -375,10 +377,21 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
                     _mainTurn = null;
                 }
 
-                // Messages steered into this turn share its outcome.
+                // Nothing may still run once the lock is released: steering in flight, or a run a late steer started.
+                try
+                {
+                    lateContent = await run.FinishAsync();
+                }
+                catch (TurnAbortFailedException ex)
+                {
+                    LogAbortFailed(_logger, ex.InnerException, _agent.Id.Value);
+                    await DropMainSessionAsync();
+                }
+
+                // Messages steered into this turn share its outcome; a late steer gets the run it started.
                 result = (result ?? TurnResult.Failed("the turn did not complete", turn.Snapshot()))
-                    with { RoutineId = request.RoutineId, UserMessagesJoined = Volatile.Read(ref inFlight.Joined) };
-                inFlight.Done.TrySetResult(result);
+                    with { RoutineId = request.RoutineId, UserMessagesJoined = run.Joined };
+                inFlight.Done.TrySetResult(lateContent is null ? result : result with { Content = lateContent });
             }
 
             if (result.Success)
@@ -498,7 +511,10 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
             try
             {
                 var prompt = await _memory.PrepareAsync(context, request.Prompt, cancellationToken);
-                var result = await SendTurnAsync(session, turn, prompt, SourceFor(request.Origin, request.From), () => DeleteQuietlyAsync(sessionId), cancellationToken);
+                using var run = new TurnRun(new CopilotTurnSession(session), steerable: false, Timings);
+
+                // A session whose run could not be stopped is released, not deleted: deleting would lose its history.
+                var result = await SendTurnAsync(run, turn, prompt, SourceFor(request.Origin, request.From), () => Task.CompletedTask, cancellationToken);
                 if (result.Success)
                 {
                     await _memory.IngestAsync(context, request.Prompt, result.Content, cancellationToken);
@@ -516,11 +532,11 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
 
     /// <summary>
     /// Sends one turn, stopped by the caller, the fleet kill switch, the turn timeout or the turn's own credit limit.
-    /// Whatever stops it, the run is aborted before this returns (<see cref="TurnSender"/>), so the caller's context and
+    /// Whatever stops it, the run is stopped before this returns (<see cref="TurnRun"/>), so the caller's context and
     /// locks are only reset once nothing runs any more; if the abort fails, <paramref name="discardSession"/> throws the
     /// session away. Only cancellation by the caller propagates.
     /// </summary>
-    private async Task<TurnResult> SendTurnAsync(CopilotSession session, SessionTurnLog turn, string prompt, MessageSource source, Func<Task> discardSession, CancellationToken cancellationToken)
+    private async Task<TurnResult> SendTurnAsync(TurnRun run, SessionTurnLog turn, string prompt, MessageSource source, Func<Task> discardSession, CancellationToken cancellationToken)
     {
         using var overLimit = new CancellationTokenSource();
 
@@ -529,7 +545,7 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _killSwitch.FleetToken, overLimit.Token);
         try
         {
-            var reply = await TurnSender.SendAsync(new CopilotTurnSession(session), new MessageOptions { Prompt = prompt, Source = source }, _options.TurnTimeout, _options.AbortTimeout, linked.Token);
+            var reply = await run.SendAsync(new MessageOptions { Prompt = prompt, Source = source }, linked.Token);
             return TurnResult.Completed(reply, turn.Snapshot());
         }
         catch (TurnAbortFailedException ex)
@@ -593,25 +609,6 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         }
     }
 
-    private async Task DeleteQuietlyAsync(string sessionId)
-    {
-        if (_client is not { } client)
-        {
-            return;
-        }
-
-        try
-        {
-            await client.DeleteSessionAsync(sessionId, CancellationToken.None);
-        }
-#pragma warning disable CA1031 // Best effort: the next turn creates the session afresh either way.
-        catch (Exception ex)
-#pragma warning restore CA1031
-        {
-            LogDeleteSkipped(_logger, sessionId, ex.Message);
-        }
-    }
-
     private async Task StartCoreAsync(CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(_options.AgentBaseDirectory(_agent.Id));
@@ -639,6 +636,8 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
             await main.DisposeAsync();
         }
     }
+
+    private TurnTimings Timings => new(_options.TurnTimeout, _options.AbortTimeout, _options.IdleGrace, _options.LateRunGrace, _time);
 
     private Envelope SystemEnvelope() =>
         _envelopes.CreateRoot("system", _agent.Id, new Budget(0.01m, 1, TimeSpan.FromMinutes(1)), TimeSpan.FromMinutes(1));
@@ -681,15 +680,10 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         }
     }
 
-    /// <summary>A main-session turn in flight; user DMs may be steered into it unless it is a dry run.</summary>
-    private sealed class InFlightTurn(CopilotSession session, bool steerable)
+    /// <summary>A main-session turn in flight; user DMs may be steered into it while its run is active (never a dry run).</summary>
+    private sealed class InFlightTurn(TurnRun run)
     {
-        /// <summary>User DMs steered into the turn.</summary>
-        public int Joined;
-
-        public CopilotSession Session { get; } = session;
-
-        public bool Steerable { get; } = steerable;
+        public TurnRun Run { get; } = run;
 
         public TaskCompletionSource<TurnResult> Done { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }

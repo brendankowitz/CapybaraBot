@@ -104,6 +104,18 @@ public sealed class CopilotRuntimeOptions
     public TimeSpan AbortTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
+    /// How long a failed turn waits for its run's own <c>session.idle</c> before aborting it. After <c>session.error</c>
+    /// the SDK throws and the idle follows within milliseconds; aborting an already idle session never signals idle.
+    /// </summary>
+    public TimeSpan IdleGrace { get; set; } = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>
+    /// How long a finished turn looks for a run started by a steering message that reached the CLI after the turn's run
+    /// ended (FR-AGT-05). A steering message the CLI merged into the run shows no further activity.
+    /// </summary>
+    public TimeSpan LateRunGrace { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>
     /// How long the post-start self-test waits for the runtime to report its tools (they are null until tools
     /// initialize). Running out fails the self-test, which pauses the agent (fail closed, FR-AGT-09).
     /// </summary>
