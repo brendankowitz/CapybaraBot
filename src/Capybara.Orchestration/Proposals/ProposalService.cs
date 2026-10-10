@@ -506,6 +506,10 @@ public sealed partial class ProposalService(
             throw new ProposalRejectedException($"The routine's owner must be '{agent}'; an agent can only propose its own routines.");
         }
 
+        // FR-RTN-09: a routine only starts billing once the user has seen and acknowledged its projected monthly cost,
+        // which happens when they enable it from /routines. So whatever the agent wrote, a proposed routine (new or
+        // edited) lands disabled, and the reviewed diff shows it.
+        YamlEditor.SetScalar(routine, "enabled", "false");
         return routine;
     }
 

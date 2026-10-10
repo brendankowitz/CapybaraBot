@@ -220,6 +220,22 @@ public sealed class ProposalServiceTests : IDisposable
         Assert.Equal(ProposalStatus.Applied, decided.Status);
         Assert.Equal(["alpha-evening", "alpha-heartbeat", "beta-digest"], _fixture.Host.Current.Routines.Select(r => r.Id).Order(StringComparer.Ordinal));
         Assert.StartsWith("# Routines header.", _fixture.Read("routines.yaml"), StringComparison.Ordinal);
+
+        // FR-RTN-09: the user enables it from /routines, after acknowledging its projected cost.
+        Assert.Contains("+enabled: false", proposal.Diff, StringComparison.Ordinal);
+        Assert.False(Assert.Single(_fixture.Host.Current.Routines, r => r.Id == "alpha-evening").Enabled);
+    }
+
+    [Fact]
+    public async Task A_routine_the_agent_proposes_as_enabled_still_lands_disabled()
+    {
+        const string routine = "id: alpha-evening\nowner: alpha\nkind: heartbeat\nevery: 5m\nprompt: Evening sweep.\nenabled: true";
+
+        var proposal = await _service.ProposeAsync(Alpha, ProposalKind.Routine, "alpha-evening", routine, "Catch late mail.", Ct);
+        await _service.DecideAsync(proposal.Id, approve: true, User, Ct);
+
+        Assert.DoesNotContain("enabled: true", proposal.ProposedContent, StringComparison.Ordinal);
+        Assert.False(Assert.Single(_fixture.Host.Current.Routines, r => r.Id == "alpha-evening").Enabled);
     }
 
     [Fact]
@@ -233,6 +249,9 @@ public sealed class ProposalServiceTests : IDisposable
         var updated = Assert.Single(_fixture.Host.Current.Routines, r => r.Id == "alpha-heartbeat");
         Assert.Equal(TimeSpan.FromMinutes(45), updated.Interval);
         Assert.Equal(2, _fixture.Host.Current.Routines.Count);
+
+        // An edit can raise the routine's cost, so the running routine stops until the user re-enables it.
+        Assert.False(updated.Enabled);
     }
 
     [Fact]
