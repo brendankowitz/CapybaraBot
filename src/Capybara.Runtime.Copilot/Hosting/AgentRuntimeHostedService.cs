@@ -1,4 +1,5 @@
 using Capybara.Observability.Alerts;
+using Capybara.Policy.Safety;
 using Capybara.Runtime.Copilot.Supervision;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -11,8 +12,15 @@ namespace Capybara.Runtime.Copilot.Hosting;
 /// FR-AGT-09). Neither takes the rest of the fleet down.
 /// </summary>
 /// <remarks>
+/// <para>
 /// The reconciler is optional so composition that predates it keeps resolving this service; without it, start-up does
 /// not report turns a crash interrupted, which is logged as Critical.
+/// </para>
+/// <para>
+/// With the fleet kill switch engaged (it survives restarts) nothing is started, resumed or self-tested: no CLI, MCP
+/// server or broker call may run (FR-SAF-06). The supervisor is suspended instead, and resuming it after the desktop
+/// releases the switch starts the runtimes through its normal restart path (reconcile, then self-test).
+/// </para>
 /// </remarks>
 public sealed partial class AgentRuntimeHostedService(
     AgentRuntimePool pool,
@@ -20,7 +28,9 @@ public sealed partial class AgentRuntimeHostedService(
     SelfTestGuard selfTest,
     TimeProvider time,
     ILogger<AgentRuntimeHostedService> logger,
-    ISessionReconciler? reconciler = null) : IHostedService
+    ISessionReconciler? reconciler = null,
+    RuntimeSupervisor? supervisor = null,
+    KillSwitch? killSwitch = null) : IHostedService
 {
     public async Task StartAsync(CancellationToken cancellationToken)
     {
@@ -31,6 +41,13 @@ public sealed partial class AgentRuntimeHostedService(
 
         foreach (var runtime in pool.Supervised)
         {
+            // Checked before every runtime, not once: the switch can engage while earlier runtimes start.
+            if (Halted)
+            {
+                await DeferAsync(cancellationToken);
+                return;
+            }
+
             var agent = runtime.Agent.Value;
             try
             {
@@ -47,9 +64,28 @@ public sealed partial class AgentRuntimeHostedService(
                 continue;
             }
 
+            if (Halted)
+            {
+                await DeferAsync(cancellationToken);
+                return;
+            }
+
             await ReconcileAsync(runtime, cancellationToken);
             await selfTest.VerifyAsync(runtime, cancellationToken);
         }
+    }
+
+    private bool Halted => killSwitch?.IsEngaged == true || supervisor?.IsSuspended == true;
+
+    /// <summary>Stops whatever already started (idempotent) and marks every runtime as deliberately stopped, so release restarts them without counting a crash.</summary>
+    private async Task DeferAsync(CancellationToken cancellationToken)
+    {
+        if (supervisor is not null)
+        {
+            await supervisor.SuspendAsync(cancellationToken);
+        }
+
+        LogStartDeferred(logger);
     }
 
     public async Task StopAsync(CancellationToken cancellationToken) => await pool.DisposeAsync();
@@ -73,6 +109,9 @@ public sealed partial class AgentRuntimeHostedService(
             LogReconcileFailed(logger, ex, runtime.Agent.Value);
         }
     }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "The kill switch is engaged; agent runtimes start when it is released from the desktop")]
+    private static partial void LogStartDeferred(ILogger logger);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Runtime {Agent} failed to start")]
     private static partial void LogStartFailed(ILogger logger, Exception exception, string agent);

@@ -7,15 +7,40 @@
 - `azure/`: Bicep for ACA consumption hosting, user-assigned identity, Key Vault references, and Log Analytics. Public ingress is disabled by default.
 - `capybarad.backup.sample.json`: sample `Capybara:Hosting` and `Capybara:Backup` configuration.
 
-## Prerequisites in the capybarad composition (not yet wired)
+## What the capybarad composition provides
 
-The units and docs below assume behaviour that the `capybarad` composition root (`Capybara.Gateway/Program.cs`) must provide. These
-are wired separately from the deploy artifacts, and until they are the units do not work:
+`Capybara.Gateway/Program.cs` wires what the units rely on:
 
-- **`AddSystemd()`** on the host builder, so `Type=notify` units report readiness. Without it `systemctl start capybarad` times out.
-- **`backup` / `restore` dispatch** to `BackupCommand.RunAsync` (see below), used by `capybara-backup.service`.
-- **`capybarad agent <id>` mode** (Phase 2 only), used by `capybara-agent@.service`.
-- **Per-agent srt launch** via `AgentSandboxPlanner`, so agents actually run sandboxed.
+- **`AddSystemd()`**, so `Type=notify` units report readiness once every hosted service has started.
+- **`backup` / `restore` dispatch** to `BackupCommand.RunAsync` before any host is built (used by `capybara-backup.service`).
+- **`capybarad agent <id>`** (Phase 2): only that agent's runtime and supervisor. Without the gateway<->agent RPC it receives no turns.
+- **Per-agent srt launch** via `AgentSandboxPlanner` when `Capybara:Runtime:Sandbox:SrtPath` and `CopilotCliPath` are set; the
+  settings files go to `{StateRoot}/srt`. Without them agents run unsandboxed (development only).
+- **Kestrel on 127.0.0.1 only** (`Capybara:Gateway:Port`); Tailscale Serve is the only way in.
+
+## Install steps
+
+1. Create the service users (`capybara`, `capybara-broker`) and `install -d -o capybara -g capybara -m 0700 /var/backups/capybara`.
+2. Put the config tree in `/etc/capybara` (`agents/`, `rules.yaml`, `routines.yaml`) owned by `capybara:capybara`, directories
+   `0750` and files `0640`: `chown -R capybara:capybara /etc/capybara && find /etc/capybara -type d -exec chmod 0750 {} + && find
+   /etc/capybara -type f -exec chmod 0640 {} +`. capybara-broker reads every `agents/*/agent.yaml` for its grants through the
+   `capybara` group (`capybara-broker.service` has `SupplementaryGroups=capybara`; add the user too: `usermod -aG capybara
+   capybara-broker`). capybarad writes the tree with the same modes (and `UMask=0027`), so later changes stay readable. Check with
+   `sudo -u capybara-broker cat /etc/capybara/agents/*/agent.yaml`; an unreadable file stops the broker with a message naming it.
+   capybarad commits every change with git, so `git` must be installed.
+3. Encrypt the credentials into `/etc/capybara/credentials` with `systemd-creds encrypt --name=<name> <file> <name>.cred`:
+   - capybarad: `github-token` (Copilot PAT), `broker-api-key` (random, shared with the broker), optionally `telegram-bot-token` and
+     `webpush-vapid-private-key` or the ntfy access token (then uncomment their lines in `capybarad.service`), and one credential per
+     secret name agents use: `provider.apiKeySecret` (BYOK key) and `mcpServers[].tokenSecret` (http MCP bearer), named exactly as in
+     `agent.yaml`;
+   - capybara-broker: `broker-api-key` (same value), `broker-vault-key` (`head -c32 /dev/urandom | base64`), `connection-github`,
+     `oauth-google-client-secret`, plus one line per further connection.
+4. Copy `systemd/capybarad.egress.sample.conf` to `/etc/systemd/system/capybarad.service.d/egress.conf` and list the public
+   endpoints capybarad must reach.
+5. `systemctl enable --now capybara-broker capybarad` (capybarad orders itself after the broker). Then `tailscale serve` the loopback
+   port.
+6. Backups: either keep `Capybara:Backup:InProcess=true` (default) with sources in capybarad's config, or enable
+   `capybara-backup.timer` and set `Capybara__Backup__InProcess=false` in a capybarad drop-in. Never both.
 
 ## systemd units
 
@@ -25,7 +50,7 @@ are wired separately from the deploy artifacts, and until they are the units do 
   loopback and the tailnet. Per-agent domain egress is enforced by srt, not by the unit.
 - `MemoryDenyWriteExecute` is deliberately never set: the .NET JIT and the Copilot CLI's Node runtime need executable pages (FR-HST-02).
 - `capybara-agent@.service` is a **Phase 2** template. It runs `capybarad agent <id>` (per-agent mode of the gateway binary). Do not
-  enable it until the gateway implements that mode.
+  enable it yet: without the gateway<->agent RPC, capybarad still runs every agent itself.
 
 ### Units that launch srt are relaxed on purpose
 
@@ -79,8 +104,8 @@ Two triggers exist; use only one:
 
 - In-process (default): when `Capybara:Backup` has sources, `capybarad` runs a nightly job (default 02:00 UTC) with catch-up on start.
 - Out-of-process: `capybara-backup.timer` runs `capybara-backup.service`, which executes `/opt/capybara/capybarad backup`. The command reads the
-  same `Capybara:Backup` section, which would also enable the in-process job in the running capybarad. So with the timer, keep the
-  sources out of capybarad's own config and supply them to the backup unit only (a drop-in with `Environment=Capybara__Backup__Sources__0__Name=...`).
+  same `Capybara:Backup` section; set `Capybara:Backup:InProcess=false` for capybarad (`Environment=Capybara__Backup__InProcess=false` in a
+  drop-in) so the running gateway does not also run the nightly job.
 
 Command line (exit code 0 ok, 1 failed, 2 usage):
 

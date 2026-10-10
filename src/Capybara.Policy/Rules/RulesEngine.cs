@@ -44,6 +44,24 @@ public sealed class RulesEngine(IEnumerable<PolicyRule> rules, IEnumerable<Polic
         }
     }
 
+    /// <summary>
+    /// Forgets learned rules matching <paramref name="predicate"/>, e.g. those of a deleted agent so a later agent with the
+    /// same id does not inherit its "Always allow" decisions (FR-AGT-07). Returns how many were removed; persist
+    /// <see cref="LearnedRules"/> afterwards.
+    /// </summary>
+    public int RemoveLearned(Func<PolicyRule, bool> predicate)
+    {
+        ArgumentNullException.ThrowIfNull(predicate);
+        lock (_gate)
+        {
+            var kept = _learned.RemoveAll(rule => predicate(rule));
+            var removed = _learned.Count - kept.Count;
+            _learned = kept;
+            _rules = _configured.AddRange(_learned);
+            return removed;
+        }
+    }
+
     public RuleMatch? Evaluate(string agent, string tool, JsonElement? args)
     {
         RuleMatch? best = null;

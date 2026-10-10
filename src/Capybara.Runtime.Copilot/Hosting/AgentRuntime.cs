@@ -55,6 +55,8 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     private readonly SessionLimiter _sessions;
     private readonly TimeProvider _time;
     private readonly ILogger<AgentRuntime> _logger;
+    private readonly RuntimeActivity? _activity;
+    private readonly IAgentCliLauncher? _launcher;
     private readonly SemaphoreSlim _mainLock = new(1, 1);
     private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
     private readonly KeyedLocks _sessionLocks = new();
@@ -81,7 +83,9 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         IAlertSink alerts,
         SessionLimiter sessions,
         TimeProvider time,
-        ILogger<AgentRuntime> logger)
+        ILogger<AgentRuntime> logger,
+        RuntimeActivity? activity = null,
+        IAgentCliLauncher? launcher = null)
     {
         ArgumentNullException.ThrowIfNull(agent);
         _agent = agent;
@@ -97,6 +101,8 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         _sessions = sessions;
         _time = time;
         _logger = logger;
+        _activity = activity;
+        _launcher = launcher;
         _model = agent.Model;
     }
 
@@ -150,6 +156,49 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
         }
     }
 
+    /// <summary>
+    /// Ends the CLI process and drops the main session (it stays persisted). A later <see cref="StartAsync"/> or
+    /// <see cref="RestartAsync"/> brings the runtime back. Used by the kill switch and agent removal (FR-SAF-06, FR-AGT-07).
+    /// </summary>
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        await _lifecycleLock.WaitAsync(cancellationToken);
+        try
+        {
+            await StopCoreAsync();
+        }
+        finally
+        {
+            _lifecycleLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// The account's premium-request quota from <c>account.getQuota</c> (FR-OBS-02), or <see langword="null"/> while
+    /// the CLI is not running. With a session-scoped token the CLI has no process-level login, so the token is passed
+    /// explicitly. An unlimited entitlement reads as an unreachable limit.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The account reported no premium-interactions quota.</exception>
+#pragma warning disable GHCP001 // account.getQuota is evaluation-only in the pinned SDK; it is the only quota source (live-CLI check pending).
+    internal async Task<Observability.Cost.QuotaSnapshot?> GetAccountQuotaAsync(CancellationToken cancellationToken)
+    {
+        if (_client is not { } client)
+        {
+            return null;
+        }
+
+        var token = _options.SessionScopedGitHubToken ? _options.GitHubToken : null;
+        var result = await client.Rpc.Account.GetQuotaAsync(token, null, cancellationToken);
+        if (result?.QuotaSnapshots is not { } snapshots || !snapshots.TryGetValue(Usage.CopilotQuotaSource.PremiumQuota, out var premium))
+        {
+            throw new InvalidOperationException($"The account reported no '{Usage.CopilotQuotaSource.PremiumQuota}' quota.");
+        }
+
+        var limit = premium.IsUnlimitedEntitlement || premium.EntitlementRequests <= 0 ? decimal.MaxValue : premium.EntitlementRequests;
+        return new Observability.Cost.QuotaSnapshot(premium.UsedRequests, limit, premium.ResetDate);
+    }
+#pragma warning restore GHCP001
+
     public async Task<TurnResult> RunTurnAsync(AgentTurnRequest request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -164,18 +213,26 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
             return TurnResult.OverBudget("budget exhausted (hard stop)");
         }
 
+        _activity?.OnTurnStarted(_agent.Id, request.Target.Kind);
+        TurnResult? result = null;
         try
         {
-            return request.Target.Kind == SessionKind.Main
+            result = request.Target.Kind == SessionKind.Main
                 ? await RunMainTurnAsync(request, cancellationToken)
                 : await RunSessionTurnAsync(request, cancellationToken);
+            return result;
         }
 #pragma warning disable CA1031 // A failed turn is a result; the caller decides whether to retry.
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
 #pragma warning restore CA1031
         {
             LogTurnFailed(_logger, ex, _agent.Id.Value, request.Target.Kind);
-            return TurnResult.Failed($"{ex.GetType().Name}: {ex.Message}");
+            result = TurnResult.Failed($"{ex.GetType().Name}: {ex.Message}");
+            return result;
+        }
+        finally
+        {
+            _activity?.OnTurnEnded(_agent.Id, request.Target.Kind, result);
         }
     }
 
@@ -665,7 +722,8 @@ public sealed partial class AgentRuntime : IAgentRuntime, ISupervisedRuntime, IS
     {
         Directory.CreateDirectory(_options.AgentBaseDirectory(_agent.Id));
         Directory.CreateDirectory(_options.AgentWorkingDirectory(_agent.Id));
-        _client = new CopilotClient(CopilotClientOptionsFactory.Create(_agent, _options, _logger));
+        var launch = _launcher is null ? null : await _launcher.PlanAsync(_agent, cancellationToken);
+        _client = new CopilotClient(CopilotClientOptionsFactory.Create(_agent, _options, _logger, launch));
         await _client.StartAsync(cancellationToken);
         LogStarted(_logger, _agent.Id.Value);
     }

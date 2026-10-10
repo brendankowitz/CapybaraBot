@@ -5,6 +5,7 @@ using Capybara.Policy.Gate;
 using Capybara.Policy.Provenance;
 using Capybara.Policy.Redaction;
 using Capybara.Runtime.Copilot.Configuration;
+using Capybara.Runtime.Copilot.Hosting;
 using Capybara.Runtime.Copilot.Sessions;
 using GitHub.Copilot;
 using GitHub.Copilot.Rpc;
@@ -32,7 +33,8 @@ public sealed partial class SessionHandlers(
     IAlertSink alerts,
     TimeProvider time,
     SecretRedactor? redactor = null,
-    ApprovalTurnStore? approvalTurns = null)
+    ApprovalTurnStore? approvalTurns = null,
+    RuntimeActivity? activity = null)
 {
     public const string UserUnavailableAnswer = "The user is not available right now. Continue without this input or stop and report what is blocked.";
 
@@ -140,6 +142,11 @@ public sealed partial class SessionHandlers(
                 if (verdict.Layer == PolicyGate.DryRunLayer)
                 {
                     turn.RecordDeniedApproval(input.ToolName);
+                }
+                else if (input.ToolArgs is { } denied && AnyString(denied, IsUrl))
+                {
+                    // A refused call that would have reached a URL: a burst of these is an exfiltration signal (FR-OBS-05).
+                    activity?.OnEgressDenied(session.Agent.Id);
                 }
 
                 turn.RecordAction($"{input.ToolName}: denied ({verdict.Layer})");
@@ -382,6 +389,9 @@ public sealed partial class SessionHandlers(
         JsonValueKind.Object => element.EnumerateObject().Any(p => predicate(p.Name) || AnyString(p.Value, predicate)),
         _ => false,
     };
+
+    private static bool IsUrl(string value) =>
+        value.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || value.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Returns the redacted result, or <see langword="null"/> when nothing needed redacting.</summary>
     private JsonElement? Redact(JsonElement result)

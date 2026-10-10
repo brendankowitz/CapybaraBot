@@ -23,6 +23,9 @@ public sealed class CapybaraEventBroadcaster(IHubContext<CapybaraHub> hub) : ICa
     public Task PublishKillSwitchChangedAsync(bool engaged, CancellationToken cancellationToken = default) =>
         hub.Clients.All.SendAsync("KillSwitchChanged", engaged, cancellationToken);
 
+    public Task PublishProposalAsync(object proposal, CancellationToken cancellationToken = default) =>
+        hub.Clients.All.SendAsync("ProposalCreated", proposal, cancellationToken);
+
     private static string ToWireState(AgentActivityState state) => state switch
     {
         AgentActivityState.Working => "working",

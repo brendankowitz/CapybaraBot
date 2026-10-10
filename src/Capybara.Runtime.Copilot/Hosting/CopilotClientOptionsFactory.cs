@@ -14,8 +14,9 @@ public static class CopilotClientOptionsFactory
 
     /// <remarks>
     /// Creates the agent's temp directory, because the CLI's <c>TMPDIR</c> points at it (<see cref="CliEnvironment"/>).
+    /// <paramref name="launch"/> (from an <see cref="IAgentCliLauncher"/>) replaces the host-wide CLI path and arguments.
     /// </remarks>
-    public static CopilotClientOptions Create(AgentDefinition agent, CopilotRuntimeOptions options, ILogger? logger = null)
+    public static CopilotClientOptions Create(AgentDefinition agent, CopilotRuntimeOptions options, ILogger? logger = null, CliLaunch? launch = null)
     {
         ArgumentNullException.ThrowIfNull(agent);
         ArgumentNullException.ThrowIfNull(options);
@@ -26,7 +27,8 @@ public static class CopilotClientOptionsFactory
             CliEnvironment.Build(agent.Id, options),
             agent.EnableRemoteSessions,
             options,
-            logger);
+            logger,
+            launch);
     }
 
     /// <summary>
@@ -49,14 +51,17 @@ public static class CopilotClientOptionsFactory
         IReadOnlyDictionary<string, string> environment,
         bool enableRemoteSessions,
         CopilotRuntimeOptions options,
-        ILogger? logger)
+        ILogger? logger,
+        CliLaunch? launch = null)
     {
         Directory.CreateDirectory(tempDirectory);
 
         // Always an explicit child-process connection: its Environment replaces capybarad's, so host secrets such as
         // CREDENTIALS_DIRECTORY never reach the CLI or the shell and MCP processes it spawns (FR-SAF-08).
         // A null path launches the CLI bundled with the SDK; a configured path is typically the sandbox wrapper (FR-AGT-07).
-        var connection = RuntimeConnection.ForStdio(options.CliPath is { Length: > 0 } cli ? cli : null, [.. options.CliArgs]);
+        var connection = launch is not null
+            ? RuntimeConnection.ForStdio(launch.Path, [.. launch.Arguments])
+            : RuntimeConnection.ForStdio(options.CliPath is { Length: > 0 } cli ? cli : null, [.. options.CliArgs]);
         connection.Environment = environment;
 
         return new CopilotClientOptions

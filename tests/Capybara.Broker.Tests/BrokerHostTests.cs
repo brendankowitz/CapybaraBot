@@ -77,6 +77,27 @@ public sealed class BrokerHostTests
     }
 
     [Fact]
+    public async Task Revoking_an_agent_drops_its_tools_and_is_audited()
+    {
+        using var dirs = new BrokerDirectories();
+        await using var factory = new BrokerFactory(dirs);
+        using var client = dirs.Authorize(factory.CreateClient());
+        var ct = TestContext.Current.CancellationToken;
+
+        var revoke = await client.PostAsync("/broker/agents/code/revoke", content: null, ct);
+        var code = await client.GetFromJsonAsync<BrokerToolDescriptor[]>("/broker/tools/code", BrokerJson.Options, ct);
+        var ea = await client.GetFromJsonAsync<BrokerToolDescriptor[]>("/broker/tools/ea", BrokerJson.Options, ct);
+        var call = await InvokeAsync(client, new BrokerCall("code", "github", "create_pr", "{}"));
+
+        Assert.Equal(HttpStatusCode.NoContent, revoke.StatusCode);
+        Assert.Empty(code!);
+        Assert.NotEmpty(ea!);
+        Assert.False(call.Allowed);
+        var audit = await File.ReadAllTextAsync(Path.Combine(dirs.State, "audit", "broker-audit.jsonl"), ct);
+        Assert.Contains("grants_revoked", audit, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Unauthorized_connection_is_denied_and_reported()
     {
         using var dirs = new BrokerDirectories();

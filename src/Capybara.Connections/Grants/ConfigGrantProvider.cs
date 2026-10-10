@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Capybara.Contracts.Connections;
 using YamlDotNet.Core;
 using YamlDotNet.Serialization;
@@ -8,7 +9,8 @@ namespace Capybara.Connections.Grants;
 /// <summary>
 /// Read-only grants loaded by the broker itself from <c>{ConfigRoot}/agents/*/agent.yaml</c> (FR-CON-02). The broker
 /// reads the user-owned config directly rather than trusting capybarad to tell it what an agent may do, and nothing
-/// can change grants at runtime: editing them is a human config change followed by a broker restart (FR-CON-07).
+/// can add or widen grants at runtime: editing them is a human config change followed by a broker restart (FR-CON-07).
+/// The only runtime change is <see cref="Revoke"/>, which can only take privilege away (FR-AGT-07).
 /// </summary>
 public sealed class ConfigGrantProvider : IGrantProvider
 {
@@ -17,14 +19,20 @@ public sealed class ConfigGrantProvider : IGrantProvider
         .IgnoreUnmatchedProperties()
         .Build();
 
-    private readonly Dictionary<string, IReadOnlyList<Grant>> _grants;
+    private readonly ConcurrentDictionary<string, IReadOnlyList<Grant>> _grants;
 
-    private ConfigGrantProvider(Dictionary<string, IReadOnlyList<Grant>> grants) => _grants = grants;
+    private ConfigGrantProvider(Dictionary<string, IReadOnlyList<Grant>> grants) => _grants = new(grants, StringComparer.Ordinal);
 
     /// <summary>Grants per agent id, including agents with none.</summary>
     public IReadOnlyDictionary<string, IReadOnlyList<Grant>> All => _grants;
 
     public IReadOnlyList<Grant> GetGrants(string agentId) => _grants.GetValueOrDefault(agentId, []);
+
+    /// <summary>
+    /// Drops every grant of an agent that was archived or deleted, until a restart reloads the config (where the agent
+    /// is gone). Returns whether the agent had an entry. Idempotent.
+    /// </summary>
+    public bool Revoke(string agentId) => _grants.TryRemove(agentId, out _);
 
     /// <summary>Loads every agent's grants. Fails closed: any unreadable or malformed file aborts the load.</summary>
     /// <exception cref="GrantConfigurationException">With every error found.</exception>
@@ -39,7 +47,17 @@ public sealed class ConfigGrantProvider : IGrantProvider
             throw new GrantConfigurationException([$"missing agents directory '{agentsDir}'."]);
         }
 
-        foreach (var dir in Directory.EnumerateDirectories(agentsDir).Order(StringComparer.Ordinal))
+        string[] agentDirs;
+        try
+        {
+            agentDirs = [.. Directory.EnumerateDirectories(agentsDir).Order(StringComparer.Ordinal)];
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            throw new GrantConfigurationException([Unreadable("agents/", ex)]);
+        }
+
+        foreach (var dir in agentDirs)
         {
             var folder = Path.GetFileName(dir);
             if (folder.StartsWith('.') || folder.StartsWith('_'))
@@ -50,7 +68,8 @@ public sealed class ConfigGrantProvider : IGrantProvider
             var file = Path.Combine(dir, "agent.yaml");
             if (!File.Exists(file))
             {
-                errors.Add($"{folder}: missing agent.yaml.");
+                // File.Exists is false for a file in a directory the broker cannot search, too; say which it is.
+                errors.Add(CanList(dir, out var denied) ? $"{folder}: missing agent.yaml." : Unreadable($"{folder}/", denied!));
                 continue;
             }
 
@@ -62,6 +81,11 @@ public sealed class ConfigGrantProvider : IGrantProvider
             catch (YamlException ex)
             {
                 errors.Add($"{folder}/agent.yaml: {ex.Message}");
+                continue;
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+            {
+                errors.Add(Unreadable($"{folder}/agent.yaml", ex));
                 continue;
             }
 
@@ -92,6 +116,25 @@ public sealed class ConfigGrantProvider : IGrantProvider
         }
 
         return errors.Count > 0 ? throw new GrantConfigurationException(errors) : new ConfigGrantProvider(grants);
+    }
+
+    /// <summary>capybara-broker runs as its own user and reads capybarad's config tree through the shared group.</summary>
+    private static string Unreadable(string what, Exception ex) =>
+        $"{what} cannot be read ({ex.GetType().Name}: {ex.Message}). capybara-broker must be in group 'capybara' and the config tree group-readable (0750 directories, 0640 files); see deploy/README.md.";
+
+    private static bool CanList(string directory, out Exception? denied)
+    {
+        try
+        {
+            _ = Directory.EnumerateFileSystemEntries(directory).Any();
+            denied = null;
+            return true;
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            denied = ex;
+            return false;
+        }
     }
 
     private sealed class AgentGrantsYaml
