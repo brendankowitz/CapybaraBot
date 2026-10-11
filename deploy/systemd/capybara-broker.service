@@ -1,0 +1,67 @@
+# capybara-broker: credential broker hardened like capybarad (FR-HST-02).
+# MemoryDenyWriteExecute is intentionally NOT set because .NET and Node JITs require executable memory.
+[Unit]
+Description=Capybara credential broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Type=notify: the broker calls AddSystemd() and reports readiness once it listens, so capybarad (After=capybara-broker.service)
+# never runs its agents' start-up self-tests against a broker that is not accepting connections yet.
+Type=notify
+NotifyAccess=main
+User=capybara-broker
+Group=capybara-broker
+# Read access to capybarad's config tree (0750/0640, group capybara) for agents/*/agent.yaml grants (FR-CON-02). The broker
+# cannot traverse /var/lib/capybara (StateDirectoryMode=0700), so this grants nothing else.
+SupplementaryGroups=capybara
+# Its own publish directory (FR-HST-04: dotnet publish -c Release -r linux-x64 -o /opt/capybara-broker). The content root is
+# the working directory, so sharing /opt/capybara would make the broker read capybarad's appsettings.json (or vice versa).
+ExecStart=/opt/capybara-broker/capybara-broker
+WorkingDirectory=/opt/capybara-broker
+Environment=DOTNET_ENVIRONMENT=Production
+Restart=on-failure
+RestartSec=5s
+# Credentials the broker reads from $CREDENTIALS_DIRECTORY (FR-CON-04). capybarad holds only broker-api-key (the same value).
+# broker-vault-key: 32 random bytes, base64 (`head -c32 /dev/urandom | base64 | systemd-creds encrypt --name=broker-vault-key - ...`).
+# connection-github: the GitHub connection's fine-grained PAT. oauth-google-client-secret: the Google OAuth client secret.
+# Add one LoadCredentialEncrypted line per further connection-<id> / oauth-<provider>-client-secret you configure.
+LoadCredentialEncrypted=broker-api-key:/etc/capybara/credentials/broker-api-key.cred
+LoadCredentialEncrypted=broker-vault-key:/etc/capybara/credentials/broker-vault-key.cred
+LoadCredentialEncrypted=connection-github:/etc/capybara/credentials/connection-github.cred
+LoadCredentialEncrypted=oauth-google-client-secret:/etc/capybara/credentials/oauth-google-client-secret.cred
+StateDirectory=capybara-broker
+StateDirectoryMode=0700
+ConfigurationDirectory=capybara
+# Same mode as capybarad.service declares, so whichever unit starts first leaves /etc/capybara group-readable, never 0755.
+ConfigurationDirectoryMode=0750
+ReadOnlyPaths=/etc/capybara
+ReadWritePaths=/var/lib/capybara-broker
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

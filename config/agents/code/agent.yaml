@@ -1,0 +1,69 @@
+# Coding agent. Reads issues (untrusted), works in private repos and writes to them, so it holds all three trifecta
+# legs. Writes go through the broker: the grant confines commits and branches to agent/* on allowlisted repos (the
+# spec's "push only to agent/* branches"), and opening a pull request needs human approval (FR-SAF-02).
+id: code
+name: Code
+job: Fix bugs and implement small changes in the user's repositories on agent/* branches.
+description: Only write to branches named agent/*. Never write to main. Open a pull request for review when done.
+model: auto
+tools:
+  - list_agents
+  - ask_agent
+  - send_message
+  - memory_list
+  - memory_read
+  - memory_search
+  - remember
+  - propose_change
+  # Copilot CLI built-ins, run inside the srt sandbox with the egress allowlist below.
+  - bash
+  - view
+  - create
+  - edit
+  - grep
+  - glob
+  # Broker tools, named {connection}_{operation}.
+  - github_list_issues
+  - github_list_prs
+  - github_read_file
+  - github_create_branch
+  - github_commit_file
+  - github_create_pr
+externalActionTools: [github_create_pr]
+approvalRequiredTools: [github_create_pr]
+trifecta:
+  untrustedInput: true
+  privateData: true
+  externalAction: true
+peers:
+  consult: [research]
+  message: [ea]
+  task: [research]
+accepts:
+  consults: true
+  messages: true
+  tasks: true
+# One grant per constraint set. There is no push, force-push, merge or release operation at all, and the broker
+# refuses commits under .github/workflows/ and .github/actions/ (they run with repository secrets on push).
+#
+# REPO ALLOWLIST: list exact repositories, never an owner-wide glob. Branch creation and commits to agent/* are NOT
+# approval-gated, so every repo listed here is one the agent may write to without asking. List only private repos
+# where unreviewed agent pushes are acceptable; a public repo would turn a branch write into publication of
+# whatever the agent has read. Replace the placeholder below with your own repos.
+grants:
+  - connection: github
+    operations: [list_issues, list_prs, read_file]
+    constraints:
+      repo: [brendankowitz/capybara-sandbox]
+  - connection: github
+    operations: [create_branch, commit_file, create_pr]
+    constraints:
+      repo: [brendankowitz/capybara-sandbox]
+      branch: ["agent/*"]
+egress: [github.com, api.github.com]
+budget:
+  dailyCredits: 80
+  monthlyCredits: 2000
+  sessionMaxCredits: 15
+memory:
+  readUser: false

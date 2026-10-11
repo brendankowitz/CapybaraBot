@@ -1,0 +1,141 @@
+@page "/settings"
+@inherits CapybaraPage
+@inject TokenStore Tokens
+@inject IJSRuntime Js
+
+<h1>Settings</h1>
+<ErrorBanner Message="@Error" />
+@if (!string.IsNullOrEmpty(_message)) { <p role="status">@_message</p> }
+
+<section>
+    <h2>Device</h2>
+    <label>Device token<input type="password" autocomplete="off" @bind="_token" /></label>
+    <button type="button" @onclick="SaveTokenAsync">Save token</button>
+</section>
+
+<section>
+    <h2>Notifications</h2>
+    <p class="muted">Notifications are suppressed while this app has focus. Approvals and critical alerts can bypass quiet hours.</p>
+    @if (_settings is null)
+    {
+        <p>Loading…</p>
+    }
+    else
+    {
+        <ul class="toggles">
+        @foreach (var toggle in _toggles)
+        {
+            <li><label><input type="checkbox" checked="@toggle.Enabled" @onchange="e => toggle.Enabled = e.Value is true" /> @toggle.Agent</label></li>
+        }
+        </ul>
+        <label><input type="checkbox" @bind="_quietEnabled" /> Quiet hours</label>
+        <label>From <input type="time" value="@_quietStart" @onchange="e => _quietStart = e.Value?.ToString() ?? _quietStart" /></label>
+        <label>Until <input type="time" value="@_quietEnd" @onchange="e => _quietEnd = e.Value?.ToString() ?? _quietEnd" /></label>
+        <button type="button" @onclick="SaveSettingsAsync">Save notification settings</button>
+    }
+</section>
+
+<section>
+    <h2>Web push</h2>
+    @if (!_pushSupported)
+    {
+        <p class="warning">Web push is not available here. On iOS it needs iOS 16.4+ and the app installed to the Home Screen; otherwise use the ntfy fallback.</p>
+    }
+    else if (_pushEndpoint is null)
+    {
+        <button type="button" @onclick="SubscribeAsync">Enable web push</button>
+    }
+    else
+    {
+        <p>This device is subscribed.</p>
+        <button type="button" @onclick="UnsubscribeAsync">Disable web push</button>
+    }
+</section>
+
+@code {
+    private sealed class Toggle(string agent, bool enabled)
+    {
+        public string Agent { get; } = agent;
+
+        public bool Enabled { get; set; } = enabled;
+    }
+
+    private string _token = string.Empty;
+    private string _message = string.Empty;
+    private NotificationSettingsDto? _settings;
+    private List<Toggle> _toggles = [];
+    private bool _quietEnabled;
+    private string _quietStart = "22:00";
+    private string _quietEnd = "07:00";
+    private bool _pushSupported;
+    private string? _pushEndpoint;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _token = await Tokens.GetTokenAsync() ?? string.Empty;
+        _pushSupported = await Js.InvokeAsync<bool>("capybaraPush.isSupported");
+        if (_pushSupported)
+        {
+            _pushEndpoint = await Js.InvokeAsync<string?>("capybaraPush.current");
+        }
+
+        _settings = await TryAsync(() => Api.GetNotificationSettingsAsync());
+        if (_settings is not null)
+        {
+            _toggles = [.. _settings.Agents.Select(a => new Toggle(a.Agent, a.Enabled))];
+            _quietEnabled = _settings.QuietHours.Enabled;
+            _quietStart = _settings.QuietHours.Start;
+            _quietEnd = _settings.QuietHours.End;
+        }
+    }
+
+    private async Task SaveTokenAsync()
+    {
+        await Tokens.SetTokenAsync(_token);
+        _message = "Token saved locally.";
+    }
+
+    private async Task SaveSettingsAsync()
+    {
+        ClearError();
+        var settings = new NotificationSettingsDto([.. _toggles.Select(t => new AgentNotificationToggleDto(t.Agent, t.Enabled))], new QuietHoursDto(_quietEnabled, _quietStart, _quietEnd));
+        _message = await TryAsync(() => Api.SaveNotificationSettingsAsync(settings)) ? "Notification settings saved." : string.Empty;
+    }
+
+    // FR-CLI-06: subscribe with the server's VAPID key, then register the subscription with the gateway.
+    private async Task SubscribeAsync()
+    {
+        ClearError();
+        _message = string.Empty;
+        await TryAsync(async () =>
+        {
+            var key = await Api.GetVapidKeyAsync();
+            var subscription = await Js.InvokeAsync<PushSubscriptionDto?>("capybaraPush.subscribe", key.PublicKey);
+            if (subscription is null)
+            {
+                _message = "Notifications were not allowed on this device.";
+                return;
+            }
+
+            await Api.AddPushSubscriptionAsync(subscription);
+            _pushEndpoint = subscription.Endpoint;
+            _message = "Web push enabled.";
+        });
+    }
+
+    private async Task UnsubscribeAsync()
+    {
+        ClearError();
+        await TryAsync(async () =>
+        {
+            var endpoint = await Js.InvokeAsync<string?>("capybaraPush.unsubscribe");
+            if (endpoint is not null)
+            {
+                await Api.RemovePushSubscriptionAsync(endpoint);
+            }
+
+            _pushEndpoint = null;
+            _message = "Web push disabled.";
+        });
+    }
+}

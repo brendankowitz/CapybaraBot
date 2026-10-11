@@ -1,0 +1,27 @@
+{
+  "network": {
+    "allowedDomains": [
+      "github.com",
+      "api.github.com"
+    ],
+    "deniedDomains": []
+  },
+  "filesystem": {
+    "denyRead": [
+      "/var/lib/capybara",
+      "/etc/capybara",
+      "/run/credentials"
+    ],
+    "allowRead": [
+      "/var/lib/capybara/agents/code/workspace",
+      "/var/lib/capybara/agents/code/copilot"
+    ],
+    "allowWrite": [
+      "/var/lib/capybara/agents/code/workspace",
+      "/var/lib/capybara/agents/code/copilot"
+    ],
+    "denyWrite": [
+      "/var/lib/capybara/srt/code.srt.json"
+    ]
+  }
+}

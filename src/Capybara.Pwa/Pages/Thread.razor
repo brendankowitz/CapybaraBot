@@ -1,0 +1,42 @@
+@page "/thread"
+@inherits CapybaraPage
+@inject CapybaraRealtimeService Realtime
+@implements IDisposable
+
+<h1>Fleet thread</h1>
+<ErrorBanner Message="@Error" />
+@if (_entries is null)
+{
+    <p>Loading…</p>
+}
+else
+{
+    @foreach (var entry in _entries)
+    {
+        <article class="card @(entry.Rejected ? "rejected" : string.Empty)">
+            <b>@entry.From → @entry.To</b> <span class="muted">@entry.Operation · @entry.At.ToLocalTime().ToString("g") · @entry.Taint</span>
+            <pre>@entry.Summary</pre>
+        </article>
+    }
+}
+
+@code {
+    private List<ThreadEntryDto>? _entries;
+
+    protected override async Task OnInitializedAsync()
+    {
+        Realtime.ThreadEntry += OnThreadEntry;
+        var existing = await TryAsync(() => Api.GetThreadAsync());
+        _entries = existing is null ? null : [.. existing];
+        await Realtime.TryStartAsync();
+    }
+
+    private void OnThreadEntry(ThreadEntryDto entry) => _ = InvokeAsync(() =>
+    {
+        _entries ??= [];
+        _entries.Add(entry);
+        StateHasChanged();
+    });
+
+    public void Dispose() => Realtime.ThreadEntry -= OnThreadEntry;
+}

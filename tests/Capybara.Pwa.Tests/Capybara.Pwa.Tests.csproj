@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="bunit" />
+    <ProjectReference Include="..\..\src\Capybara.Pwa\Capybara.Pwa.csproj" />
+    <ProjectReference Include="..\..\src\Capybara.Contracts\Capybara.Contracts.csproj" />
+  </ItemGroup>
+</Project>

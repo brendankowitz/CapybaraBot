@@ -1,0 +1,39 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Capybara.AppHost/Capybara.AppHost.csproj" />
+    <Project Path="src/Capybara.Broker/Capybara.Broker.csproj" />
+    <Project Path="src/Capybara.Channels/Capybara.Channels.csproj" />
+    <Project Path="src/Capybara.Channels.Ntfy/Capybara.Channels.Ntfy.csproj" />
+    <Project Path="src/Capybara.Channels.Telegram/Capybara.Channels.Telegram.csproj" />
+    <Project Path="src/Capybara.Client/Capybara.Client.csproj" />
+    <Project Path="src/Capybara.Connections/Capybara.Connections.csproj" />
+    <Project Path="src/Capybara.Contracts/Capybara.Contracts.csproj" />
+    <Project Path="src/Capybara.Gateway/Capybara.Gateway.csproj" />
+    <Project Path="src/Capybara.Hosting/Capybara.Hosting.csproj" />
+    <Project Path="src/Capybara.Memory/Capybara.Memory.csproj" />
+    <Project Path="src/Capybara.Observability/Capybara.Observability.csproj" />
+    <Project Path="src/Capybara.Orchestration/Capybara.Orchestration.csproj" />
+    <Project Path="src/Capybara.Policy/Capybara.Policy.csproj" />
+    <Project Path="src/Capybara.Pwa/Capybara.Pwa.csproj" />
+    <Project Path="src/Capybara.Runtime.Copilot/Capybara.Runtime.Copilot.csproj" />
+    <Project Path="src/Capybara.Scheduling/Capybara.Scheduling.csproj" />
+    <Project Path="src/Capybara.Tui/Capybara.Tui.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Capybara.Broker.Tests/Capybara.Broker.Tests.csproj" />
+    <Project Path="tests/Capybara.Channels.Tests/Capybara.Channels.Tests.csproj" />
+    <Project Path="tests/Capybara.Client.Tests/Capybara.Client.Tests.csproj" />
+    <Project Path="tests/Capybara.Connections.Tests/Capybara.Connections.Tests.csproj" />
+    <Project Path="tests/Capybara.Contracts.Tests/Capybara.Contracts.Tests.csproj" />
+    <Project Path="tests/Capybara.Gateway.Tests/Capybara.Gateway.Tests.csproj" />
+    <Project Path="tests/Capybara.Hosting.Tests/Capybara.Hosting.Tests.csproj" />
+    <Project Path="tests/Capybara.Memory.Tests/Capybara.Memory.Tests.csproj" />
+    <Project Path="tests/Capybara.Observability.Tests/Capybara.Observability.Tests.csproj" />
+    <Project Path="tests/Capybara.Orchestration.Tests/Capybara.Orchestration.Tests.csproj" />
+    <Project Path="tests/Capybara.Policy.Tests/Capybara.Policy.Tests.csproj" />
+    <Project Path="tests/Capybara.Pwa.Tests/Capybara.Pwa.Tests.csproj" />
+    <Project Path="tests/Capybara.Runtime.Copilot.Tests/Capybara.Runtime.Copilot.Tests.csproj" />
+    <Project Path="tests/Capybara.Scheduling.Tests/Capybara.Scheduling.Tests.csproj" />
+    <Project Path="tests/Capybara.Tui.Tests/Capybara.Tui.Tests.csproj" />
+  </Folder>
+</Solution>

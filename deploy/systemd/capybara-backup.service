@@ -1,0 +1,34 @@
+# Nightly backup job for FR-HST-05. Trigger with capybara-backup.timer. `capybarad backup` runs BackupCommand and exits before any
+# host is built. When you use this timer, set Capybara__Backup__InProcess=false for capybarad.service (a drop-in) so the gateway's
+# in-process nightly job does not run as well.
+# Archives go to Capybara:Hosting:BlobRoot, which must be /var/backups/capybara/... (see deploy/capybarad.backup.sample.json): the unit
+# is ProtectSystem=strict and may only write /var/lib/capybara and /var/backups/capybara. Create the directory first:
+#   install -d -o capybara -g capybara -m 0700 /var/backups/capybara
+[Unit]
+Description=Capybara fleet backup
+
+[Service]
+Type=oneshot
+User=capybara
+Group=capybara
+ExecStart=/opt/capybara/capybarad backup
+WorkingDirectory=/opt/capybara
+Environment=DOTNET_ENVIRONMENT=Production
+Environment=Capybara__ConfigRoot=/etc/capybara
+Environment=Capybara__StateRoot=/var/lib/capybara
+LoadCredentialEncrypted=github-token:/etc/capybara/credentials/github-token.cred
+StateDirectory=capybara
+ReadOnlyPaths=/etc/capybara
+ReadWritePaths=/var/lib/capybara /var/backups/capybara
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077

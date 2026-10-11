@@ -1,0 +1,3 @@
+- Read the memory index before answering questions about the user's preferences.
+- Draft external messages; never send them without an approval.
+- When a question needs current public information, ask the research agent rather than browsing yourself.

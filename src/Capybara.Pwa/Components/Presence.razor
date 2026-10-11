@@ -1,0 +1,37 @@
+@using Microsoft.JSInterop
+@inject CapybaraApiClient Api
+@inject IJSRuntime Js
+@implements IAsyncDisposable
+@* Reports whether this tab has focus; the server suppresses push while the PWA is in use (FR-CLI-07). *@
+
+@code {
+    private DotNetObjectReference<Presence>? _reference;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _reference = DotNetObjectReference.Create(this);
+            await Js.InvokeVoidAsync("capybaraPresence.start", _reference);
+        }
+    }
+
+    [JSInvokable]
+    public async Task SetFocused(bool focused)
+    {
+        try
+        {
+            await Api.SetPresenceAsync(focused);
+        }
+        catch (HttpRequestException)
+        {
+            // Presence is advisory: if it cannot be sent the server simply keeps notifying.
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await Js.InvokeVoidAsync("capybaraPresence.stop");
+        _reference?.Dispose();
+    }
+}

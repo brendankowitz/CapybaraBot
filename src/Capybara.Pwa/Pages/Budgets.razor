@@ -1,0 +1,56 @@
+@page "/budgets"
+@inherits CapybaraPage
+
+<h1>Budgets</h1>
+<ErrorBanner Message="@Error" />
+@if (_budgets is null)
+{
+    <p>Loading…</p>
+}
+else
+{
+    <h2>Fleet</h2>
+    <table class="budget">
+        <thead><tr><th>Window</th><th>Spent</th><th>Limit</th></tr></thead>
+        <tbody>
+            <tr><th scope="row">Today</th><td>@Credits(_budgets.Daily.Spent)</td><td>@Credits(_budgets.Daily.Limit)</td></tr>
+            <tr><th scope="row">Month</th><td>@Credits(_budgets.Monthly.Spent)</td><td>@Credits(_budgets.Monthly.Limit)</td></tr>
+        </tbody>
+    </table>
+
+    <h2>Per agent</h2>
+    <table class="budget">
+        <thead><tr><th>Agent</th><th>Today</th><th>Daily limit</th><th>Month</th><th>Monthly limit</th><th></th></tr></thead>
+        <tbody>
+        @foreach (var a in _budgets.Agents)
+        {
+            <tr><th scope="row">@a.Agent</th><td>@Credits(a.SpentToday)</td><td>@Credits(a.DailyLimit)</td><td>@Credits(a.SpentThisMonth)</td><td>@Credits(a.MonthlyLimit)</td><td>@(a.Exhausted ? "exhausted" : string.Empty)</td></tr>
+        }
+        </tbody>
+    </table>
+
+    <h2>By model</h2>
+    <BudgetLines Heading="Model" Lines="_budgets.ByModel" />
+
+    <h2>By routine</h2>
+    <BudgetLines Heading="Routine" Lines="_budgets.ByRoutine" />
+
+    <h2>Account quota</h2>
+    @if (_budgets.Quota is { } quota)
+    {
+        <p>@Credits(quota.Used) of @Credits(quota.Limit) credits used@(quota.ResetsAt is { } resets ? $", renews {resets.ToLocalTime():d}" : string.Empty).</p>
+        <progress max="@quota.Limit" value="@quota.Used"></progress>
+    }
+    else
+    {
+        <p class="warning">Quota unknown.</p>
+    }
+}
+
+@code {
+    private BudgetsDto? _budgets;
+
+    protected override async Task OnInitializedAsync() => _budgets = await TryAsync(() => Api.GetBudgetsAsync());
+
+    private static string Credits(decimal value) => value.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+}

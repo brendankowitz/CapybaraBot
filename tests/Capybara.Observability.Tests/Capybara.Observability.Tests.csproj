@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Capybara.Observability\Capybara.Observability.csproj" />
+  </ItemGroup>
+</Project>

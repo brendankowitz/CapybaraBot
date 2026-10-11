@@ -1,0 +1,62 @@
+# Phase 2 per-agent unit template (FR-HST-02, FR-HST-01 SystemdHost). Not installed by default: Phase 1 runs every agent inside capybarad.
+# It runs capybarad itself in per-agent mode: `capybarad agent <agent-id>` starts only that agent's runtime and supervisor (no other
+# agents, channels, scheduler, inbox pump or approval resumption) and reports readiness via sd_notify (Type=notify).
+# The gateway<->agent RPC is not implemented yet, so this process receives no turns and capybarad still runs the same agent itself.
+# Do not enable this unit until that RPC exists (Phase 2): running both would start two CLIs on one COPILOT_HOME.
+# MemoryDenyWriteExecute intentionally omitted for JIT compatibility.
+[Unit]
+Description=Capybara agent %i
+After=network-online.target capybara-broker.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+DynamicUser=yes
+ExecStart=/opt/capybara/capybarad agent %i
+WorkingDirectory=/var/lib/capybara/agents/%i
+Environment=DOTNET_ENVIRONMENT=Production
+Environment=Capybara__ConfigRoot=/etc/capybara
+Environment=Capybara__StateRoot=/var/lib/capybara
+ReadOnlyPaths=/etc/capybara
+Restart=on-failure
+RestartSec=5s
+StateDirectory=capybara/agents/%i
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/capybara/agents/%i
+LoadCredentialEncrypted=github-token:/etc/capybara/credentials/github-token.cred
+MemoryMax=1G
+CPUQuota=100%
+IPAddressDeny=any
+IPAddressAllow=localhost
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+UMask=0077
+
+# This unit also launches the agent's Copilot CLI under srt (bubblewrap), so it needs the same relaxations as capybarad.service:
+# user/mount/pid/net/ipc/uts namespaces, the @mount syscalls plus the few privileged calls bwrap makes, and an unmasked /proc
+# (ProtectProc/ProcSubset/ProtectKernelTunables would make bwrap's /proc mount fail), plus AF_NETLINK (bwrap's loopback setup in the new
+# net namespace). Only capset and pivot_root are re-allowed from @privileged; add more only if the host test fails. Verify on a real host.
+RestrictNamespaces=user mnt pid net ipc uts
+SystemCallFilter=@system-service @mount
+SystemCallFilter=~@privileged @resources
+SystemCallFilter=capset pivot_root
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,134 @@
+@page "/routines"
+@inherits CapybaraPage
+
+<h1>Routines</h1>
+<ErrorBanner Message="@Error" />
+@if (_items is null)
+{
+    <p>Loading…</p>
+}
+else if (_items.Count == 0)
+{
+    <p>No routines configured.</p>
+}
+else
+{
+    @foreach (var r in _items)
+    {
+        <article class="card routine" @key="r.Id">
+            <h2>@r.Id</h2>
+            <p>@r.Owner · @r.Kind · @State(r)</p>
+            <p>Projected monthly cost: <b class="projection">@Credits(r.ProjectedMonthlyCredits) credits</b></p>
+
+            @if (r.LastRuns.Count == 0)
+            {
+                <p class="muted">No runs yet.</p>
+            }
+            else
+            {
+                <table class="runs">
+                    <thead><tr><th>When</th><th>Status</th><th>Model</th><th>Credits</th></tr></thead>
+                    <tbody>
+                    @foreach (var run in r.LastRuns.Take(20))
+                    {
+                        <tr><td>@run.At.ToLocalTime().ToString("g")</td><td>@run.Status</td><td>@(run.Model ?? "-")</td><td>@Credits(run.Credits)</td></tr>
+                    }
+                    </tbody>
+                </table>
+            }
+
+            @if (r.Enabled)
+            {
+                <button type="button" @onclick="() => DisableAsync(r)">Disable</button>
+            }
+            else
+            {
+                <button type="button" @onclick="() => BeginEnable(r)">Enable…</button>
+            }
+            <button type="button" @onclick="() => DryRunAsync(r)">Dry run</button>
+            @if (r.AutoPaused)
+            {
+                <button type="button" @onclick="() => ConfirmResumeAsync(r)">Confirm resume</button>
+            }
+
+            @if (_enabling == r.Id)
+            {
+                <section class="ack">
+                    <p>Every run is a billed model loop. This routine projects <b>@Credits(r.ProjectedMonthlyCredits) credits per month</b>.</p>
+                    <label><input type="checkbox" checked="@_acknowledged" @onchange="e => _acknowledged = e.Value is true" /> I acknowledge this monthly cost</label>
+                    <button type="button" disabled="@(!_acknowledged)" @onclick="() => EnableAsync(r)">Enable routine</button>
+                    <button type="button" @onclick="() => _enabling = null">Cancel</button>
+                </section>
+            }
+
+            @if (_dryRuns.TryGetValue(r.Id, out var dry))
+            {
+                <section class="dry-run">
+                    <h3>Dry run: @dry.Status (@Credits(dry.Credits) credits)</h3>
+                    <p>Auto-denied approvals: @(dry.DeniedApprovals.Count == 0 ? "none" : string.Join(", ", dry.DeniedApprovals))</p>
+                    @if (!string.IsNullOrEmpty(dry.Output)) { <pre>@dry.Output</pre> }
+                </section>
+            }
+        </article>
+    }
+}
+
+@code {
+    private IReadOnlyList<RoutineDto>? _items;
+    private readonly Dictionary<string, DryRunResultDto> _dryRuns = new(StringComparer.Ordinal);
+    private string? _enabling;
+    private bool _acknowledged;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync() => _items = await TryAsync(() => Api.GetRoutinesAsync()) ?? _items;
+
+    private static string Credits(decimal value) => value.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static string State(RoutineDto r) => r.AutoPaused ? "auto-paused" : r.Paused ? "paused" : r.Enabled ? "enabled" : "disabled";
+
+    private void BeginEnable(RoutineDto routine)
+    {
+        _enabling = routine.Id;
+        _acknowledged = false;
+    }
+
+    // FR-RTN-09: the acknowledged figure is the projection the user just saw; the server answers 409 if it has moved.
+    private async Task EnableAsync(RoutineDto routine)
+    {
+        ClearError();
+        if (await TryAsync(() => Api.EnableRoutineAsync(routine.Id, routine.ProjectedMonthlyCredits)))
+        {
+            _enabling = null;
+        }
+        else
+        {
+            _acknowledged = false;
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task DisableAsync(RoutineDto routine)
+    {
+        ClearError();
+        await TryAsync(() => Api.DisableRoutineAsync(routine.Id));
+        await LoadAsync();
+    }
+
+    private async Task ConfirmResumeAsync(RoutineDto routine)
+    {
+        ClearError();
+        await TryAsync(() => Api.ConfirmRoutineResumeAsync(routine.Id));
+        await LoadAsync();
+    }
+
+    private async Task DryRunAsync(RoutineDto routine)
+    {
+        ClearError();
+        if (await TryAsync(() => Api.DryRunRoutineAsync(routine.Id)) is { } result)
+        {
+            _dryRuns[routine.Id] = result;
+        }
+    }
+}

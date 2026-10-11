@@ -1,0 +1,17 @@
+# Pin image tags here and replace with immutable digests before production rollout (FR-HST-04).
+[Unit]
+Description=Capybara agent sandbox %i
+
+[Container]
+ContainerName=capybara-agent-%i
+Image=ghcr.io/example/capybara-sandbox:0.1.0
+ReadOnly=true
+NoNewPrivileges=true
+UserNS=keep-id
+PodmanArgs=--security-opt=no-new-privileges --security-opt=seccomp=/usr/share/containers/seccomp.json --cap-drop=all --network=none
+Volume=/var/lib/capybara/agents/%i:/home/capybara/.copilot:Z
+WorkingDir=/workspace
+
+[Service]
+Restart=on-failure
+RestartSec=5s

@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Agent registry, config loading, envelopes, inboxes and agent-to-agent tools.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Capybara.Contracts\Capybara.Contracts.csproj" />
+    <ProjectReference Include="..\Capybara.Policy\Capybara.Policy.csproj" />
+    <ProjectReference Include="..\Capybara.Scheduling\Capybara.Scheduling.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="YamlDotNet" />
+  </ItemGroup>
+</Project>

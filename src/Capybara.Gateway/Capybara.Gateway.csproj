@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <Description>capybarad: loopback-only gateway (minimal API) published to the tailnet via Tailscale Serve.</Description>
+    <AssemblyName>capybarad</AssemblyName>
+    <RootNamespace>Capybara.Gateway</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.Server" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" />
+    <ProjectReference Include="..\Capybara.Contracts\Capybara.Contracts.csproj" />
+    <ProjectReference Include="..\Capybara.Policy\Capybara.Policy.csproj" />
+    <ProjectReference Include="..\Capybara.Orchestration\Capybara.Orchestration.csproj" />
+    <ProjectReference Include="..\Capybara.Memory\Capybara.Memory.csproj" />
+    <ProjectReference Include="..\Capybara.Observability\Capybara.Observability.csproj" />
+    <ProjectReference Include="..\Capybara.Scheduling\Capybara.Scheduling.csproj" />
+    <ProjectReference Include="..\Capybara.Channels\Capybara.Channels.csproj" />
+    <ProjectReference Include="..\Capybara.Channels.Ntfy\Capybara.Channels.Ntfy.csproj" />
+    <ProjectReference Include="..\Capybara.Channels.Telegram\Capybara.Channels.Telegram.csproj" />
+    <ProjectReference Include="..\Capybara.Connections\Capybara.Connections.csproj" />
+    <ProjectReference Include="..\Capybara.Hosting\Capybara.Hosting.csproj" />
+    <ProjectReference Include="..\Capybara.Runtime.Copilot\Capybara.Runtime.Copilot.csproj" />
+    <ProjectReference Include="..\Capybara.Pwa\Capybara.Pwa.csproj" />
+  </ItemGroup>
+</Project>

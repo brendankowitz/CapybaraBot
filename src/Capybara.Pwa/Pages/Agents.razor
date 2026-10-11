@@ -1,0 +1,136 @@
+@page "/"
+@inherits CapybaraPage
+@inject CapybaraRealtimeService Realtime
+@inject IJSRuntime Js
+@implements IDisposable
+
+<h1>Agents</h1>
+<ErrorBanner Message="@Error" />
+@if (_agents is null)
+{
+    <p>Loading…</p>
+}
+else
+{
+    <section class="cards">
+    @foreach (var agent in _agents.Where(a => !a.Hidden || _showHidden))
+    {
+        var status = _activity.TryGetValue(agent.Id, out var item) ? item : (agent.State, agent.Unread);
+        <article class="card" @key="agent.Id">
+            <h2><a href="@($"agents/{agent.Id}")">@agent.Name</a></h2>
+            <p>@agent.Job</p>
+            <p>Model: @agent.Model</p>
+            <StatusBadge State="@status.Item1" Unread="@status.Item2" />
+            @if (agent.Hidden) { <p class="muted">Hidden</p> }
+            @if (agent.BudgetExhausted) { <p class="warning">Budget exhausted</p> }
+            @if (agent.Paused)
+            {
+                <p class="warning">Paused</p>
+                <button type="button" @onclick="() => PauseAsync(agent, pause: false)">Resume</button>
+            }
+            else
+            {
+                <button type="button" @onclick="() => PauseAsync(agent, pause: true)">Pause</button>
+            }
+            @if (_desktop)
+            {
+                <details>
+                    <summary>Manage (desktop)</summary>
+                    <button type="button" @onclick="() => LifecycleAsync(() => Api.SetAgentHiddenAsync(agent.Id, !agent.Hidden))">@(agent.Hidden ? "Unhide" : "Hide")</button>
+                    <button type="button" @onclick="() => LifecycleAsync(() => Api.ArchiveAgentAsync(agent.Id))">Archive</button>
+                    <button type="button" disabled="@string.IsNullOrWhiteSpace(_duplicateId)" @onclick="() => LifecycleAsync(() => Api.DuplicateAgentAsync(agent.Id, new DuplicateAgentDto(_duplicateId, _duplicateName)))">Duplicate as "@_duplicateId"</button>
+                    <input @bind="_duplicateId" placeholder="duplicate id" />
+                    <input @bind="_duplicateName" placeholder="duplicate name" />
+                    <label>Type the id to delete<input @bind="_deleteConfirm" @bind:event="oninput" placeholder="@agent.Id" /></label>
+                    <button type="button" class="danger" disabled="@(_deleteConfirm != agent.Id)" @onclick="() => DeleteAsync(agent)">Delete (revokes grants, removes workspace)</button>
+                </details>
+            }
+        </article>
+    }
+    </section>
+    <label><input type="checkbox" @bind="_showHidden" /> Show hidden agents</label>
+
+    @if (_desktop)
+    {
+        <section class="card">
+            <h2>New agent</h2>
+            <label>Template
+                <select @bind="_template">
+                    @foreach (var t in _templates) { <option value="@t">@t</option> }
+                </select>
+            </label>
+            <input @bind="_newId" placeholder="id (lowercase)" />
+            <input @bind="_newName" placeholder="Display name" />
+            <button type="button" disabled="@(string.IsNullOrWhiteSpace(_newId) || _templates.Count == 0)" @onclick="() => LifecycleAsync(() => Api.CreateAgentAsync(new CreateAgentDto(_template, _newId, _newName)))">Create from template</button>
+        </section>
+    }
+}
+@if (_lifecycleErrors.Count > 0)
+{
+    <ul class="error">@foreach (var e in _lifecycleErrors) { <li>@e</li> }</ul>
+}
+
+@code {
+    private IReadOnlyList<AgentStatusDto>? _agents;
+    private IReadOnlyList<string> _templates = [];
+    private readonly Dictionary<string, (string, int)> _activity = new(StringComparer.Ordinal);
+    private IReadOnlyList<string> _lifecycleErrors = [];
+    private bool _desktop;
+    private bool _showHidden = false;
+    private string _template = string.Empty;
+    private string _newId = string.Empty;
+    private string _newName = string.Empty;
+    private string _duplicateId = string.Empty;
+    private string _duplicateName = string.Empty;
+    private string _deleteConfirm = string.Empty;
+
+    protected override async Task OnInitializedAsync()
+    {
+        Realtime.AgentStatusChanged += OnAgentStatusChanged;
+        _desktop = await Js.InvokeAsync<bool>("capybaraDevice.isDesktop");
+        _agents = await TryAsync(() => Api.GetAgentsAsync());
+        if (_desktop)
+        {
+            _templates = await TryAsync(() => Api.GetAgentTemplatesAsync()) ?? [];
+            _template = _templates.FirstOrDefault() ?? string.Empty;
+        }
+
+        await Realtime.TryStartAsync();
+    }
+
+    private async Task PauseAsync(AgentStatusDto agent, bool pause)
+    {
+        ClearError();
+        if (await TryAsync(() => pause ? Api.PauseAgentAsync(agent.Id) : Api.ResumeAgentAsync(agent.Id)))
+        {
+            _agents = await TryAsync(() => Api.GetAgentsAsync()) ?? _agents;
+        }
+    }
+
+    private async Task LifecycleAsync(Func<Task<LifecycleResultDto>> operation)
+    {
+        ClearError();
+        _lifecycleErrors = [];
+        var result = await TryAsync(operation);
+        if (result is { Applied: false })
+        {
+            _lifecycleErrors = result.Errors;
+        }
+
+        _agents = await TryAsync(() => Api.GetAgentsAsync()) ?? _agents;
+    }
+
+    private async Task DeleteAsync(AgentStatusDto agent)
+    {
+        await LifecycleAsync(() => Api.DeleteAgentAsync(agent.Id));
+        _deleteConfirm = string.Empty;
+    }
+
+    private void OnAgentStatusChanged(string id, string state, int unread)
+    {
+        _activity[id] = (state, unread);
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose() => Realtime.AgentStatusChanged -= OnAgentStatusChanged;
+}

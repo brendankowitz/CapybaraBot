@@ -199,9 +199,9 @@ Removing `web_fetch` from the EA is not a stylistic choice: a GET with query par
 |---|---|
 | **Agent** | A persistent logical identity with a stable id (`ea`), a persona (name, job, description/standing rules, avatar), model tier, tool allowlist, connection grants, memory scopes, budget and trifecta profile. It is backed by **one `CopilotClient` with its own `BaseDirectory`**. |
 | **Persona files** | `SOUL.md` (identity and tone) and `AGENTS.md` (operating rules), owned and versioned by the user. **Agents cannot write them.** |
-| **Main session** | The agent's long-lived Copilot session (`agent:{id}:main`), resumed across restarts, with infinite-session compaction. Heartbeats and user DMs run here. |
-| **Consult session** | An **ephemeral** session on the *target* agent's client (`agent:{id}:consult:{uuid}`), created for one `ask_agent` call. It has read-only access to the target's memory and returns at most about 2k tokens plus artifact references. |
-| **Task session** | An isolated session for a delegated task or cron run (`agent:{id}:task:{taskId}`). It is retained for audit and then deleted. |
+| **Main session** | The agent's long-lived Copilot session (`agent_{id}_main`), resumed across restarts, with infinite-session compaction. Heartbeats and user DMs run here. |
+| **Consult session** | An **ephemeral** session on the *target* agent's client (`agent_{id}_consult_{uuid}`), created for one `ask_agent` call. It has read-only access to the target's memory and returns at most about 2k tokens plus artifact references. |
+| **Task session** | An isolated session for a delegated task or cron run (`agent_{id}_task_{taskId}`). It is retained for audit and then deleted. |
 | **Inbox** | A per-agent durable FIFO of user messages, agent messages, task results and events. It is the single serialization point for each agent. |
 | **Task** | A durable unit of delegated work using A2A-shaped states: `SUBMITTED`, `WORKING`, `INPUT_REQUIRED`, `COMPLETED`, `FAILED`, `CANCELED`, `REJECTED` ([A2A spec](https://a2a-protocol.org/latest/specification/)). |
 | **Envelope** | Metadata on every agent-to-agent call: trace, depth, hop path, budget, deadline, origin principal, taint. |
@@ -347,7 +347,7 @@ The host owns memory. Copilot runtime Memory and the session store stay **off**,
 | ID | Requirement | Pri | Basis |
 |---|---|---|---|
 | FR-OBS-01 | OpenTelemetry through the SDK's `TelemetryConfig`. One trace per run, rooted at its trigger, with spans for LLM calls, tools, gate decisions, approvals and A2A hops. W3C context is carried in the envelope so a task spanning several agents is one trace. | Must | R — SDK OTel and traceparent propagation ([dotnet README](https://raw.githubusercontent.com/github/copilot-sdk/main/dotnet/README.md)) |
-| FR-OBS-02 | A **cost ledger** built from `assistant.usage`, attributed per agent, routine, task and model, with daily and monthly budgets. Each session gets `SessionLimits.MaxAiCredits`. **Host-side hard stops** are added because the SDK cap is soft. The ledger polls `account.getQuota` and alerts at 50%, 80% and 100%. | Must | R — [session-limits.md](https://raw.githubusercontent.com/github/copilot-sdk/main/docs/features/session-limits.md); [usage-and-billing.md](https://raw.githubusercontent.com/github/copilot-sdk/main/docs/features/usage-and-billing.md); Grok credit drain ([forum](https://forum.cursor.com/t/grok-bot-draining-cursor-credit-pool/169982)) |
+| FR-OBS-02 | A **cost ledger** built from `assistant.usage`, attributed per agent, routine, task and model, with daily and monthly budgets. Each short-lived session (task, consult, incognito, reviewer) gets `SessionLimits.MaxAiCredits`; the long-lived main session gets an explicitly empty limit (which also clears one stored at its creation by an earlier build), because the SDK's window is cumulative over a live session and would eventually disable it. **Host-side hard stops** (a per-turn credit limit that aborts the run, and the ledger) are added because the SDK cap is soft. The ledger polls `account.getQuota` and alerts at 50%, 80% and 100%. | Must | R — [session-limits.md](https://raw.githubusercontent.com/github/copilot-sdk/main/docs/features/session-limits.md); [usage-and-billing.md](https://raw.githubusercontent.com/github/copilot-sdk/main/docs/features/usage-and-billing.md); Grok credit drain ([forum](https://forum.cursor.com/t/grok-bot-draining-cursor-credit-pool/169982)) |
 | FR-OBS-03 | Model attribution is visible for every run and every credit spent. | Must | R — Grok's opaque routing |
 | FR-OBS-04 | Locally: the standalone Aspire dashboard for live traces, which is not durable, and Grafana LGTM for retention. Prompt and response content capture is **off by default**. No third-party telemetry SaaS. | Should | R — [Aspire standalone](https://aspire.dev/dashboard/standalone/); [Learn](https://learn.microsoft.com/dotnet/core/diagnostics/observability-otlp-example) |
 | FR-OBS-05 | Alerts for: budget thresholds, spikes in egress denials, approval expiries, routine misfires, token expiry, runtime crash loops, and compaction storms. | Should | R — egress-denial spikes signal exfiltration ([ACA egress](https://learn.microsoft.com/azure/container-apps/sandboxes-egress-policies)) |
@@ -386,12 +386,12 @@ The host owns memory. Copilot runtime Memory and the session store stay **off**,
 
 **Process topology (MVP).** Four systemd units, plus one sandbox per agent:
 
-- **`fleetd`** contains the gateway, orchestrator, scheduler, policy engine, memory service and channel adapters. It hosts one `CopilotClient` per agent, each with its own `BaseDirectory` under `/var/lib/fleet/agents/{id}/copilot` and its own stdio CLI child process.
-- **`fleet-broker`** has its own UID. It is the only reader of the encrypted credentials and serves loopback MCP and gRPC.
+- **`capybarad`** contains the gateway, orchestrator, scheduler, policy engine, memory service and channel adapters. It hosts one `CopilotClient` per agent, each with its own `BaseDirectory` under `/var/lib/capybara/agents/{id}/copilot` and its own stdio CLI child process.
+- **`capybara-broker`** has its own UID. It is the only reader of the encrypted credentials and serves loopback MCP and gRPC.
 - **`aspire-dashboard`** and **`ntfy`** run as Quadlet containers bound to localhost.
 - **Per-agent sandboxes**: Podman or `srt` wrappers for shell and browser execution.
 
-Phase 2 splits each agent into its own unit (`fleet-agent@{id}.service`) with its own UID. The orchestrator talks to it over gRPC on a Unix domain socket using the same contracts.
+Phase 2 splits each agent into its own unit (`capybara-agent@{id}.service`) with its own UID. The orchestrator talks to it over gRPC on a Unix domain socket using the same contracts.
 
 **Sandboxing the built-in shell.** Two seams are available, and the second is an untested inference. Option (a): replace the built-in shell and edit tools with custom tools (`OverridesBuiltInTool`) that execute through `srt` or `podman exec`. Option (b): launch the CLI runtime itself under a wrapper via `RuntimeConnection.ForStdio(path, args)` or `CopilotCliBinaryPath`, so every native tool inherits the sandbox. Option (b) is stronger and cheaper to maintain, and the first spike should validate it ([dotnet README](https://raw.githubusercontent.com/github/copilot-sdk/main/dotnet/README.md)).
 
@@ -399,18 +399,18 @@ Phase 2 splits each agent into its own unit (`fleet-agent@{id}.service`) with it
 
 | Project | Responsibility | Key dependencies |
 |---|---|---|
-| `Fleet.Contracts` | A2A-shaped records: `AgentCard`, `FleetTask` (A2A state enum), `FleetMessage` / `Part` / `Artifact`, `Envelope`, `ApprovalRequest`, `Grant`, `RoutineSpec` | none |
-| `Fleet.Runtime.Copilot` | `AgentRuntime` wraps `CopilotClient`: Empty mode, session id scheme, resume with full re-registration, supervisor, inbox pump, usage capture | `GitHub.Copilot.SDK` (pinned) |
-| `Fleet.Orchestration` | Agent registry, `list_agents`, `ask_agent`, `send_message`, `delegate_task`, envelope enforcement, task table, fleet thread | `System.Threading.Channels`, optionally `Microsoft.Agents.AI` |
-| `Fleet.Policy` | Rules engine, taint tracker, approval service (nonce + args hash + TTL), reviewer agent, kill switch, `ManagedSettings` generation | — |
-| `Fleet.Memory` | Wiki store (git via LibGit2Sharp), index ranker, tools, steward and consolidation job, FTS5 | `Microsoft.Data.Sqlite` |
-| `Fleet.Connections` | Broker, OAuth flows, token vault, MCP servers per connection, grant enforcement, token health | `ModelContextProtocol` 2.x, MSAL, Google APIs |
-| `Fleet.Scheduling` | Heartbeat, cron and event triggers, jitter, catch-up, cost projection | Quartz.NET |
-| `Fleet.Gateway` | Minimal API, SignalR hub, Tailscale identity middleware, PWA host, approval endpoints | ASP.NET Core |
-| `Fleet.Channels.*` | ntfy and Telegram adapters (and Slack Socket Mode if wanted) | — |
-| `Fleet.Hosting` | `IAgentHost`: `SystemdHost`, `PodmanHost`, later `AcaSandboxHost` | — |
-| `Fleet.Tui` | Spectre.Console client | — |
-| `Fleet.AppHost` | Aspire AppHost for **dev only** | Aspire |
+| `Capybara.Contracts` | A2A-shaped records: `AgentCard`, `FleetTask` (A2A state enum), `FleetMessage` / `Part` / `Artifact`, `Envelope`, `ApprovalRequest`, `Grant`, `RoutineSpec` | none |
+| `Capybara.Runtime.Copilot` | `AgentRuntime` wraps `CopilotClient`: Empty mode, session id scheme, resume with full re-registration, supervisor, inbox pump, usage capture | `GitHub.Copilot.SDK` (pinned) |
+| `Capybara.Orchestration` | Agent registry, `list_agents`, `ask_agent`, `send_message`, `delegate_task`, envelope enforcement, task table, fleet thread | `System.Threading.Channels`, optionally `Microsoft.Agents.AI` |
+| `Capybara.Policy` | Rules engine, taint tracker, approval service (nonce + args hash + TTL), reviewer agent, kill switch, `ManagedSettings` generation | — |
+| `Capybara.Memory` | Wiki store (git via LibGit2Sharp), index ranker, tools, steward and consolidation job, FTS5 | `Microsoft.Data.Sqlite` |
+| `Capybara.Connections` | Broker, OAuth flows, token vault, MCP servers per connection, grant enforcement, token health | `ModelContextProtocol` 2.x, MSAL, Google APIs |
+| `Capybara.Scheduling` | Heartbeat, cron and event triggers, jitter, catch-up, cost projection | Quartz.NET |
+| `Capybara.Gateway` | Minimal API, SignalR hub, Tailscale identity middleware, PWA host, approval endpoints | ASP.NET Core |
+| `Capybara.Channels.*` | ntfy and Telegram adapters (and Slack Socket Mode if wanted) | — |
+| `Capybara.Hosting` | `IAgentHost`: `SystemdHost`, `PodmanHost`, later `AcaSandboxHost` | — |
+| `Capybara.Tui` | Spectre.Console client | — |
+| `Capybara.AppHost` | Aspire AppHost for **dev only** | Aspire |
 
 **Where Microsoft Agent Framework helps, and where it doesn't:**
 

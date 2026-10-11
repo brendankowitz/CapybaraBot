@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <UsePolicyTestKit>true</UsePolicyTestKit>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Capybara.Broker\Capybara.Broker.csproj" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+  </ItemGroup>
+</Project>

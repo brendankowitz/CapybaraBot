@@ -1,0 +1,99 @@
+# capybarad: hardened systemd unit (FR-HST-02).
+# MemoryDenyWriteExecute is intentionally NOT set: the .NET JIT and the Copilot CLI's Node runtime need W^X pages.
+[Unit]
+Description=Capybara agent fleet gateway (capybarad)
+# The broker must be up first: agents with broker tools fail their start-up self-test (and are paused) without it.
+After=network-online.target tailscaled.service capybara-broker.service
+Wants=network-online.target capybara-broker.service
+
+[Service]
+# Type=notify: capybarad calls AddSystemd() and reports readiness once every hosted service has started.
+Type=notify
+NotifyAccess=main
+User=capybara
+Group=capybara
+ExecStart=/opt/capybara/capybarad
+WorkingDirectory=/opt/capybara
+Environment=DOTNET_ENVIRONMENT=Production
+Environment=Capybara__ConfigRoot=/etc/capybara
+Environment=Capybara__StateRoot=/var/lib/capybara
+Restart=on-failure
+RestartSec=5s
+
+# Resource limits for the gateway and the Copilot CLI children it spawns (NFR-05); measure on the target mini-PC and tune.
+MemoryMax=2G
+CPUQuota=200%
+
+# Network: loopback and the tailnet only. systemd filters by IP, not DNS name, so per-agent domain egress is enforced by srt
+# (FR-SAF-07). Public endpoints capybarad itself must reach (GitHub Copilot, Telegram, ntfy, Google, Microsoft) are added by the
+# operator in capybarad.service.d/egress.conf; see deploy/systemd/capybarad.egress.sample.conf.
+IPAddressDeny=any
+IPAddressAllow=localhost
+IPAddressAllow=100.64.0.0/10
+IPAddressAllow=fd7a:115c:a1e0::/48
+
+# Secrets are encrypted credentials, never env vars or config files (FR-HST-03): the Copilot PAT and the shared broker API key.
+LoadCredentialEncrypted=github-token:/etc/capybara/credentials/github-token.cred
+LoadCredentialEncrypted=broker-api-key:/etc/capybara/credentials/broker-api-key.cred
+# Optional channels; add only the ones configured under Capybara:Channels (a missing file fails the unit).
+#LoadCredentialEncrypted=telegram-bot-token:/etc/capybara/credentials/telegram-bot-token.cred
+#LoadCredentialEncrypted=webpush-vapid-private-key:/etc/capybara/credentials/webpush-vapid-private-key.cred
+# ntfy access token: the name is whatever Capybara:Channels:Ntfy:AccessTokenCredential says.
+#LoadCredentialEncrypted=ntfy-access-token:/etc/capybara/credentials/ntfy-access-token.cred
+# Webhook HMAC secrets: one per Capybara:Events:Sources:{name}, named by its SecretCredential (a source without one is refused).
+#LoadCredentialEncrypted=events-github-secret:/etc/capybara/credentials/events-github-secret.cred
+# Per-agent secrets the sessions resolve by name (FR-AGT-10): one line per name used in agent.yaml, credential name = that name.
+#   BYOK provider key  -> provider.apiKeySecret        e.g. LoadCredentialEncrypted=openai-key:/etc/capybara/credentials/openai-key.cred
+#   http MCP bearer    -> mcpServers[].tokenSecret      e.g. LoadCredentialEncrypted=mcp-docs-token:/etc/capybara/credentials/mcp-docs-token.cred
+# Names must match [a-z0-9_.-]+. A session whose secret is missing fails to build and the agent's self-test pauses it.
+
+StateDirectory=capybara
+StateDirectoryMode=0700
+ConfigurationDirectory=capybara
+# Group-readable so capybara-broker (SupplementaryGroups=capybara) can read agents/*/agent.yaml for its grants.
+ConfigurationDirectoryMode=0750
+# capybarad is the single writer of the config tree: approved proposals and lifecycle operations (create, archive, delete) are
+# validated, written and git-committed by CapybaraConfigurationHost (FR-AGT-06/07). The encrypted credentials stay read-only.
+# Agents never see /etc/capybara: srt denies it to every sandbox.
+ReadWritePaths=/etc/capybara
+ReadOnlyPaths=/etc/capybara/credentials
+ReadWritePaths=/var/lib/capybara
+# Only needed when the in-process nightly backup writes archives here (see deploy/README.md); "-" ignores a missing directory.
+ReadWritePaths=-/var/backups/capybara
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+# 0027, not 0077: files capybarad writes into /etc/capybara must stay group-readable for capybara-broker (the config host also
+# sets 0750/0640 explicitly). State stays private because StateDirectoryMode=0700 keeps the group out of /var/lib/capybara.
+UMask=0027
+
+# capybarad launches each agent's Copilot CLI under srt, which sandboxes with bubblewrap (FR-HST-03). bwrap builds its sandbox from
+# unprivileged user/mount/pid/net/ipc/uts namespaces, mounts a fresh /proc, and calls mount, pivot_root, capset and friends. So, unlike
+# the broker and the backup job, this unit must not use RestrictNamespaces=yes, must allow @mount (not in @system-service), and must
+# leave /proc unmasked (ProtectProc/ProcSubset/ProtectKernelTunables overmount /proc and make bwrap's own proc mount fail). The srt
+# sandbox then provides the per-agent isolation. Verify on a real host: `sudo -u capybara srt --settings <file> -- true`.
+# AF_NETLINK: bwrap --unshare-net brings up loopback in the new net namespace over a NETLINK_ROUTE socket. Only capset and pivot_root are
+# re-allowed from @privileged (the rest of bwrap's unprivileged user-namespace path needs nothing else); add more only if the host test above fails.
+RestrictNamespaces=user mnt pid net ipc uts
+SystemCallFilter=@system-service @mount
+SystemCallFilter=~@privileged @resources
+SystemCallFilter=capset pivot_root
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

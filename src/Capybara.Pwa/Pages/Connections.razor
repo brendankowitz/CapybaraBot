@@ -1,0 +1,51 @@
+@page "/connections"
+@inherits CapybaraPage
+@inject IJSRuntime Js
+
+<h1>Connections</h1>
+<ErrorBanner Message="@Error" />
+<p class="muted">Credential health from the broker. Enabling or disabling a connection is a desktop-only action (FR-CON-07).</p>
+@if (_items is null)
+{
+    <p>Loading…</p>
+}
+else
+{
+    <table class="connections">
+        <thead><tr><th>Connection</th><th>Kind</th><th>Health</th><th>Expires</th><th></th></tr></thead>
+        <tbody>
+        @foreach (var c in _items)
+        {
+            <tr @key="c.Id">
+                <th scope="row">@c.DisplayName</th>
+                <td>@c.Kind</td>
+                <td class="@HealthClass(c)">@(c.Health?.Status ?? "unknown")@(c.Health?.Detail is { Length: > 0 } detail ? " - " + detail : string.Empty)</td>
+                <td>@(c.Health?.ExpiresAt is { } at ? at.ToLocalTime().ToString("d") : "-")</td>
+                <td><button type="button" disabled="@(!_desktop)" @onclick="() => SetEnabledAsync(c, !c.Enabled)">@(c.Enabled ? "Disable" : "Enable")</button></td>
+            </tr>
+        }
+        </tbody>
+    </table>
+}
+
+@code {
+    private IReadOnlyList<ConnectionDto>? _items;
+    private bool _desktop;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _desktop = await Js.InvokeAsync<bool>("capybaraDevice.isDesktop");
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync() => _items = await TryAsync(() => Api.GetConnectionsAsync()) ?? _items;
+
+    private static string HealthClass(ConnectionDto c) => c.Health?.Status is "expired" ? "error" : c.Health?.Status is "expiring" ? "warning" : string.Empty;
+
+    private async Task SetEnabledAsync(ConnectionDto connection, bool enabled)
+    {
+        ClearError();
+        await TryAsync(() => Api.SetConnectionEnabledAsync(connection.Id, enabled));
+        await LoadAsync();
+    }
+}

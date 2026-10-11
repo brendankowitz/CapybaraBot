@@ -1,0 +1,59 @@
+@page "/kill"
+@inherits CapybaraPage
+@inject CapybaraRealtimeService Realtime
+@inject IJSRuntime Js
+@implements IDisposable
+
+<h1>Kill switch</h1>
+<ErrorBanner Message="@Error" />
+<p class="@(_engaged ? "error" : string.Empty)">@_status</p>
+<input @bind="_reason" placeholder="Reason" />
+<button type="button" class="danger" @onclick="EngageAsync">Engage from this device</button>
+<button type="button" disabled="@(!_desktop || !_engaged)" @onclick="ReleaseAsync">Release (desktop only)</button>
+@if (!_desktop) { <p class="muted">Release is only available from a desktop device.</p> }
+
+@code {
+    private string _status = string.Empty;
+    private string _reason = "manual";
+    private bool _desktop;
+    private bool _engaged;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _desktop = await Js.InvokeAsync<bool>("capybaraDevice.isDesktop");
+        Realtime.KillSwitchChanged += OnKillSwitchChanged;
+        await LoadAsync();
+        await Realtime.TryStartAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        if (await TryAsync(() => Api.GetKillSwitchAsync()) is { } state)
+        {
+            _engaged = state.IsEngaged;
+            _status = state.IsEngaged ? $"Engaged: {state.Reason}" : "Released";
+        }
+    }
+
+    private async Task EngageAsync()
+    {
+        ClearError();
+        await TryAsync(() => Api.EngageKillSwitchAsync(_reason));
+        await LoadAsync();
+    }
+
+    private async Task ReleaseAsync()
+    {
+        ClearError();
+        await TryAsync(() => Api.ReleaseKillSwitchAsync());
+        await LoadAsync();
+    }
+
+    private void OnKillSwitchChanged(bool engaged) => _ = InvokeAsync(async () =>
+    {
+        await LoadAsync();
+        StateHasChanged();
+    });
+
+    public void Dispose() => Realtime.KillSwitchChanged -= OnKillSwitchChanged;
+}
